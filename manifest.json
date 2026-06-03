@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-copilot-agent",
+  "name": "Copilot Agent (Spike)",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Private development spike: an Obsidian desktop plugin embedding a GitHub Copilot SDK-powered AI agent.",
+  "author": "Chris Krawczyk",
+  "isDesktopOnly": true
+}

@@ -18,6 +18,9 @@ build/
 *.swp
 *.swo
 
+# Phase 1 dev token (NEVER commit)
+src/dev-token.local.ts
+
 # OS
 .DS_Store
 Thumbs.db
