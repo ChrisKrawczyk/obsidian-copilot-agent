@@ -62,7 +62,7 @@ A user (the work-unit author) installs the plugin manually on Obsidian desktop, 
 
 ## Phase Status
 
-- [ ] **Phase 1: SDK Subprocess Smoke Test + Permission-Callback Verification** — Prove `@github/copilot-sdk` can be loaded, a session opened, and `onPermissionRequest` fires for both custom and built-in tool calls from inside an Obsidian plugin process; gate the rest of the work on success.
+- [x] **Phase 1: SDK Subprocess Smoke Test + Permission-Callback Verification** — Prove `@github/copilot-sdk` can be loaded, a session opened, and `onPermissionRequest` fires for both custom and built-in tool calls from inside an Obsidian plugin process; gate the rest of the work on success.
 - [ ] **Phase 2: Plugin Scaffold, Chat View Shell, and Permission Pipeline** — Establish the build pipeline, plugin manifest, settings infrastructure, right-sidebar `ItemView`, a non-streaming end-to-end message round-trip against a hardcoded token, and a permission-pipeline skeleton that defaults to deny (so freeform chat is never exposed with built-in tools un-gated).
 - [ ] **Phase 3: Device Flow OAuth, Token Persistence, and "Do Not Persist" Mode** — Replace the hardcoded token with a "Connect to GitHub" Device Flow; persist the resulting `gho_` token (or hold it in memory only when "do not persist" is enabled); handle reconnect.
 - [ ] **Phase 4: Streaming Responses** — Wire the SDK's `assistant.message_delta` events into the chat view so users see tokens as they are produced.

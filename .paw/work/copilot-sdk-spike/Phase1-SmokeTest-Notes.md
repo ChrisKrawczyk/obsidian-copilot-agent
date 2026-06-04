@@ -77,13 +77,37 @@ The SDK exports MCP-related types directly:
 | Obsidian app version                               | _(pending)_                  |
 | `process.versions.node` reported                   | _(pending)_                  |
 | `process.versions.electron` reported               | _(pending)_                  |
-| Plugin loads with no console errors                | _(pending)_                  |
-| Notice rendered with model response                | _(pending)_                  |
-| `hello` round-trip text contained "hello"          | _(pending)_                  |
-| `onPermissionRequest` fired for custom `echo` tool | _(pending; record `kind`)_   |
-| `onPermissionRequest` fired for built-in `shell`   | _(pending; record `kind`)_   |
-| Child `@github/copilot` process cleaned up         | _(pending; check Task Mgr)_  |
-| Any other anomalies / stack traces                 | _(pending)_                  |
+| Plugin loads with no console errors                | ✅ Loaded clean. Standard Electron WebGL warnings only (unrelated). |
+| Notice rendered with model response                | ✅ Rendered (see JSON below).                                       |
+| `hello` round-trip text contained "hello"          | ✅ Response: `"hello"` (lowercase, single word).                    |
+| `onPermissionRequest` fired for custom `echo` tool | ✅ `kind: "custom-tool"`, `toolName: "echo"`.                       |
+| `onPermissionRequest` fired for built-in `shell`   | ✅ **`kind: "shell"`, `toolName: undefined`** — gate confirmed.     |
+| Child `@github/copilot` process cleaned up         | ✅ `client.dispose()` ran; no orphaned `copilot.exe` after run.     |
+| Any other anomalies / stack traces                 | None after the iteration documented in §5.                          |
+
+### 3.1 Final smoke-test JSON (run that passed)
+
+```json
+{
+  "nodeVersion": "22.22.1",
+  "electronVersion": "39.8.3",
+  "sdkVersion": "1.0.0",
+  "pingOk": true,
+  "helloRoundTripOk": true,
+  "helloResponse": "hello",
+  "customToolPermissionFired": true,
+  "customToolKindReceived": "custom-tool",
+  "builtinPermissionFired": true,
+  "builtinKindReceived": "shell",
+  "errors": [],
+  "permissionLog": [
+    { "kind": "custom-tool", "toolName": "echo" },
+    { "kind": "shell",       "toolName": null    }
+  ]
+}
+```
+
+Selected model (auto-picked from 22 entitled models): **`gpt-5.5`** (preferred `gpt-4.1` not in entitlement list).
 
 ## 4. How the user runs the smoke test
 
@@ -103,13 +127,49 @@ The SDK exports MCP-related types directly:
 
 8. **Verify cleanup**: after the Notice fades, open Task Manager → Details, filter by `copilot` — confirm no orphaned child processes from the smoke test remain.
 
-## 5. Anomalies / blockers encountered
+## 5. Anomalies / blockers encountered (and how they were resolved)
 
-_(populate during the manual run)_
+The first attempts produced three failures; each was triaged and fixed within Phase 1. The final run passed cleanly. Each finding has design implications recorded for Phase 2+.
+
+### 5.1 SDK could not auto-discover the CLI (`Could not find @github/copilot package`)
+
+- **Cause**: esbuild bundles `main.js` into a single file with no sibling `node_modules`. The SDK's `getBundledCliPath()` walks `require.resolve.paths("@github/copilot")` from the bundled file's location, and finds nothing.
+- **Fix**: pass `connection: { kind: "stdio", path: <abs-path-to-CLI> }` to `CopilotClient`.
+- **Distribution implication for v0.1+**: the plugin must ship the CLI binary alongside `main.js`. Pre-v0.1, document this; in Phase 2's bootstrap module we'll resolve the CLI path relative to the plugin directory (via `app.vault.adapter.getResourcePath()` or Obsidian's `manifest.dir`).
+
+### 5.2 Obsidian.exe rejects `ELECTRON_RUN_AS_NODE` (CRITICAL — affects all v0.1+)
+
+- **Cause**: when `cliPath` points at the JS entry (`@github/copilot/index.js`), the SDK spawns it via `process.execPath`, expecting a Node interpreter. In Obsidian's renderer that's `Obsidian.exe`, and Obsidian has fused out `ELECTRON_RUN_AS_NODE`. The first attempt produced this child stdout: _"Command line interface is not enabled. Please turn it on in Settings > General > Advanced."_ — which is **Obsidian's** message, not the CLI's. The child exited with code 0 and the SDK reported "CLI server exited unexpectedly."
+- **Fix**: point `cliPath` at the **standalone Single-Executable App** shipped in the platform peer package — `@github/copilot-win32-x64/copilot.exe` (148 MB, no Node interpreter required). The SDK's spawn logic detects the non-`.js` extension and spawns the binary directly without using `process.execPath`. **`ELECTRON_RUN_AS_NODE` is no longer set.**
+- **Distribution implications for v0.1+**:
+  - The plugin must ship platform-specific binaries: `copilot.exe` (win32-x64) ~149 MB, plus equivalents for other platforms when we later cross-platform. Per `manifest.json` `isDesktopOnly: true` this is acceptable but increases plugin payload substantially. A future option is downloading the platform peer at install/first-run time — but that's out of scope for the v0.1 dev spike.
+  - Phase 2's CopilotSdk module **must** resolve the CLI path to the SEA, not the JS entry. Helper proposed for Phase 2: `resolveCliBinaryPath()` that picks `copilot.exe` / `copilot` / `copilot-darwin-arm64` based on `process.platform` + `process.arch`.
+  - Plan amendment recorded for Phase 2 / Phase 6 (see §7 below).
+
+### 5.3 Node-builtin dynamic imports blocked by CORS in renderer
+
+- **Cause**: `await import("node:fs/promises")` from a CJS bundle running in Obsidian's renderer is routed through the browser's fetch loader (because dynamic `import()` of unbundled specifiers stays as a native dynamic import). Renderer fetch refuses non-`http(s)/chrome*` schemes.
+- **Fix**: use `(window as any).require(...)` for Node builtins (synchronous CJS require). Obsidian exposes the Node `require` on `window` for desktop plugins.
+- **Implication for Phase 2+**: house this in a small `nodeRequire()` helper (or factor into a vault FS adapter directly). Static `import` from `@github/copilot-sdk` works fine because esbuild bundles it.
+
+### 5.4 Default model `gpt-4o-mini` not in entitlement list
+
+- **Cause**: my account's entitled model list does not include `gpt-4o-mini`.
+- **Fix**: discover models via `client.listModels()` at session-creation time and pick the first reasonable match (preferring `gpt-4.1` → `gpt-4o` → any `gpt-*` → first available). Final picked: `gpt-5.5`.
+- **Implication for Phase 2+**: the bootstrap should expose `listModels()` to the chat panel UI so users can pick — and persist their selection in plugin settings.
 
 ## 6. Decision
 
-- [ ] PASS — onPermissionRequest fires for both custom and built-in tool calls; round-trip succeeds; Phase 2 unblocked.
-- [ ] BLOCK — record blocker(s) below and escalate to the work-unit author before proceeding to Phase 2.
+- [x] **PASS** — onPermissionRequest fires for both custom (`kind: "custom-tool"`) and built-in (`kind: "shell"`) tool calls; round-trip and tool execution succeed; Phase 2 unblocked.
+- [ ] BLOCK
 
-_Blocker notes:_ _(populate if applicable)_
+## 7. Plan amendments to fold into ImplementationPlan.md
+
+Track these so paw-impl-review and Phase 2 planning don't lose them:
+
+1. **Phase 2** — `CopilotSdk` module must resolve the CLI path to the SEA binary (`@github/copilot-{win32-x64,darwin-arm64,...}/copilot[.exe]`), not the JS entry. Add `resolveCliBinaryPath()` helper.
+2. **Phase 2** — wrap `client.listModels()` in a small selection helper used by the chat-panel UI (Phase 4).
+3. **Phase 6** — leverage `ToolSet` + `BuiltInTools.Isolated` as layer-1 control alongside the permission gate (already noted in §1.3).
+4. **Phase 8** — replace planned manual JSON-RPC MCP bridge with the SDK's native `MCPServerConfig` + `ToolSet.addMcp` (already noted in §1.4).
+5. **Phase 9** — `ResumeSessionConfig` is exported and supported (already noted in §1.5).
+6. **Distribution** — document that v0.1 ships the per-platform SEA binary alongside `main.js`; this materially increases plugin payload. Out-of-scope alternatives (download-on-first-run) deferred.

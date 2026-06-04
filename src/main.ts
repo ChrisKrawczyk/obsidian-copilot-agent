@@ -23,6 +23,89 @@ export default class CopilotAgentPlugin extends Plugin {
       name: "Copilot Agent: SDK smoke test",
       callback: () => this.runSmokeTest(),
     });
+    this.addCommand({
+      id: "copilot-agent-spawn-cli-direct",
+      name: "Copilot Agent: Spawn CLI directly (diagnostic)",
+      callback: () => this.spawnCliDirect(),
+    });
+  }
+
+  private async spawnCliDirect(): Promise<void> {
+    console.group("[copilot-agent] Direct CLI spawn diagnostic");
+    try {
+      const req = (window as unknown as { require: NodeRequire }).require;
+      const cp = req("node:child_process") as typeof import("node:child_process");
+      const cliPath =
+        "C:\\Repos\\obsidian-copilot-agent\\node_modules\\@github\\copilot-win32-x64\\copilot.exe";
+      const args = [
+        "--headless",
+        "--no-auto-update",
+        "--stdio",
+        "--auth-token-env",
+        "COPILOT_SDK_AUTH_TOKEN",
+        "--no-auto-login",
+        "--log-level",
+        "debug",
+      ];
+      const env = {
+        ...process.env,
+        COPILOT_SDK_AUTH_TOKEN: DEV_TOKEN,
+      };
+      console.log("cliPath:", cliPath);
+      console.log("args:", args);
+      const child = cp.spawn(cliPath, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env,
+        windowsHide: true,
+      });
+      console.log("spawned PID:", child.pid);
+      let stdout = "";
+      let stderr = "";
+      child.stdout!.on("data", (d: Buffer) => {
+        const s = d.toString();
+        stdout += s;
+        console.log("[child stdout]", JSON.stringify(s));
+      });
+      child.stderr!.on("data", (d: Buffer) => {
+        const s = d.toString();
+        stderr += s;
+        console.log("[child stderr]", JSON.stringify(s));
+      });
+      child.on("error", (e: Error) => console.error("[child error]", e));
+      child.on("exit", (code: number | null, signal: string | null) => {
+        console.log(
+          "[child exit] code=",
+          code,
+          "signal=",
+          signal,
+          "stdoutLen=",
+          stdout.length,
+          "stderrLen=",
+          stderr.length,
+        );
+        new Notice(
+          `CLI exit code=${code} signal=${signal}\nstdout=${stdout.length}b stderr=${stderr.length}b`,
+          15000,
+        );
+      });
+      // Hold stdin open for 6s, then close
+      setTimeout(() => {
+        console.log("[diag] 3s tick, child alive?", child.exitCode === null);
+      }, 3000);
+      setTimeout(() => {
+        console.log("[diag] 6s tick, closing stdin");
+        try {
+          child.stdin!.end();
+        } catch (e) {
+          console.warn("stdin end failed", e);
+        }
+      }, 6000);
+    } catch (e) {
+      console.error("Direct spawn failed", e);
+      new Notice(`Direct spawn failed: ${e}`, 10000);
+    } finally {
+      console.groupEnd();
+    }
   }
 
   private async runSmokeTest(): Promise<void> {
@@ -55,18 +138,23 @@ export default class CopilotAgentPlugin extends Plugin {
     try {
       sdkModule = await import("@github/copilot-sdk");
       try {
-        const fs = await import("node:fs/promises");
-        const path = await import("node:path");
-        const url = await import("node:url");
-        const sdkEntry = url.fileURLToPath(
-          new URL("@github/copilot-sdk", import.meta.url),
+        // Use require() (synchronous CJS) for node builtins. Dynamic
+        // import("node:fs/promises") in an Electron renderer is routed
+        // through the browser fetch loader and gets blocked by CORS.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const req = (window as unknown as { require: NodeRequire }).require;
+        const fs = req("node:fs") as typeof import("node:fs");
+        const path = req("node:path") as typeof import("node:path");
+        const sdkPkgPath = path.join(
+          "C:\\Repos\\obsidian-copilot-agent\\node_modules\\@github\\copilot-sdk",
+          "package.json",
         );
-        const sdkPkgPath = path.join(path.dirname(sdkEntry), "..", "package.json");
-        const raw = await fs.readFile(sdkPkgPath, "utf-8");
+        const raw = fs.readFileSync(sdkPkgPath, "utf-8");
         const parsed = JSON.parse(raw) as { version?: string };
         if (parsed.version) obs.sdkVersion = parsed.version;
-      } catch {
+      } catch (e) {
         obs.sdkVersion = "(version-not-readable)";
+        console.warn("[copilot-agent] SDK version detect failed:", e);
       }
     } catch (err) {
       const e = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
@@ -111,11 +199,43 @@ export default class CopilotAgentPlugin extends Plugin {
       return { kind: "approve-once" };
     };
 
+    // Path to the standalone Copilot CLI binary. Obsidian.exe has fused
+    // out ELECTRON_RUN_AS_NODE, so we cannot use it as a Node interpreter
+    // for the .js entry. The npm package @github/copilot ships a
+    // platform-specific peer (@github/copilot-win32-x64) containing a SEA
+    // (single executable app) that runs without an external Node. SDK
+    // detects the .exe extension and spawns it directly.
+    // SPIKE-ONLY: hard-coded to dev install. Pre-v0.1, ship the platform
+    // binary alongside the plugin and resolve relative to manifest.json.
+    const COPILOT_CLI_PATH =
+      "C:\\Repos\\obsidian-copilot-agent\\node_modules\\@github\\copilot-win32-x64\\copilot.exe";
+
+    console.log("[copilot-agent] Using CLI path:", COPILOT_CLI_PATH);
+
+    // Capture process.stderr.write so the SDK's `[CLI subprocess]` lines
+    // (which it writes via process.stderr.write) reach our console. In an
+    // Electron renderer process.stderr.write goes nowhere visible.
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    const capturedStderr: string[] = [];
+    (process.stderr as unknown as { write: typeof process.stderr.write }).write =
+      ((chunk: unknown, ...rest: unknown[]) => {
+        try {
+          const s = typeof chunk === "string" ? chunk : String(chunk);
+          capturedStderr.push(s);
+          console.log("[stderr]", s.replace(/\n$/, ""));
+        } catch {
+          /* ignore */
+        }
+        return originalStderrWrite(chunk as never, ...(rest as never[]));
+      }) as typeof process.stderr.write;
+
     let client: SmokeClient;
     try {
       client = new CopilotClient({
         gitHubToken: DEV_TOKEN,
         useLoggedInUser: false,
+        connection: { kind: "stdio", path: COPILOT_CLI_PATH },
+        logLevel: "debug",
       });
       if (typeof client.start === "function") {
         await client.start();
@@ -127,8 +247,18 @@ export default class CopilotAgentPlugin extends Plugin {
     } catch (err) {
       const e = err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
       obs.errors.push(`Client init/ping failed: ${e}`);
+      // Wait a tick so any pending [stderr] writes from the dying child are
+      // captured before we report.
+      await new Promise((r) => setTimeout(r, 200));
+      const stderrBlob = capturedStderr.join("");
+      if (stderrBlob) {
+        obs.errors.push(`Captured stderr:\n${stderrBlob}`);
+      }
       console.error("Client init/ping failed", err);
+      console.error("Captured stderr was:", JSON.stringify(stderrBlob));
       this.report(obs);
+      (process.stderr as unknown as { write: typeof process.stderr.write }).write =
+        originalStderrWrite;
       console.groupEnd();
       return;
     }
@@ -149,8 +279,37 @@ export default class CopilotAgentPlugin extends Plugin {
         tools.push(echoTool);
       }
 
+      // Discover available models. The model id we pass to createSession
+      // must match one the user's GitHub account is entitled to.
+      let pickedModel = "gpt-4.1";
+      try {
+        const listFn = (client as unknown as { listModels?: () => Promise<unknown[]> }).listModels;
+        if (typeof listFn === "function") {
+          const models = (await listFn.call(client)) as Array<{
+            id?: string;
+            name?: string;
+            family?: string;
+            policy?: { state?: string };
+          }>;
+          console.log("Available models:", models);
+          const enabled = models.filter(
+            (m) => !m.policy || m.policy.state === "enabled" || m.policy.state === undefined,
+          );
+          const pool = enabled.length > 0 ? enabled : models;
+          const preferred =
+            pool.find((m) => m.id === "gpt-4.1") ??
+            pool.find((m) => m.id === "gpt-4o") ??
+            pool.find((m) => (m.id ?? "").startsWith("gpt-")) ??
+            pool[0];
+          if (preferred?.id) pickedModel = preferred.id;
+          console.log("[copilot-agent] Selected model:", pickedModel);
+        }
+      } catch (e) {
+        console.warn("listModels failed; falling back to default:", e);
+      }
+
       session = await client.createSession({
-        model: "gpt-4o-mini",
+        model: pickedModel,
         onPermissionRequest,
         tools,
       });
@@ -192,8 +351,11 @@ export default class CopilotAgentPlugin extends Plugin {
       }
     }
 
+    (process.stderr as unknown as { write: typeof process.stderr.write }).write =
+      originalStderrWrite;
     this.report(obs);
     console.log("Permission log:", obs.permissionLog);
+    console.log("Captured stderr buffer length:", capturedStderr.join("").length);
     console.groupEnd();
   }
 
