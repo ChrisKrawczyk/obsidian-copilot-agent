@@ -18,8 +18,10 @@ build/
 *.swp
 *.swo
 
-# Phase 1 dev token (NEVER commit)
-src/dev-token.local.ts
+# Phase 2 dev token: file is committed as a placeholder so clean
+# checkouts build. Developers paste their real token locally and
+# run `git update-index --skip-worktree src/dev-token.local.ts`
+# to prevent accidental commits. Phase 3 (OAuth) deletes this file.
 
 # OS
 .DS_Store

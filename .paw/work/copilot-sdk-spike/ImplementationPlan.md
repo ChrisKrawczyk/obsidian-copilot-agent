@@ -63,7 +63,7 @@ A user (the work-unit author) installs the plugin manually on Obsidian desktop, 
 ## Phase Status
 
 - [x] **Phase 1: SDK Subprocess Smoke Test + Permission-Callback Verification** — Prove `@github/copilot-sdk` can be loaded, a session opened, and `onPermissionRequest` fires for both custom and built-in tool calls from inside an Obsidian plugin process; gate the rest of the work on success.
-- [ ] **Phase 2: Plugin Scaffold, Chat View Shell, and Permission Pipeline** — Establish the build pipeline, plugin manifest, settings infrastructure, right-sidebar `ItemView`, a non-streaming end-to-end message round-trip against a hardcoded token, and a permission-pipeline skeleton that defaults to deny (so freeform chat is never exposed with built-in tools un-gated).
+- [x] **Phase 2: Plugin Scaffold, Chat View Shell, and Permission Pipeline** — Establish the build pipeline, plugin manifest, settings infrastructure, right-sidebar `ItemView`, a non-streaming end-to-end message round-trip against a hardcoded token, and a permission-pipeline skeleton that defaults to deny (so freeform chat is never exposed with built-in tools un-gated).
 - [ ] **Phase 3: Device Flow OAuth, Token Persistence, and "Do Not Persist" Mode** — Replace the hardcoded token with a "Connect to GitHub" Device Flow; persist the resulting `gho_` token (or hold it in memory only when "do not persist" is enabled); handle reconnect.
 - [ ] **Phase 4: Streaming Responses** — Wire the SDK's `assistant.message_delta` events into the chat view so users see tokens as they are produced.
 - [ ] **Phase 5: Vault Read Tools and Tool-Call Rendering** — Register `read_file`, `list_files`, `search_content` for the vault scope; render tool calls (custom + built-in) as collapsible blocks in chat; verify built-in tool calls (e.g., synthetic `shell` invocation) flow through the permission pipeline.
@@ -130,7 +130,7 @@ A user (the work-unit author) installs the plugin manually on Obsidian desktop, 
 
 ---
 
-## Phase 2: Plugin Scaffold, Chat View Shell, and Permission Pipeline
+## Phase 2: Plugin Scaffold, Chat View Shell, and Permission Pipeline ✓
 
 **Objective**: Build the plugin's public surface — a right-sidebar chat panel with input and transcript — wire a non-streaming end-to-end exchange against the same hardcoded token from Phase 1, AND wire the `onPermissionRequest` callback from day one with a deny-by-default policy. This validates the SDK adapter, the chat UI shell, the rendering pipeline, and the universal-approval-gate architecture before we layer streaming, OAuth, and richer policies on top. The deny-by-default posture means freeform chat in Phase 2 cannot inadvertently invoke shell, host-fs, or any other tool — they are denied at the callback boundary until Phase 6 installs richer rules.
 
