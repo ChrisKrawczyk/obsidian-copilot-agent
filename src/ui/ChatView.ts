@@ -15,7 +15,9 @@ export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 interface ChatViewDeps {
   /** Lazily-initialised SDK adapter. The view never constructs it. */
   agent: AgentSession;
-  /** Initiation begins on plugin load; the view awaits this on first send. */
+  /** First init attempt; surfaced in the status row. Sends do NOT
+   *  await this — they call agent.sendMessage() directly, which
+   *  re-runs init() on retry after a transient failure. */
   initPromise: Promise<void>;
 }
 
