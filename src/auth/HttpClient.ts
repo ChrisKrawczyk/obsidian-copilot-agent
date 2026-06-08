@@ -1,3 +1,5 @@
+import { requestUrl } from "obsidian";
+
 /**
  * Minimal HTTP client surface used by DeviceFlow. Two implementations:
  *   - obsidianHttpClient (production): wraps Obsidian's `requestUrl`, which
@@ -8,6 +10,10 @@
  *
  * The interface is intentionally small (POST + form bodies + JSON parsing)
  * because that's all we need for GitHub's OAuth Device Flow endpoints.
+ *
+ * Note: tests never import this module — they construct their own
+ * `HttpClient` fakes — so the static `obsidian` import doesn't pollute
+ * the vitest bundle.
  */
 
 export interface HttpResponse {
@@ -34,8 +40,6 @@ export interface HttpClient {
 export function obsidianHttpClient(): HttpClient {
   return {
     async postForm(url, params, options) {
-      // Lazy import keeps `obsidian` out of the test bundle.
-      const { requestUrl } = await import("obsidian");
       const body = new URLSearchParams(params).toString();
       if (options?.signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
