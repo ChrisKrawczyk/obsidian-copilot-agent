@@ -88,18 +88,21 @@ export class ChatView extends ItemView {
 
     this.unsubState = this.state.subscribe(() => this.syncList());
 
-    // Track init progress in the status row.
+    // Track init progress in the status row. We don't gate sends on
+    // this promise — see handleSend — but we surface its outcome so
+    // the user can tell whether the runtime is reachable.
     this.initPromise
       .then(() => {
         const model = this.agent.getModel();
         this.statusEl.setText(
           model ? `Connected · ${model}` : "Connected",
         );
+        this.statusEl.removeClass("copilot-agent-status-error");
       })
       .catch((err) => {
         const msg =
           err instanceof Error ? err.message : String(err);
-        this.statusEl.setText(`Connection failed: ${msg}`);
+        this.statusEl.setText(`Connection failed: ${msg}. Send to retry.`);
         this.statusEl.addClass("copilot-agent-status-error");
       });
   }
@@ -131,7 +134,11 @@ export class ChatView extends ItemView {
     });
 
     try {
-      await this.initPromise;
+      // sendMessage() runs init() internally — and AgentSession.init()
+      // is retryable: if a previous attempt failed, the next call kicks
+      // off a fresh attempt. So we DON'T await the pinned initPromise
+      // here — that promise reflects only the first attempt and would
+      // permanently block sends after a transient startup failure.
       const reply = await this.agent.sendMessage(text);
       const denied = reply.toolCalls.filter((t) => t.outcome === "denied");
       let content = reply.content;

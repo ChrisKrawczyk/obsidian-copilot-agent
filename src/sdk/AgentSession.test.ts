@@ -299,6 +299,25 @@ describe("CopilotAgentSession", () => {
     await expect(agent.sendMessage("hi")).rejects.toThrow(/disposed/);
   });
 
+  test("dispose while init is in flight stops the runtime instead of leaking", async () => {
+    const h = makeFakeSdk();
+    // Make ping() take ~50ms so dispose() can run mid-init.
+    h.client.ping = async () => {
+      h.pingCalls += 1;
+      await new Promise((r) => setTimeout(r, 50));
+    };
+    const agent = makeAgent(h);
+    const initP = agent.init();
+    // Let init proceed past sdkLoader + start() + into the await on ping().
+    await new Promise((r) => setTimeout(r, 10));
+    const disposeP = agent.dispose();
+    const results = await Promise.allSettled([initP, disposeP]);
+    expect(results[1].status).toBe("fulfilled"); // dispose succeeded
+    // init either rejected (bailIfDisposed) or fulfilled (slipped through);
+    // either way the client must have been stopped at least once.
+    expect(h.stopCalls).toBeGreaterThanOrEqual(1);
+  });
+
   test("resetConversation swaps SDK session without restarting the client", async () => {
     const h = makeFakeSdk();
     const agent = makeAgent(h);

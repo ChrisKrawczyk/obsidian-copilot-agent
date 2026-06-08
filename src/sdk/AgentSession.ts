@@ -144,6 +144,21 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // If init is still in flight, wait briefly so it can either finish
+    // (and we then tear it down) or fail (and stay null). This closes
+    // the race where Obsidian unloads mid-init and leaves a zombie
+    // copilot.exe behind.
+    if (this.initPromise) {
+      await raceWithTimeout(
+        this.initPromise.catch(() => {
+          /* swallow — we just want to wait for resolution */
+        }),
+        STOP_TIMEOUT_MS,
+      ).catch(() => {
+        // Timed out waiting for init; fall through and tear down
+        // whatever has been assigned so far.
+      });
+    }
     const session = this.session;
     const client = this.client;
     this.session = null;
@@ -179,6 +194,7 @@ export class CopilotAgentSession implements AgentSession {
 
   private async doInit(): Promise<void> {
     const sdk = await this.sdkLoader();
+    if (this.disposed) throw new Error("AgentSession disposed during init");
     const CopilotClient = sdk.CopilotClient;
     if (!CopilotClient) {
       throw new Error("@github/copilot-sdk does not export CopilotClient");
@@ -193,27 +209,50 @@ export class CopilotAgentSession implements AgentSession {
       logLevel: this.opts.logLevel ?? "info",
     });
 
-    if (typeof client.start === "function") {
-      await client.start();
+    // From this point on we own a live client. On any post-await disposal
+    // we MUST tear it down ourselves — dispose() can't see it yet.
+    const bailIfDisposed = async (): Promise<void> => {
+      if (!this.disposed) return;
+      await safeCall(() => client.stop?.());
+      throw new Error("AgentSession disposed during init");
+    };
+
+    try {
+      if (typeof client.start === "function") {
+        await client.start();
+        await bailIfDisposed();
+      }
+      if (typeof client.ping === "function") {
+        await client.ping();
+        await bailIfDisposed();
+      }
+
+      this.client = client;
+
+      const model = await this.pickModel(client, this.opts.preferredModel);
+      await bailIfDisposed();
+      this.selectedModel = model;
+
+      const session = await client.createSession({
+        model,
+        availableTools: ["builtin:*"],
+        onPermissionRequest: (request: SdkPermissionRequest) =>
+          this.handlePermission(request),
+      });
+      if (this.disposed) {
+        await safeCall(() => session.disconnect?.());
+        await safeCall(() => client.stop?.());
+        throw new Error("AgentSession disposed during init");
+      }
+      this.session = session;
+    } catch (err) {
+      // On any failure after the client was constructed, make sure we
+      // don't leak the runtime process.
+      if (this.client !== client) {
+        await safeCall(() => client.stop?.());
+      }
+      throw err;
     }
-    if (typeof client.ping === "function") {
-      await client.ping();
-    }
-
-    this.client = client;
-
-    const model = await this.pickModel(client, this.opts.preferredModel);
-    this.selectedModel = model;
-
-    const session = await client.createSession({
-      model,
-      // Expose all built-in tools so the deny-all decider gets exercised.
-      // Phase 6 will replace decider with SafetyPolicy.
-      availableTools: ["builtin:*"],
-      onPermissionRequest: (request: SdkPermissionRequest) =>
-        this.handlePermission(request),
-    });
-    this.session = session;
   }
 
   private async pickModel(
