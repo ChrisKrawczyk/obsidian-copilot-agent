@@ -7,6 +7,19 @@
   height: 100%;
   padding: 0;
   gap: 0;
+  /* Obsidian sets user-select: none on workspace leaves so headers are
+   * draggable. Re-enable selection inside our chat view so users can
+   * copy assistant output. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.copilot-agent-chat-root *,
+.copilot-agent-messages,
+.copilot-agent-msg,
+.copilot-agent-msg-body {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .copilot-agent-header {
