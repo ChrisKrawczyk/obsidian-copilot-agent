@@ -19,6 +19,9 @@ export class DeviceFlowModal extends Modal {
   private openBtn?: HTMLButtonElement;
   /** Set when the connection succeeds, so onClose doesn't cancel. */
   private completed = false;
+  /** Set once we've seen any non-disconnected state, so an initial
+   *  `disconnected` tick from `subscribe()` can't self-close us. */
+  private hasMovedFromDisconnected = false;
 
   constructor(
     app: App,
@@ -112,6 +115,9 @@ export class DeviceFlowModal extends Modal {
   }
 
   private render(state: AuthState): void {
+    if (state.kind !== "disconnected") {
+      this.hasMovedFromDisconnected = true;
+    }
     if (state.kind === "connecting") {
       const v = state.verification;
       if (v) {
@@ -148,7 +154,11 @@ export class DeviceFlowModal extends Modal {
       // read the error.
       return;
     }
-    // disconnected — flow was cancelled.
+    // disconnected — only treat as "flow was cancelled" if we've
+    // previously seen a non-disconnected state. Otherwise this is just
+    // the initial state echoed back from subscribe() before connect()
+    // has had a chance to transition us to `connecting`.
+    if (!this.hasMovedFromDisconnected) return;
     if (!this.completed) {
       this.completed = true;
       this.close();

@@ -122,11 +122,12 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
 
   private openDeviceFlowModal(): void {
     const modal = new DeviceFlowModal(this.app, this.authController);
-    modal.open();
-    // Kick off connect AFTER the modal has subscribed so it sees the
-    // device-code event. AuthController.connect() returns the run
-    // promise; we don't await here — the modal is the UX.
+    // Kick off connect FIRST so the synchronous state gate transitions to
+    // `connecting` before the modal subscribes on open(). Otherwise the
+    // modal's first listener tick sees `disconnected` and self-closes
+    // (treating it as "user cancelled").
     void this.authController.connect();
+    modal.open();
   }
 }
 
