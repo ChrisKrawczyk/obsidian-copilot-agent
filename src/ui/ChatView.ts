@@ -60,6 +60,16 @@ export class ChatView extends ItemView {
    * `interrupted`. Cleared at the start of each new send.
    */
   private userRequestedStop = false;
+  /**
+   * Placeholder message id of the in-flight assistant turn, or undefined
+   * between turns. Captured at send time so handleStop can immediately
+   * call `interruptStreaming(id)` — that flips the message to
+   * `interrupted` and makes all subsequent `appendDelta` calls no-ops
+   * (the state layer refuses to mutate terminal messages). This is the
+   * defensive fallback the plan requires for the case where the SDK's
+   * `abort()` does not flush in-flight deltas.
+   */
+  private currentPlaceholderId?: string;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private currentAuthKind: AuthState["kind"] = "disconnected";
@@ -195,9 +205,16 @@ export class ChatView extends ItemView {
     if (this.stopping) return;
     this.stopping = true;
     this.userRequestedStop = true;
-    // Visually disable Stop so the user gets immediate feedback that
-    // their click registered. The stream loop's finally will swap the
-    // button back to Send.
+    // Immediately freeze the placeholder. This serves two purposes:
+    //   1. The user gets instant visual feedback (status flips to
+    //      `interrupted`, "(stopped)" suffix appears).
+    //   2. Any deltas the SDK emits after this point are ignored,
+    //      because ChatState.appendDelta refuses to mutate terminal
+    //      messages. We do this BEFORE awaiting cancelCurrent() so a
+    //      slow abort can't leak more text into the visible message.
+    if (this.currentPlaceholderId) {
+      this.state.interruptStreaming(this.currentPlaceholderId);
+    }
     this.sendBtnEl.disabled = true;
     try {
       await this.agent.cancelCurrent();
@@ -225,9 +242,9 @@ export class ChatView extends ItemView {
       content: "",
       status: "pending",
     });
+    this.currentPlaceholderId = placeholderId;
 
     let receivedAnyDelta = false;
-    let gotComplete = false;
     let finalContent = "";
     let finalToolCalls: import("../domain/types").ToolCall[] = [];
     let failure: unknown = null;
@@ -235,11 +252,16 @@ export class ChatView extends ItemView {
     this.setStreaming(true);
     try {
       for await (const ev of this.agent.sendMessageStreaming(text)) {
+        if (this.userRequestedStop) {
+          // Drain the iterator but don't apply any further updates.
+          // The placeholder is already frozen as `interrupted`; we
+          // just need to let the generator's `finally` clean up.
+          continue;
+        }
         if (ev.type === "delta") {
           receivedAnyDelta = true;
           this.state.appendDelta(placeholderId, ev.text);
         } else if (ev.type === "complete") {
-          gotComplete = true;
           finalContent = ev.content;
           finalToolCalls = ev.toolCalls;
         }
@@ -250,14 +272,15 @@ export class ChatView extends ItemView {
       this.setStreaming(false);
     }
 
-    // Only treat as cancelled when the user asked to stop AND the
-    // stream did not deliver a real final response. If `gotComplete`
-    // and `finalContent` are present, the model actually finished
-    // before our abort took effect — render it normally.
-    const cancelled =
-      this.userRequestedStop && (!gotComplete || finalContent.length === 0);
+    // Once the user has clicked Stop, the placeholder is already frozen
+    // as `interrupted` by handleStop(). A late `complete` event (e.g.
+    // because the model finished its final segment between our abort
+    // request and the SDK delivering it) must NOT overwrite that —
+    // the user's intent wins. Set cancelled unconditionally on stop.
+    const cancelled = this.userRequestedStop;
     this.userRequestedStop = false;
     this.stopping = false;
+    this.currentPlaceholderId = undefined;
 
     if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
