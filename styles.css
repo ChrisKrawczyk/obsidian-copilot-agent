@@ -116,3 +116,59 @@
 .copilot-agent-send-icon {
   display: none; /* reserved for future iconography */
 }
+
+/* Phase 3: Connect-CTA shown in the composer when not connected. */
+.copilot-agent-connect-cta {
+  align-self: stretch;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.copilot-agent-connect-cta:hover {
+  background: var(--interactive-accent-hover);
+}
+
+/* Phase 3: Device Flow modal layout. */
+.copilot-agent-device-flow .copilot-agent-device-intro {
+  margin: 0.25rem 0 1rem;
+  color: var(--text-muted);
+}
+.copilot-agent-device-flow .copilot-agent-device-code-row,
+.copilot-agent-device-flow .copilot-agent-device-url-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.copilot-agent-device-flow .copilot-agent-device-label {
+  flex: 0 0 7rem;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.copilot-agent-device-flow .copilot-agent-device-code {
+  font-family: var(--font-monospace);
+  font-size: 1.4rem;
+  letter-spacing: 0.1rem;
+  font-weight: 700;
+  flex: 1 1 auto;
+  user-select: all;
+}
+.copilot-agent-device-flow .copilot-agent-device-url {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  flex: 1 1 auto;
+  user-select: all;
+  word-break: break-all;
+}
+.copilot-agent-device-flow .copilot-agent-device-status {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}

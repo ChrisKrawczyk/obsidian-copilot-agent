@@ -1,5 +1,6 @@
 import type { PermissionDecider } from "../domain/PermissionDecision";
 import type { PermissionRequest } from "../domain/types";
+import { isAuthError as isAuthErrorLocal } from "../auth/isAuthError";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -19,8 +20,13 @@ export interface AssistantToolCall {
 export interface AgentSessionOptions {
   /** Resolved absolute path to the Copilot CLI single-executable binary. */
   cliPath: string;
-  /** GitHub token (gho_/ghp_). Phase 2: hardcoded; Phase 3: from AuthController. */
-  gitHubToken: string;
+  /**
+   * GitHub token (gho_/ghp_). Phase 3: optional — when omitted, init() will
+   * reject until setToken() is called by the AuthController. This lets us
+   * construct the agent at plugin load time and wire the token in once
+   * the user has authenticated.
+   */
+  gitHubToken?: string | null;
   /** COPILOT_HOME for the runtime (we point it at the plugin dir). */
   baseDirectory: string;
   /** Universal-approval-gate decider. Phase 2 = denyAll. */
@@ -29,6 +35,12 @@ export interface AgentSessionOptions {
   preferredModel?: string;
   /** Optional: forwarded to the SDK CopilotClient as logLevel. */
   logLevel?: "none" | "error" | "warning" | "info" | "debug" | "all";
+  /**
+   * Called when init() or sendMessage() fails with what looks like an
+   * auth error. Lets AuthController flip to its `error` state so the UI
+   * prompts the user to reconnect, instead of silently retrying.
+   */
+  onAuthError?: (err: unknown) => void;
 }
 
 /**
@@ -42,7 +54,22 @@ export interface AgentSession {
   sendMessage(text: string): Promise<AssistantMessage>;
   /** Reset the SDK session so model context is forgotten. */
   resetConversation(): Promise<void>;
-  /** Tear down the SDK session and stop the runtime. Idempotent. */
+  /**
+   * Swap the GitHub token. Stops the running SDK runtime so the next
+   * init() picks up the new token. Pass `null` to disconnect (init()
+   * will reject until a non-null token is set).
+   *
+   * IMPORTANT: this is non-terminal — the AgentSession can be reused
+   * after setToken(). Use `dispose()` only at plugin unload.
+   */
+  setToken(token: string | null): Promise<void>;
+  /**
+   * Force a fresh init() cycle and return the resolved model id. Used
+   * by AuthController to validate a new or persisted token.
+   */
+  reconnect(): Promise<string | undefined>;
+  /** Tear down the SDK session and stop the runtime. Idempotent.
+   *  TERMINAL — after dispose() the AgentSession cannot be reused. */
   dispose(): Promise<void>;
   /** Currently selected model id, or undefined if init hasn't run. */
   getModel(): string | undefined;
@@ -56,7 +83,14 @@ export class CopilotAgentSession implements AgentSession {
   private client: SdkClient | null = null;
   private session: SdkSession | null = null;
   private selectedModel: string | undefined;
+  /** Set once `dispose()` runs. Terminal — blocks all future init(). */
   private disposed = false;
+  /**
+   * Current OAuth token. Mutable so AuthController can rotate it via
+   * `setToken()` without rebuilding the AgentSession instance. `null`
+   * means "not connected" — init() will reject.
+   */
+  private currentToken: string | null;
   private toolCallsThisTurn: AssistantToolCall[] = [];
   private readonly sdkLoader: () => Promise<SdkModule>;
 
@@ -65,6 +99,7 @@ export class CopilotAgentSession implements AgentSession {
     sdkLoader?: () => Promise<SdkModule>,
   ) {
     this.sdkLoader = sdkLoader ?? defaultSdkLoader;
+    this.currentToken = opts.gitHubToken ?? null;
   }
 
   getModel(): string | undefined {
@@ -75,10 +110,24 @@ export class CopilotAgentSession implements AgentSession {
     if (this.disposed) {
       return Promise.reject(new Error("AgentSession disposed"));
     }
+    if (!this.currentToken) {
+      return Promise.reject(
+        new Error("AgentSession has no GitHub token. Connect first."),
+      );
+    }
     if (!this.initPromise) {
       this.initPromise = this.doInit().catch((err) => {
         // Reset so a future caller can retry with a fresh attempt.
         this.initPromise = null;
+        // Surface auth failures to AuthController so it can flip its
+        // state to `error` instead of leaving the UI on "Connecting…".
+        if (this.opts.onAuthError && isAuthErrorLocal(err)) {
+          try {
+            this.opts.onAuthError(err);
+          } catch (e) {
+            console.warn("[AgentSession] onAuthError handler threw", e);
+          }
+        }
         throw err;
       });
     }
@@ -86,7 +135,13 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   async sendMessage(text: string): Promise<AssistantMessage> {
-    await this.init();
+    try {
+      await this.init();
+    } catch (err) {
+      // init() already invoked onAuthError if applicable; rethrow so the
+      // chat view can show the failure to the user.
+      throw err;
+    }
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
     }
@@ -111,6 +166,15 @@ export class CopilotAgentSession implements AgentSession {
         content: extractText(resp) ?? "",
         toolCalls: this.toolCallsThisTurn,
       };
+    } catch (err) {
+      if (this.opts.onAuthError && isAuthErrorLocal(err)) {
+        try {
+          this.opts.onAuthError(err);
+        } catch (e) {
+          console.warn("[AgentSession] onAuthError handler threw", e);
+        }
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -144,10 +208,21 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    await this.stopRuntime();
+  }
+
+  /**
+   * Non-terminal shutdown: stop the SDK runtime and drop the session,
+   * but keep the AgentSession reusable. Used by `setToken()` so the next
+   * `init()` builds a fresh CopilotClient with the new token.
+   *
+   * Closes the dispose-during-init race the same way `dispose()` did.
+   */
+  private async stopRuntime(): Promise<void> {
     // If init is still in flight, wait briefly so it can either finish
     // (and we then tear it down) or fail (and stay null). This closes
-    // the race where Obsidian unloads mid-init and leaves a zombie
-    // copilot.exe behind.
+    // the race where Obsidian unloads — or the token rotates — mid-init
+    // and leaves a zombie copilot.exe behind.
     if (this.initPromise) {
       await raceWithTimeout(
         this.initPromise.catch(() => {
@@ -155,8 +230,7 @@ export class CopilotAgentSession implements AgentSession {
         }),
         STOP_TIMEOUT_MS,
       ).catch(() => {
-        // Timed out waiting for init; fall through and tear down
-        // whatever has been assigned so far.
+        /* timed out — fall through and tear down whatever exists */
       });
     }
     const session = this.session;
@@ -164,6 +238,7 @@ export class CopilotAgentSession implements AgentSession {
     this.session = null;
     this.client = null;
     this.initPromise = null;
+    this.selectedModel = undefined;
 
     if (session) {
       await raceWithTimeout(
@@ -190,6 +265,28 @@ export class CopilotAgentSession implements AgentSession {
     }
   }
 
+  async setToken(token: string | null): Promise<void> {
+    if (this.disposed) {
+      throw new Error("AgentSession disposed");
+    }
+    // Always tear the runtime down first so the next init() picks up
+    // the new token. If the token is unchanged we still rebuild — this
+    // keeps the lifecycle simple and matches "reconnect" semantics.
+    await this.stopRuntime();
+    this.currentToken = token;
+  }
+
+  async reconnect(): Promise<string | undefined> {
+    if (this.disposed) {
+      throw new Error("AgentSession disposed");
+    }
+    // Force a fresh attempt — even if a previous init succeeded, the
+    // caller (AuthController) wants to validate the current token.
+    await this.stopRuntime();
+    await this.init();
+    return this.selectedModel;
+  }
+
   // ---- internals ----
 
   private async doInit(): Promise<void> {
@@ -201,7 +298,7 @@ export class CopilotAgentSession implements AgentSession {
     }
 
     const client = new CopilotClient({
-      gitHubToken: this.opts.gitHubToken,
+      gitHubToken: this.currentToken ?? "",
       useLoggedInUser: false,
       mode: "empty",
       baseDirectory: this.opts.baseDirectory,

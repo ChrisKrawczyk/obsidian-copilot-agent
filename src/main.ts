@@ -1,5 +1,4 @@
 import { Notice, Plugin } from "obsidian";
-import { DEV_TOKEN } from "./dev-token.local";
 import {
   CopilotAgentSession,
   type AgentSession,
@@ -11,58 +10,122 @@ import {
 import { denyAll } from "./domain/PermissionDecision";
 import { registerChatView } from "./ui/ChatViewRegistration";
 import { CopilotAgentSettingTab } from "./settings/SettingsTab";
+import { obsidianHttpClient } from "./auth/HttpClient";
+import { TokenStore } from "./auth/TokenStore";
+import { AuthController, type AgentTokenSink } from "./auth/AuthController";
 
+/**
+ * Phase 3 wiring:
+ *   1. Build TokenStore + AuthController early (they hold no SDK state).
+ *   2. Build AgentSession with no token initially. AuthController will
+ *      push the token in once Device Flow completes (or hydrate() finds
+ *      a persisted one).
+ *   3. Forward agent auth failures back into AuthController so the UI
+ *      moves to `error` instead of silently retrying.
+ */
 export default class CopilotAgentPlugin extends Plugin {
   private agent: AgentSession | null = null;
 
   async onload(): Promise<void> {
-    console.log("[copilot-agent] Loading Phase 2 plugin");
+    console.log("[copilot-agent] Loading Phase 3 plugin");
 
-    if (!DEV_TOKEN || DEV_TOKEN.startsWith("REPLACE_WITH_")) {
-      new Notice(
-        "[Copilot Agent] Dev token not set. Edit src/dev-token.local.ts and " +
-          "rebuild. The chat view will load but sends will fail.",
-        12000,
-      );
-    }
-
-    let initPromise: Promise<void>;
+    let cliPath: string;
+    let baseDirectory: string;
     try {
-      const cliPath = resolveCliBinaryPath(this);
-      const baseDirectory = getAbsolutePluginDir(this) ?? process.cwd();
-      this.agent = new CopilotAgentSession({
-        cliPath,
-        gitHubToken: DEV_TOKEN,
-        baseDirectory,
-        decider: denyAll,
-        logLevel: "info",
-      });
-      initPromise = this.agent.init();
-      // Swallow rejection here so it doesn't surface as an unhandled
-      // promise rejection — the view re-awaits and renders the failure.
-      initPromise.catch((err) => {
-        console.error("[copilot-agent] init failed", err);
-      });
+      cliPath = resolveCliBinaryPath(this);
+      baseDirectory = getAbsolutePluginDir(this) ?? process.cwd();
     } catch (err) {
-      console.error("[copilot-agent] startup error", err);
+      console.error("[copilot-agent] CLI resolution failed", err);
       new Notice(
-        `[Copilot Agent] Startup failed: ${
+        `[Copilot Agent] CLI binary not found: ${
           err instanceof Error ? err.message : String(err)
         }`,
         12000,
       );
-      initPromise = Promise.reject(err);
-      initPromise.catch(() => {
-        /* prevent unhandled rejection */
-      });
+      return;
     }
 
-    if (!this.agent) {
-      this.agent = stubAgent(initPromise);
-    }
+    const tokenStore = new TokenStore({
+      loadData: () => this.loadData(),
+      saveData: (data) => this.saveData(data),
+    });
 
-    registerChatView(this, { agent: this.agent, initPromise });
-    this.addSettingTab(new CopilotAgentSettingTab(this.app, this));
+    // We need the AuthController reference before the agent (for
+    // onAuthError) AND vice-versa (AuthController wraps the agent
+    // token sink). Resolve by assigning post-construction.
+    let controllerRef: AuthController | null = null;
+
+    const agent = new CopilotAgentSession({
+      cliPath,
+      gitHubToken: null,
+      baseDirectory,
+      decider: denyAll,
+      logLevel: "info",
+      onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
+    });
+    this.agent = agent;
+
+    const tokenSink: AgentTokenSink = {
+      setToken: (token) => agent.setToken(token),
+      reconnect: () => agent.reconnect(),
+    };
+    const controller = new AuthController({
+      http: obsidianHttpClient(),
+      tokenStore,
+      agentTokenSink: tokenSink,
+    });
+    controllerRef = controller;
+
+    // Hydrate from disk asynchronously. We don't block onload — the
+    // chat view subscribes to the AuthController and renders whatever
+    // state arrives.
+    void (async () => {
+      try {
+        await tokenStore.load();
+        await controller.hydrate();
+      } catch (e) {
+        console.error("[copilot-agent] hydrate failed", e);
+        new Notice(
+          `[Copilot Agent] Auth hydrate failed: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          8000,
+        );
+      }
+    })();
+
+    const settingsTab = new CopilotAgentSettingTab(
+      this.app,
+      this,
+      controller,
+      tokenStore,
+    );
+    this.addSettingTab(settingsTab);
+
+    registerChatView(this, {
+      agent,
+      auth: controller,
+      openSettings: () => {
+        // Obsidian doesn't expose a typed API for "open my settings tab",
+        // but the workspace command does the right thing. Falls back to
+        // a notice if the API isn't available.
+        const setting = (this.app as unknown as {
+          setting?: {
+            open: () => void;
+            openTabById: (id: string) => void;
+          };
+        }).setting;
+        if (setting?.open && setting?.openTabById) {
+          setting.open();
+          setting.openTabById(this.manifest.id);
+        } else {
+          new Notice(
+            "Open Settings → Community plugins → Copilot Agent to connect.",
+            6000,
+          );
+        }
+      },
+    });
   }
 
   async onunload(): Promise<void> {
@@ -77,21 +140,4 @@ export default class CopilotAgentPlugin extends Plugin {
       }
     }
   }
-}
-
-function stubAgent(initPromise: Promise<void>): AgentSession {
-  return {
-    init: () => initPromise,
-    sendMessage: async () => {
-      await initPromise;
-      throw new Error("Agent not initialised");
-    },
-    resetConversation: async () => {
-      /* no-op */
-    },
-    dispose: async () => {
-      /* no-op */
-    },
-    getModel: () => undefined,
-  };
 }

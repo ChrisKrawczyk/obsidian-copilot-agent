@@ -9,39 +9,49 @@ import {
 import { ChatState } from "../domain/ChatState";
 import type { Message } from "../domain/types";
 import type { AgentSession } from "../sdk/AgentSession";
+import type { AuthController, AuthState } from "../auth/AuthController";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
 interface ChatViewDeps {
   /** Lazily-initialised SDK adapter. The view never constructs it. */
   agent: AgentSession;
-  /** First init attempt; surfaced in the status row. Sends do NOT
-   *  await this — they call agent.sendMessage() directly, which
-   *  re-runs init() on retry after a transient failure. */
-  initPromise: Promise<void>;
+  /**
+   * Auth state source. ChatView subscribes to gate the composer:
+   * sends are only allowed while state.kind === "connected".
+   */
+  auth: AuthController;
+  /**
+   * Open the settings tab. Wired from main.ts so we don't depend on
+   * Obsidian's internal `setting.openTabById`.
+   */
+  openSettings: () => void;
 }
 
 export class ChatView extends ItemView {
   private state = new ChatState();
   private agent: AgentSession;
-  private initPromise: Promise<void>;
+  private auth: AuthController;
+  private openSettings: () => void;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
   private statusEl!: HTMLElement;
-  /** Maps message id → { wrapper, body, component } so we can render
-   *  incrementally and clean up Markdown sub-Components. */
+  private connectBtnEl?: HTMLButtonElement;
   private rendered = new Map<
     string,
     { wrapperEl: HTMLElement; bodyEl: HTMLElement; component: Component; lastContent: string }
   >();
   private pending = false;
   private unsubState?: () => void;
+  private unsubAuth?: () => void;
+  private currentAuthKind: AuthState["kind"] = "disconnected";
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
     this.agent = deps.agent;
-    this.initPromise = deps.initPromise;
+    this.auth = deps.auth;
+    this.openSettings = deps.openSettings;
   }
 
   getViewType(): string {
@@ -65,7 +75,7 @@ export class ChatView extends ItemView {
     header.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
     this.statusEl = header.createDiv({
       cls: "copilot-agent-status",
-      text: "Connecting…",
+      text: "…",
     });
 
     this.listEl = root.createDiv({ cls: "copilot-agent-messages" });
@@ -88,41 +98,72 @@ export class ChatView extends ItemView {
     setIcon(this.sendBtnEl.createSpan({ cls: "copilot-agent-send-icon" }), "send");
     this.sendBtnEl.addEventListener("click", () => void this.handleSend());
 
-    this.unsubState = this.state.subscribe(() => this.syncList());
+    // "Open settings" button shown when not connected.
+    this.connectBtnEl = composer.createEl("button", {
+      cls: "copilot-agent-connect-cta",
+      text: "Open settings to connect",
+    });
+    this.connectBtnEl.addEventListener("click", () => this.openSettings());
 
-    // Track init progress in the status row. We don't gate sends on
-    // this promise — see handleSend — but we surface its outcome so
-    // the user can tell whether the runtime is reachable.
-    this.initPromise
-      .then(() => {
-        const model = this.agent.getModel();
-        this.statusEl.setText(
-          model ? `Connected · ${model}` : "Connected",
-        );
-        this.statusEl.removeClass("copilot-agent-status-error");
-      })
-      .catch((err) => {
-        const msg =
-          err instanceof Error ? err.message : String(err);
-        this.statusEl.setText(`Connection failed: ${msg}. Send to retry.`);
-        this.statusEl.addClass("copilot-agent-status-error");
-      });
+    this.unsubState = this.state.subscribe(() => this.syncList());
+    this.unsubAuth = this.auth.subscribe((s) => this.renderAuth(s));
   }
 
   async onClose(): Promise<void> {
     this.unsubState?.();
-    // Unload all per-message Markdown sub-Components so their event
-    // listeners are released.
+    this.unsubAuth?.();
     for (const r of this.rendered.values()) {
       r.component.unload();
     }
     this.rendered.clear();
   }
 
+  private renderAuth(state: AuthState): void {
+    this.currentAuthKind = state.kind;
+    const isConnected = state.kind === "connected";
+    // Composer is gated on connection. Don't disable mid-send — the
+    // send pipeline owns `pending`.
+    if (!this.pending) {
+      this.inputEl.disabled = !isConnected;
+      this.sendBtnEl.disabled = !isConnected;
+    }
+    if (this.connectBtnEl) {
+      this.connectBtnEl.style.display = isConnected ? "none" : "";
+    }
+    switch (state.kind) {
+      case "disconnected":
+        this.statusEl.setText("Not connected — open settings to sign in");
+        this.statusEl.addClass("copilot-agent-status-error");
+        break;
+      case "connecting":
+        this.statusEl.setText("Connecting to GitHub…");
+        this.statusEl.removeClass("copilot-agent-status-error");
+        break;
+      case "validating":
+        this.statusEl.setText("Validating token…");
+        this.statusEl.removeClass("copilot-agent-status-error");
+        break;
+      case "connected":
+        this.statusEl.setText(
+          state.model ? `Connected · ${state.model}` : "Connected",
+        );
+        this.statusEl.removeClass("copilot-agent-status-error");
+        break;
+      case "error":
+        this.statusEl.setText(`Auth error: ${state.message}`);
+        this.statusEl.addClass("copilot-agent-status-error");
+        break;
+    }
+  }
+
   // ---- send pipeline ----
 
   private async handleSend(): Promise<void> {
     if (this.pending) return;
+    if (this.currentAuthKind !== "connected") {
+      new Notice("Not connected. Open settings to sign in.", 5000);
+      return;
+    }
     const text = this.inputEl.value.trim();
     if (!text) return;
     this.inputEl.value = "";
@@ -136,11 +177,9 @@ export class ChatView extends ItemView {
     });
 
     try {
-      // sendMessage() runs init() internally — and AgentSession.init()
-      // is retryable: if a previous attempt failed, the next call kicks
-      // off a fresh attempt. So we DON'T await the pinned initPromise
-      // here — that promise reflects only the first attempt and would
-      // permanently block sends after a transient startup failure.
+      // agent.sendMessage() runs init() internally — and init() is
+      // retryable: if a previous attempt failed, the next call kicks
+      // off a fresh attempt.
       const reply = await this.agent.sendMessage(text);
       const denied = reply.toolCalls.filter((t) => t.outcome === "denied");
       let content = reply.content;
@@ -175,8 +214,8 @@ export class ChatView extends ItemView {
 
   private setBusy(busy: boolean): void {
     this.pending = busy;
-    this.sendBtnEl.disabled = busy;
-    this.inputEl.disabled = busy;
+    this.sendBtnEl.disabled = busy || this.currentAuthKind !== "connected";
+    this.inputEl.disabled = busy || this.currentAuthKind !== "connected";
     this.sendBtnEl.toggleClass("is-loading", busy);
   }
 

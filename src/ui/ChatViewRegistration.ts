@@ -1,16 +1,14 @@
 import { Plugin } from "obsidian";
 import { ChatView, CHAT_VIEW_TYPE } from "./ChatView";
 import type { AgentSession } from "../sdk/AgentSession";
+import type { AuthController } from "../auth/AuthController";
 
 interface ChatViewRegistrationDeps {
   agent: AgentSession;
-  initPromise: Promise<void>;
+  auth: AuthController;
+  openSettings: () => void;
 }
 
-/**
- * Wires the ChatView into the workspace, plus a ribbon icon and command.
- * Caller (main.ts) owns the AgentSession lifecycle.
- */
 export function registerChatView(
   plugin: Plugin,
   deps: ChatViewRegistrationDeps,
