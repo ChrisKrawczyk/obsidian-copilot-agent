@@ -69,6 +69,32 @@
   opacity: 0.7;
 }
 
+.copilot-agent-msg.is-streaming {
+  /* Subtle pulse to signal the message is still arriving. */
+  border-color: var(--interactive-accent);
+}
+
+.copilot-agent-msg.is-interrupted {
+  border-color: var(--text-warning, var(--text-muted));
+  opacity: 0.85;
+}
+
+.copilot-agent-msg.is-interrupted .copilot-agent-msg-body::after {
+  content: " (stopped)";
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-style: italic;
+}
+
+.copilot-agent-msg-stream {
+  /* Plain-text streaming canvas — keep the Markdown look but skip the
+     expensive Markdown re-render until the message completes. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  margin: 0;
+}
+
 .copilot-agent-msg.is-error {
   border-color: var(--text-error);
 }
@@ -106,15 +132,28 @@
 
 .copilot-agent-send {
   align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .copilot-agent-send.is-loading {
-  opacity: 0.6;
-  cursor: wait;
+  cursor: pointer;
 }
 
 .copilot-agent-send-icon {
-  display: none; /* reserved for future iconography */
+  display: inline-flex;
+  align-items: center;
+}
+.copilot-agent-send-label {
+  display: inline-block;
+}
+
+/* Stop button state — Send button morphs into a stop control while
+ * a streaming turn is in flight. */
+.copilot-agent-send.mod-warning {
+  background: var(--text-warning, var(--background-modifier-error));
+  color: var(--text-on-accent);
 }
 
 /* Phase 3: Connect-CTA shown in the composer when not connected. */

@@ -44,6 +44,15 @@ export interface AgentSessionOptions {
 }
 
 /**
+ * Normalised stream event surface consumed by the chat view. Insulates
+ * the UI from the raw SDK event shape so Phase 5 can extend this (e.g.
+ * with `tool_call`) without touching the renderer plumbing.
+ */
+export type StreamEvent =
+  | { type: "delta"; text: string }
+  | { type: "complete"; content: string; toolCalls: AssistantToolCall[] };
+
+/**
  * Public adapter surface. The rest of the codebase consumes this — the
  * concrete CopilotAgentSession encapsulates all SDK interactions.
  */
@@ -52,6 +61,22 @@ export interface AgentSession {
   init(): Promise<void>;
   /** Send a user message and await a single assistant turn. Non-streaming. */
   sendMessage(text: string): Promise<AssistantMessage>;
+  /**
+   * Streaming variant. Emits `delta` events as the SDK forwards
+   * `assistant.message_delta` chunks, then a single terminal `complete`
+   * event carrying the consolidated text and tool-call summary.
+   *
+   * Cancellation: call `cancelCurrent()` to abort. The iterator stops
+   * cleanly; whatever partial text was already yielded is left to the
+   * caller to render (Phase 4 freezes it as `interrupted`).
+   */
+  sendMessageStreaming(text: string): AsyncIterable<StreamEvent>;
+  /**
+   * Abort an in-flight `sendMessage`/`sendMessageStreaming`. Safe to
+   * call when nothing is in flight (no-op). The SDK session itself
+   * remains usable for the next turn.
+   */
+  cancelCurrent(): Promise<void>;
   /** Reset the SDK session so model context is forgotten. */
   resetConversation(): Promise<void>;
   /**
@@ -180,6 +205,200 @@ export class CopilotAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Streaming variant of {@link sendMessage}. Implementation notes:
+   *
+   * - Subscribes to `assistant.message_delta` *before* sending so we never
+   *   race the SDK and drop the first chunk.
+   * - `session.sendAndWait()` resolves once the SDK emits `session.idle`,
+   *   at which point we yield a terminal `complete` event containing the
+   *   final consolidated content (which may differ slightly from the
+   *   concatenated deltas — e.g. when the model produces tool calls
+   *   between text segments).
+   * - On `cancelCurrent()` the underlying promise typically rejects; we
+   *   translate that into a terminal `complete` with whatever text the
+   *   chat layer already accumulated and let the chat layer freeze the
+   *   message as `interrupted`.
+   * - On any non-cancel error we re-throw so the chat layer can render
+   *   the failure.
+   */
+  async *sendMessageStreaming(text: string): AsyncIterable<StreamEvent> {
+    try {
+      await this.init();
+    } catch (err) {
+      throw err;
+    }
+    if (!this.session) {
+      throw new Error("AgentSession.session missing after init");
+    }
+    const session = this.session;
+    this.toolCallsThisTurn = [];
+
+    const queue: StreamEvent[] = [];
+    let resolveWait: (() => void) | null = null;
+    /**
+     * Set to false once we yield a terminal `complete` or throw.
+     * Subsequent delta callbacks are dropped so a stray event from the
+     * SDK after settlement can't corrupt state.
+     */
+    let acceptingDeltas = true;
+    const push = (ev: StreamEvent): void => {
+      if (!acceptingDeltas && ev.type === "delta") return;
+      queue.push(ev);
+      if (resolveWait) {
+        const r = resolveWait;
+        resolveWait = null;
+        r();
+      }
+    };
+
+    // Subscribe *before* sending so the first delta isn't lost.
+    let unsubDelta: (() => void) | undefined;
+    if (typeof session.on === "function") {
+      try {
+        unsubDelta = session.on("assistant.message_delta", (event) => {
+          const delta = event?.data?.deltaContent;
+          if (typeof delta === "string" && delta.length > 0) {
+            push({ type: "delta", text: delta });
+          }
+        });
+      } catch (e) {
+        console.warn("[AgentSession] session.on subscribe failed", e);
+      }
+    }
+    const cleanupSubscription = (): void => {
+      if (unsubDelta) {
+        try {
+          unsubDelta();
+        } catch (e) {
+          console.warn("[AgentSession] unsubscribe delta failed", e);
+        }
+        unsubDelta = undefined;
+      }
+    };
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      this.cancelCurrent().catch((e) =>
+        console.warn("[AgentSession] abort on timeout failed", e),
+      );
+    }, SDK_TIMEOUT_MS);
+
+    let done = false;
+    let settled = false; // sendAndWait has resolved or rejected
+    let finalContent = "";
+    let failure: unknown = null;
+
+    const wakeup = (): void => {
+      if (resolveWait) {
+        const r = resolveWait;
+        resolveWait = null;
+        r();
+      }
+    };
+
+    // Kick off the turn but DON'T await — we need to interleave with
+    // the queue draining loop below.
+    session
+      .sendAndWait(text)
+      .then(
+        (resp) => {
+          settled = true;
+          finalContent = extractText(resp) ?? "";
+          done = true;
+          wakeup();
+        },
+        (err) => {
+          settled = true;
+          // Check timeout BEFORE abort detection: a timeout-triggered
+          // abort error must surface as a timeout failure, not be
+          // silently swallowed as a user cancellation.
+          if (timedOut) {
+            failure = new Error(
+              `Model did not respond within ${SDK_TIMEOUT_MS / 1000}s`,
+            );
+          } else if (isAbortError(err)) {
+            // User-initiated cancel (or any other abort path) — end
+            // the stream cleanly, no failure.
+          } else {
+            failure = err;
+          }
+          done = true;
+          wakeup();
+        },
+      );
+
+    try {
+      while (true) {
+        if (queue.length > 0) {
+          yield queue.shift()!;
+          continue;
+        }
+        if (done) break;
+        await new Promise<void>((resolve) => {
+          resolveWait = resolve;
+        });
+      }
+      // Drain any deltas that arrived after `done` flipped but before
+      // we re-entered the loop.
+      while (queue.length > 0) {
+        yield queue.shift()!;
+      }
+
+      // Unsubscribe BEFORE yielding the terminal `complete`. This
+      // guarantees no late delta can sneak into state after the
+      // consumer has accepted the terminal event.
+      acceptingDeltas = false;
+      cleanupSubscription();
+
+      if (failure) {
+        if (this.opts.onAuthError && isAuthErrorLocal(failure)) {
+          try {
+            this.opts.onAuthError(failure);
+          } catch (e) {
+            console.warn("[AgentSession] onAuthError handler threw", e);
+          }
+        }
+        throw failure;
+      }
+
+      yield {
+        type: "complete",
+        content: finalContent,
+        toolCalls: this.toolCallsThisTurn,
+      };
+    } finally {
+      clearTimeout(timer);
+      acceptingDeltas = false;
+      cleanupSubscription();
+      // If the consumer closed the iterator early (break, throw, view
+      // teardown) the SDK turn may still be in flight. Abort it on the
+      // captured `session` so it doesn't keep running in the background
+      // and tie up the SDK channel for the next turn. We deliberately
+      // use the captured `session` rather than `this.cancelCurrent()`
+      // so a reset/reconnect that swapped `this.session` can't make us
+      // abort a newer, unrelated turn.
+      if (!settled && typeof session.abort === "function") {
+        try {
+          await Promise.resolve(session.abort());
+        } catch (e) {
+          console.warn("[AgentSession] early-close abort failed", e);
+        }
+      }
+    }
+  }
+
+  async cancelCurrent(): Promise<void> {
+    const session = this.session;
+    if (!session || typeof session.abort !== "function") return;
+    try {
+      await Promise.resolve(session.abort());
+    } catch (e) {
+      console.warn("[AgentSession] session.abort failed", e);
+    }
+  }
+
   async resetConversation(): Promise<void> {
     if (!this.client) {
       this.initPromise = null;
@@ -199,6 +418,7 @@ export class CopilotAgentSession implements AgentSession {
     const fresh = await this.client.createSession({
       model: this.selectedModel,
       availableTools: ["builtin:*"],
+      streaming: true,
       onPermissionRequest: (request: SdkPermissionRequest) =>
         this.handlePermission(request),
     });
@@ -333,6 +553,7 @@ export class CopilotAgentSession implements AgentSession {
       const session = await client.createSession({
         model,
         availableTools: ["builtin:*"],
+        streaming: true,
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
@@ -449,6 +670,20 @@ async function safeCall<T>(
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof Error) {
+    if (err.name === "AbortError") return true;
+    const msg = err.message.toLowerCase();
+    if (msg.includes("abort") || msg.includes("cancel")) return true;
+  }
+  if (typeof err === "object" && err !== null) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string" && /abort|cancel/i.test(code)) return true;
+  }
+  return false;
+}
+
 function raceWithTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(
@@ -496,16 +731,32 @@ export interface SdkClient {
 export interface SdkSessionOptions {
   model: string;
   availableTools?: string[] | unknown;
+  /** Phase 4: opt in to streaming delta events. */
+  streaming?: boolean;
   onPermissionRequest: (
     request: SdkPermissionRequest,
     invocation?: unknown,
   ) => Promise<SdkPermissionResult> | SdkPermissionResult;
 }
 
+/** Subset of the SDK's session event we care about for streaming. */
+export interface SdkMessageDeltaEvent {
+  type: "assistant.message_delta";
+  data: { deltaContent: string; messageId?: string };
+}
+
 export interface SdkSession {
   sendAndWait: (prompt: string) => Promise<unknown>;
-  abort?: () => void;
+  abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;
+  /**
+   * Phase 4: subscribe to a specific event type. The SDK returns an
+   * unsubscribe function. Modelled structurally so tests can stub it.
+   */
+  on?: (
+    eventType: "assistant.message_delta",
+    handler: (event: SdkMessageDeltaEvent) => void,
+  ) => () => void;
 }
 
 export interface SdkPermissionRequest {

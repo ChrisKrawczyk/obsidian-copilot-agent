@@ -1,15 +1,13 @@
 import {
   ItemView,
-  MarkdownRenderer,
   Notice,
   WorkspaceLeaf,
-  Component,
   setIcon,
 } from "obsidian";
 import { ChatState } from "../domain/ChatState";
-import type { Message } from "../domain/types";
 import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
+import { MessageRenderer } from "./MessageRenderer";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -36,13 +34,32 @@ export class ChatView extends ItemView {
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
+  private sendIconEl!: HTMLElement;
+  private sendLabelEl!: HTMLElement;
   private statusEl!: HTMLElement;
   private connectBtnEl?: HTMLButtonElement;
-  private rendered = new Map<
-    string,
-    { wrapperEl: HTMLElement; bodyEl: HTMLElement; component: Component; lastContent: string }
-  >();
+  private renderer?: MessageRenderer;
   private pending = false;
+  /**
+   * Set while a streaming turn is in flight. When true, the Send button
+   * acts as Stop and clicking it calls `agent.cancelCurrent()`. We track
+   * this separately from `pending` because the latter is set/cleared
+   * synchronously, while the streaming state can outlive `cancelCurrent`
+   * for the brief window before the stream terminates.
+   */
+  private streaming = false;
+  /**
+   * Set when handleStop is in flight to guard against double-clicks
+   * calling `session.abort()` repeatedly. Cleared when the stream
+   * actually settles (in handleSend's finally chain).
+   */
+  private stopping = false;
+  /**
+   * Set when the user clicks Stop. Read by handleSend after the stream
+   * loop finishes to decide whether to freeze the placeholder as
+   * `interrupted`. Cleared at the start of each new send.
+   */
+  private userRequestedStop = false;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private currentAuthKind: AuthState["kind"] = "disconnected";
@@ -79,6 +96,11 @@ export class ChatView extends ItemView {
     });
 
     this.listEl = root.createDiv({ cls: "copilot-agent-messages" });
+    this.renderer = new MessageRenderer(
+      this.app,
+      this.listEl,
+      (c) => this.addChild(c),
+    );
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
     this.inputEl = composer.createEl("textarea", {
@@ -88,15 +110,21 @@ export class ChatView extends ItemView {
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
-        void this.handleSend();
+        void this.handleSendOrStop();
       }
     });
     this.sendBtnEl = composer.createEl("button", {
       cls: "copilot-agent-send mod-cta",
+    });
+    this.sendIconEl = this.sendBtnEl.createSpan({
+      cls: "copilot-agent-send-icon",
+    });
+    this.sendLabelEl = this.sendBtnEl.createSpan({
+      cls: "copilot-agent-send-label",
       text: "Send",
     });
-    setIcon(this.sendBtnEl.createSpan({ cls: "copilot-agent-send-icon" }), "send");
-    this.sendBtnEl.addEventListener("click", () => void this.handleSend());
+    setIcon(this.sendIconEl, "send");
+    this.sendBtnEl.addEventListener("click", () => void this.handleSendOrStop());
 
     // "Open settings" button shown when not connected.
     this.connectBtnEl = composer.createEl("button", {
@@ -112,18 +140,16 @@ export class ChatView extends ItemView {
   async onClose(): Promise<void> {
     this.unsubState?.();
     this.unsubAuth?.();
-    for (const r of this.rendered.values()) {
-      r.component.unload();
-    }
-    this.rendered.clear();
+    this.renderer?.dispose();
+    this.renderer = undefined;
   }
 
   private renderAuth(state: AuthState): void {
     this.currentAuthKind = state.kind;
     const isConnected = state.kind === "connected";
     // Composer is gated on connection. Don't disable mid-send — the
-    // send pipeline owns `pending`.
-    if (!this.pending) {
+    // send pipeline owns `pending`/`streaming`.
+    if (!this.pending && !this.streaming) {
       this.inputEl.disabled = !isConnected;
       this.sendBtnEl.disabled = !isConnected;
     }
@@ -158,6 +184,29 @@ export class ChatView extends ItemView {
 
   // ---- send pipeline ----
 
+  private handleSendOrStop(): Promise<void> {
+    if (this.streaming) {
+      return this.handleStop();
+    }
+    return this.handleSend();
+  }
+
+  private async handleStop(): Promise<void> {
+    if (this.stopping) return;
+    this.stopping = true;
+    this.userRequestedStop = true;
+    // Visually disable Stop so the user gets immediate feedback that
+    // their click registered. The stream loop's finally will swap the
+    // button back to Send.
+    this.sendBtnEl.disabled = true;
+    try {
+      await this.agent.cancelCurrent();
+    } catch (e) {
+      console.warn("[ChatView] cancelCurrent threw", e);
+    }
+    // The streaming loop's `finally` will flip status + reset Send UI.
+  }
+
   private async handleSend(): Promise<void> {
     if (this.pending) return;
     if (this.currentAuthKind !== "connected") {
@@ -167,22 +216,67 @@ export class ChatView extends ItemView {
     const text = this.inputEl.value.trim();
     if (!text) return;
     this.inputEl.value = "";
+    this.userRequestedStop = false;
     this.setBusy(true);
 
     this.state.append({ role: "user", content: text });
     const placeholderId = this.state.append({
       role: "assistant",
-      content: "_Thinking…_",
+      content: "",
       status: "pending",
     });
 
+    let receivedAnyDelta = false;
+    let gotComplete = false;
+    let finalContent = "";
+    let finalToolCalls: import("../domain/types").ToolCall[] = [];
+    let failure: unknown = null;
+
+    this.setStreaming(true);
     try {
-      // agent.sendMessage() runs init() internally — and init() is
-      // retryable: if a previous attempt failed, the next call kicks
-      // off a fresh attempt.
-      const reply = await this.agent.sendMessage(text);
-      const denied = reply.toolCalls.filter((t) => t.outcome === "denied");
-      let content = reply.content;
+      for await (const ev of this.agent.sendMessageStreaming(text)) {
+        if (ev.type === "delta") {
+          receivedAnyDelta = true;
+          this.state.appendDelta(placeholderId, ev.text);
+        } else if (ev.type === "complete") {
+          gotComplete = true;
+          finalContent = ev.content;
+          finalToolCalls = ev.toolCalls;
+        }
+      }
+    } catch (err) {
+      failure = err;
+    } finally {
+      this.setStreaming(false);
+    }
+
+    // Only treat as cancelled when the user asked to stop AND the
+    // stream did not deliver a real final response. If `gotComplete`
+    // and `finalContent` are present, the model actually finished
+    // before our abort took effect — render it normally.
+    const cancelled =
+      this.userRequestedStop && (!gotComplete || finalContent.length === 0);
+    this.userRequestedStop = false;
+    this.stopping = false;
+
+    if (failure) {
+      const msg = failure instanceof Error ? failure.message : String(failure);
+      this.state.update(placeholderId, {
+        content: `**Error:** ${msg}`,
+        status: "error",
+      });
+      new Notice(`Copilot Agent error: ${msg}`, 8000);
+    } else if (cancelled) {
+      // User clicked Stop before any delta arrived. Freeze placeholder
+      // as interrupted with whatever (if anything) was streamed.
+      this.state.interruptStreaming(placeholderId);
+    } else {
+      // Normal completion. Prefer the SDK's final content over the
+      // concatenated deltas (they may differ — e.g. when the model
+      // produces tool calls between text segments). Also append denied-
+      // tool-call summary so the user sees them.
+      let content = finalContent;
+      const denied = finalToolCalls.filter((t) => t.outcome === "denied");
       if (denied.length > 0) {
         const lines = denied
           .map(
@@ -191,94 +285,65 @@ export class ChatView extends ItemView {
           )
           .join("\n");
         content = `${content || "_(no response)_"}\n\n---\n**Tool calls denied (Phase 2 deny-by-default):**\n${lines}`;
-      } else if (!content) {
+      } else if (!content && !receivedAnyDelta) {
         content = "_(empty response)_";
       }
-      this.state.update(placeholderId, {
-        content,
-        status: "complete",
-        toolCalls: reply.toolCalls,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.state.update(placeholderId, {
-        content: `**Error:** ${msg}`,
-        status: "error",
-      });
-      new Notice(`Copilot Agent error: ${msg}`, 8000);
-    } finally {
-      this.setBusy(false);
-      this.inputEl.focus();
+      // If streaming yielded content but the final is empty, keep what
+      // we streamed rather than blanking the message.
+      if (!content && receivedAnyDelta) {
+        // Just flip status; ChatState already holds the streamed text.
+        this.state.update(placeholderId, {
+          status: "complete",
+          toolCalls: finalToolCalls,
+        });
+      } else {
+        this.state.update(placeholderId, {
+          content,
+          status: "complete",
+          toolCalls: finalToolCalls,
+        });
+      }
     }
+
+    this.setBusy(false);
+    this.inputEl.focus();
   }
 
   private setBusy(busy: boolean): void {
     this.pending = busy;
-    this.sendBtnEl.disabled = busy || this.currentAuthKind !== "connected";
-    this.inputEl.disabled = busy || this.currentAuthKind !== "connected";
-    this.sendBtnEl.toggleClass("is-loading", busy);
+    const gated = this.currentAuthKind !== "connected";
+    // Input stays disabled until the turn fully completes (post-streaming).
+    this.inputEl.disabled = busy || gated;
+    if (!busy) {
+      this.sendBtnEl.disabled = gated;
+      this.sendBtnEl.toggleClass("is-loading", false);
+    }
+  }
+
+  private setStreaming(streaming: boolean): void {
+    this.streaming = streaming;
+    if (streaming) {
+      // Repurpose Send → Stop. Keep it enabled so the user can cancel.
+      this.sendBtnEl.disabled = false;
+      this.sendBtnEl.toggleClass("is-loading", true);
+      this.sendBtnEl.toggleClass("mod-warning", true);
+      this.sendBtnEl.toggleClass("mod-cta", false);
+      this.sendLabelEl.setText("Stop");
+      setIcon(this.sendIconEl, "square");
+    } else {
+      this.sendBtnEl.toggleClass("is-loading", false);
+      this.sendBtnEl.toggleClass("mod-warning", false);
+      this.sendBtnEl.toggleClass("mod-cta", true);
+      this.sendLabelEl.setText("Send");
+      setIcon(this.sendIconEl, "send");
+    }
   }
 
   // ---- incremental render ----
 
   private syncList(): void {
-    const messages = this.state.getMessages();
-    const seen = new Set<string>();
-    for (const m of messages) {
-      seen.add(m.id);
-      const existing = this.rendered.get(m.id);
-      if (!existing) {
-        this.appendMessage(m);
-      } else if (existing.lastContent !== m.content) {
-        // Rerender body in place — cheap for short turns.
-        existing.component.unload();
-        existing.bodyEl.empty();
-        const fresh = new Component();
-        this.addChild(fresh);
-        existing.component = fresh;
-        existing.lastContent = m.content;
-        existing.wrapperEl.toggleClass("is-pending", m.status === "pending");
-        existing.wrapperEl.toggleClass("is-error", m.status === "error");
-        void MarkdownRenderer.render(
-          this.app,
-          m.content,
-          existing.bodyEl,
-          "",
-          fresh,
-        );
-      }
-    }
-    // Remove messages that were dropped (e.g. on clear()).
-    for (const [id, r] of this.rendered) {
-      if (!seen.has(id)) {
-        r.component.unload();
-        r.wrapperEl.detach();
-        this.rendered.delete(id);
-      }
-    }
-    // Auto-scroll to bottom.
-    this.listEl.scrollTop = this.listEl.scrollHeight;
-  }
-
-  private appendMessage(m: Message): void {
-    const wrapper = this.listEl.createDiv({
-      cls: `copilot-agent-msg copilot-agent-msg-${m.role}${
-        m.status === "pending" ? " is-pending" : ""
-      }${m.status === "error" ? " is-error" : ""}`,
-    });
-    wrapper.createEl("div", {
-      cls: "copilot-agent-msg-role",
-      text: m.role === "user" ? "You" : m.role === "assistant" ? "Copilot" : "System",
-    });
-    const body = wrapper.createDiv({ cls: "copilot-agent-msg-body" });
-    const component = new Component();
-    this.addChild(component);
-    void MarkdownRenderer.render(this.app, m.content, body, "", component);
-    this.rendered.set(m.id, {
-      wrapperEl: wrapper,
-      bodyEl: body,
-      component,
-      lastContent: m.content,
-    });
+    if (!this.renderer) return;
+    this.renderer.sync(this.state.getMessages());
   }
 }
+

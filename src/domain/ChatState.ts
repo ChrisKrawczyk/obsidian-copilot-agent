@@ -51,6 +51,62 @@ export class ChatState {
     this.emit();
   }
 
+  /**
+   * Append a streaming text chunk to an existing message and (idempotently)
+   * mark its status as `streaming`. No-op if id not found or the message is
+   * already in a terminal state (`complete` / `interrupted` / `error`).
+   *
+   * Returns true if the delta was applied. Used by Phase 4 streaming.
+   */
+  appendDelta(id: string, text: string): boolean {
+    const idx = this.messages.findIndex((m) => m.id === id);
+    if (idx < 0) return false;
+    if (text.length === 0) return false;
+    const existing = this.messages[idx];
+    if (
+      existing.status === "complete" ||
+      existing.status === "interrupted" ||
+      existing.status === "error"
+    ) {
+      return false;
+    }
+    this.messages[idx] = {
+      ...existing,
+      content: existing.content + text,
+      status: "streaming",
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
+    this.emit();
+    return true;
+  }
+
+  /**
+   * Freeze a streaming/pending message as `interrupted` and keep whatever
+   * content has accumulated so far. No-op if the message is already in a
+   * terminal state. Used by Phase 4 when the user clicks Stop.
+   */
+  interruptStreaming(id: string): boolean {
+    const idx = this.messages.findIndex((m) => m.id === id);
+    if (idx < 0) return false;
+    const existing = this.messages[idx];
+    if (
+      existing.status === "complete" ||
+      existing.status === "interrupted" ||
+      existing.status === "error"
+    ) {
+      return false;
+    }
+    this.messages[idx] = {
+      ...existing,
+      status: "interrupted",
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
+    this.emit();
+    return true;
+  }
+
   /** Remove all messages. */
   clear(): void {
     if (this.messages.length === 0) return;

@@ -338,4 +338,180 @@ describe("CopilotAgentSession", () => {
     expect(reply.content).toBe("ok");
     await agent.dispose();
   });
+
+  test("createSession is called with streaming:true", async () => {
+    const h = makeFakeSdk();
+    let lastStreaming: unknown;
+    const originalCreate = h.client.createSession;
+    h.client.createSession = async (opts) => {
+      lastStreaming = (opts as unknown as { streaming?: boolean }).streaming;
+      return originalCreate.call(h.client, opts);
+    };
+    const agent = makeAgent(h);
+    await agent.init();
+    expect(lastStreaming).toBe(true);
+    await agent.dispose();
+  });
+
+  test("sendMessageStreaming yields deltas in order then a terminal complete", async () => {
+    const h = makeFakeSdk();
+    // Capture the delta handler the agent installs, plus defer sendAndWait
+    // so we can interleave delta emission and resolution.
+    let deltaHandler:
+      | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
+      | null = null;
+    h.session.on = (eventType, handler) => {
+      expect(eventType).toBe("assistant.message_delta");
+      deltaHandler = handler as typeof deltaHandler;
+      return () => {
+        deltaHandler = null;
+      };
+    };
+    let resolveSend!: (resp: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+
+    const agent = makeAgent(h);
+    await agent.init();
+
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    // Kick the generator so it subscribes to `on` before we emit deltas.
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    deltaHandler!({ type: "assistant.message_delta", data: { deltaContent: "Hel" } });
+    deltaHandler!({ type: "assistant.message_delta", data: { deltaContent: "lo" } });
+
+    const first = await firstP;
+    expect(first.value).toEqual({ type: "delta", text: "Hel" });
+    const second = await iter.next();
+    expect(second.value).toEqual({ type: "delta", text: "lo" });
+
+    resolveSend({ data: { content: "Hello world" } });
+    const third = await iter.next();
+    expect(third.value).toEqual({
+      type: "complete",
+      content: "Hello world",
+      toolCalls: [],
+    });
+    const fourth = await iter.next();
+    expect(fourth.done).toBe(true);
+
+    // Handler was unsubscribed on completion.
+    expect(deltaHandler).toBeNull();
+
+    await agent.dispose();
+  });
+
+  test("cancelCurrent during streaming aborts the SDK session and ends the stream cleanly", async () => {
+    const h = makeFakeSdk();
+    let deltaHandler:
+      | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
+      | null = null;
+    h.session.on = (_eventType, handler) => {
+      deltaHandler = handler as typeof deltaHandler;
+      return () => {
+        deltaHandler = null;
+      };
+    };
+    let rejectSend!: (err: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((_resolve, reject) => {
+        rejectSend = reject;
+      });
+    };
+    h.session.abort = async () => {
+      h.abortCalls += 1;
+      // Realistic SDK behaviour: pending sendAndWait rejects after abort.
+      rejectSend(new Error("AbortError: cancelled by user"));
+    };
+
+    const agent = makeAgent(h);
+    await agent.init();
+
+    const iter = agent.sendMessageStreaming("write a long story")[Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    deltaHandler!({ type: "assistant.message_delta", data: { deltaContent: "Once " } });
+    const first = await firstP;
+    expect(first.value).toEqual({ type: "delta", text: "Once " });
+
+    await agent.cancelCurrent();
+    expect(h.abortCalls).toBe(1);
+
+    // After cancel, the iterator emits a terminal complete with whatever
+    // final content the SDK provided (empty here) and toolCalls, then ends.
+    const second = await iter.next();
+    expect(second.value).toEqual({ type: "complete", content: "", toolCalls: [] });
+    const done = await iter.next();
+    expect(done.done).toBe(true);
+
+    await agent.dispose();
+  });
+
+  test("sendMessageStreaming propagates non-abort errors", async () => {
+    const h = makeFakeSdk();
+    h.session.on = () => () => {};
+    h.session.sendAndWait = async () => {
+      throw new Error("model exploded");
+    };
+
+    const agent = makeAgent(h);
+    await agent.init();
+
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    await expect(iter.next()).rejects.toThrow(/model exploded/);
+    await agent.dispose();
+  });
+
+  test("early iterator close aborts the in-flight SDK turn", async () => {
+    const h = makeFakeSdk();
+    let deltaHandler:
+      | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
+      | null = null;
+    let unsubCalls = 0;
+    h.session.on = (_eventType, handler) => {
+      deltaHandler = handler as typeof deltaHandler;
+      return () => {
+        unsubCalls += 1;
+        deltaHandler = null;
+      };
+    };
+    let rejectSend!: (err: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((_resolve, reject) => {
+        rejectSend = reject;
+      });
+    };
+    let abortCalls = 0;
+    h.session.abort = async () => {
+      abortCalls += 1;
+      rejectSend(new Error("AbortError"));
+    };
+
+    const agent = makeAgent(h);
+    await agent.init();
+
+    const iter = agent.sendMessageStreaming("write a long story")[Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    deltaHandler!({ type: "assistant.message_delta", data: { deltaContent: "Once " } });
+    await firstP;
+
+    // Consumer closes the iterator early before the turn completes.
+    const ret = await iter.return!();
+    expect(ret.done).toBe(true);
+    // Generator's finally must have aborted the SDK turn and
+    // unsubscribed exactly once.
+    expect(abortCalls).toBe(1);
+    expect(unsubCalls).toBe(1);
+
+    await agent.dispose();
+  });
 });

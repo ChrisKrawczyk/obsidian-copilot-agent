@@ -99,6 +99,69 @@ describe("ChatState", () => {
     (snapshot as Message[]).pop();
     expect(s.getMessages()).toHaveLength(1);
   });
+
+  test("appendDelta accumulates chunks and flips status to streaming", () => {
+    const s = new ChatState();
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    const listener = vi.fn();
+    s.subscribe(listener);
+
+    expect(s.appendDelta(id, "Hel")).toBe(true);
+    expect(s.appendDelta(id, "lo")).toBe(true);
+    expect(s.appendDelta(id, " world")).toBe(true);
+
+    const m = s.getMessages()[0];
+    expect(m.content).toBe("Hello world");
+    expect(m.status).toBe("streaming");
+    // One emission per applied delta.
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
+
+  test("update to complete after streaming locks final content", () => {
+    const s = new ChatState();
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    s.appendDelta(id, "partial");
+    s.update(id, { content: "final response", status: "complete" });
+
+    const m = s.getMessages()[0];
+    expect(m.status).toBe("complete");
+    expect(m.content).toBe("final response");
+
+    // Further deltas after `complete` must NOT mutate the message.
+    expect(s.appendDelta(id, " extra")).toBe(false);
+    expect(s.getMessages()[0].content).toBe("final response");
+    expect(s.getMessages()[0].status).toBe("complete");
+  });
+
+  test("interruptStreaming freezes partial content and blocks further deltas", () => {
+    const s = new ChatState();
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    s.appendDelta(id, "Hello, this is half a ");
+    expect(s.interruptStreaming(id)).toBe(true);
+
+    const m = s.getMessages()[0];
+    expect(m.status).toBe("interrupted");
+    expect(m.content).toBe("Hello, this is half a ");
+
+    // Late-arriving deltas after interrupt are ignored.
+    expect(s.appendDelta(id, "sentence")).toBe(false);
+    expect(s.getMessages()[0].content).toBe("Hello, this is half a ");
+
+    // Double-interrupt is a no-op.
+    expect(s.interruptStreaming(id)).toBe(false);
+  });
+
+  test("appendDelta is a no-op for unknown ids, empty text, or terminal states", () => {
+    const s = new ChatState();
+    expect(s.appendDelta("missing", "x")).toBe(false);
+
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    expect(s.appendDelta(id, "")).toBe(false);
+
+    s.update(id, { status: "error", content: "oops" });
+    expect(s.appendDelta(id, " more")).toBe(false);
+    expect(s.getMessages()[0].content).toBe("oops");
+  });
 });
 
 // Imported lazily for the cast in the snapshot test only.

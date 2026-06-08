@@ -3,7 +3,21 @@
 
 export type Role = "user" | "assistant" | "system";
 
-export type MessageStatus = "pending" | "complete" | "error";
+/**
+ * Lifecycle of an assistant or user message in the chat log.
+ *
+ * - `pending`     — placeholder created, no content yet (e.g. "Thinking…").
+ * - `streaming`   — receiving incremental deltas; `content` grows over time.
+ * - `complete`    — final content received and locked.
+ * - `interrupted` — user cancelled mid-stream; partial `content` frozen.
+ * - `error`       — turn failed; `content` typically holds the error text.
+ */
+export type MessageStatus =
+  | "pending"
+  | "streaming"
+  | "complete"
+  | "interrupted"
+  | "error";
 
 export interface ToolCall {
   /** Stable id from the SDK request, when available. */
