@@ -261,6 +261,27 @@ export class ChatView extends ItemView {
         if (ev.type === "delta") {
           receivedAnyDelta = true;
           this.state.appendDelta(placeholderId, ev.text);
+        } else if (ev.type === "tool_call_start") {
+          // Live tool-call block. We map AgentSession's structural
+          // type to the domain ToolCall shape (they share fields).
+          this.state.upsertToolCall(placeholderId, {
+            id: ev.toolCall.id,
+            kind: ev.toolCall.kind,
+            name: ev.toolCall.name,
+            source: ev.toolCall.source,
+            outcome: ev.toolCall.outcome,
+            detail: ev.toolCall.detail,
+            argsPreview: ev.toolCall.argsPreview,
+            resultContent: ev.toolCall.resultContent,
+          });
+        } else if (ev.type === "tool_call_complete") {
+          this.state.upsertToolCall(placeholderId, {
+            id: ev.id,
+            kind: "tool",
+            outcome: ev.outcome,
+            resultContent: ev.content,
+            detail: ev.errorMessage,
+          });
         } else if (ev.type === "complete") {
           finalContent = ev.content;
           finalToolCalls = ev.toolCalls;
@@ -296,19 +317,22 @@ export class ChatView extends ItemView {
     } else {
       // Normal completion. Prefer the SDK's final content over the
       // concatenated deltas (they may differ — e.g. when the model
-      // produces tool calls between text segments). Also append denied-
-      // tool-call summary so the user sees them.
+      // produces tool calls between text segments). Phase 5: tool
+      // calls (including denials) render as live blocks above the
+      // message body via `upsertToolCall`, so we no longer append a
+      // text summary of denied calls — the blocks themselves are the
+      // canonical UI for that.
+      // Merge any tool calls present in the final summary into the
+      // existing live entries (preserves entries we already rendered
+      // via tool_call_start/complete events under the same id, and
+      // adds any final-only entries we hadn't seen). We never
+      // wholesale replace `toolCalls` here, so denied/streamed blocks
+      // are preserved verbatim even if the final summary omits them.
+      for (const tc of finalToolCalls) {
+        this.state.upsertToolCall(placeholderId, tc);
+      }
       let content = finalContent;
-      const denied = finalToolCalls.filter((t) => t.outcome === "denied");
-      if (denied.length > 0) {
-        const lines = denied
-          .map(
-            (t) =>
-              `- \`${t.name ?? t.kind}\` denied (${t.detail ?? "permission rejected"})`,
-          )
-          .join("\n");
-        content = `${content || "_(no response)_"}\n\n---\n**Tool calls denied (Phase 2 deny-by-default):**\n${lines}`;
-      } else if (!content && !receivedAnyDelta) {
+      if (!content && !receivedAnyDelta && finalToolCalls.length === 0) {
         content = "_(empty response)_";
       }
       // If streaming yielded content but the final is empty, keep what
@@ -317,13 +341,11 @@ export class ChatView extends ItemView {
         // Just flip status; ChatState already holds the streamed text.
         this.state.update(placeholderId, {
           status: "complete",
-          toolCalls: finalToolCalls,
         });
       } else {
         this.state.update(placeholderId, {
           content,
           status: "complete",
-          toolCalls: finalToolCalls,
         });
       }
     }

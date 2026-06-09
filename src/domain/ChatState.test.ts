@@ -166,3 +166,67 @@ describe("ChatState", () => {
 
 // Imported lazily for the cast in the snapshot test only.
 import type { Message } from "./types";
+
+describe("ChatState - upsertToolCall (Phase 5)", () => {
+  test("upsertToolCall appends a new tool call to the message", () => {
+    const s = new ChatState();
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    expect(
+      s.upsertToolCall(id, {
+        id: "tc-1",
+        kind: "tool",
+        name: "read_file",
+        source: "custom",
+        outcome: "approved",
+        argsPreview: "{}",
+      }),
+    ).toBe(true);
+    const m = s.getMessages()[0];
+    expect(m.toolCalls).toHaveLength(1);
+    expect(m.toolCalls![0]).toMatchObject({
+      id: "tc-1",
+      outcome: "approved",
+      source: "custom",
+    });
+  });
+
+  test("upsertToolCall merges fields when the id already exists", () => {
+    const s = new ChatState();
+    const id = s.append({ role: "assistant", content: "", status: "pending" });
+    s.upsertToolCall(id, {
+      id: "tc-1",
+      kind: "tool",
+      name: "read_file",
+      source: "custom",
+      outcome: "approved",
+      argsPreview: '{"path":"x"}',
+    });
+    s.upsertToolCall(id, {
+      id: "tc-1",
+      kind: "tool",
+      outcome: "completed",
+      resultContent: "file contents",
+    });
+    const m = s.getMessages()[0];
+    expect(m.toolCalls).toHaveLength(1);
+    expect(m.toolCalls![0]).toMatchObject({
+      id: "tc-1",
+      name: "read_file",
+      outcome: "completed",
+      source: "custom",
+      argsPreview: '{"path":"x"}',
+      resultContent: "file contents",
+    });
+  });
+
+  test("upsertToolCall returns false when the message id is unknown", () => {
+    const s = new ChatState();
+    expect(
+      s.upsertToolCall("nope", {
+        id: "tc-1",
+        kind: "tool",
+        outcome: "approved",
+      }),
+    ).toBe(false);
+  });
+});

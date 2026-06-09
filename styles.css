@@ -211,3 +211,115 @@
   color: var(--text-muted);
   font-size: var(--font-ui-small);
 }
+
+/* ---- Phase 5: tool call blocks ---- */
+
+.copilot-agent-msg-toolcalls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.25rem 0;
+}
+
+.copilot-agent-msg-toolcalls:empty {
+  display: none;
+}
+
+.copilot-agent-toolcall {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 0.9em;
+  overflow: hidden;
+}
+
+.copilot-agent-toolcall-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.copilot-agent-toolcall-summary::-webkit-details-marker {
+  display: none;
+}
+
+.copilot-agent-toolcall-icon {
+  flex: 0 0 auto;
+  font-size: 1em;
+}
+
+.copilot-agent-toolcall-name {
+  font-family: var(--font-monospace);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+
+.copilot-agent-toolcall-source {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.copilot-agent-toolcall-status {
+  font-size: 0.75em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.copilot-agent-toolcall-status-completed {
+  background: var(--color-green);
+  color: white;
+}
+
+.copilot-agent-toolcall-status-errored,
+.copilot-agent-toolcall-status-denied {
+  background: var(--color-red);
+  color: white;
+}
+
+.copilot-agent-toolcall-status-approved {
+  background: var(--color-yellow);
+  color: var(--text-on-accent);
+}
+
+.copilot-agent-toolcall-body {
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.copilot-agent-toolcall-section-label {
+  font-size: 0.75em;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.15rem;
+}
+
+.copilot-agent-toolcall-section-content {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  background: var(--background-primary);
+  border-radius: 4px;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16em;
+  overflow: auto;
+}
+
+.copilot-agent-toolcall-running {
+  font-style: italic;
+  color: var(--text-muted);
+}

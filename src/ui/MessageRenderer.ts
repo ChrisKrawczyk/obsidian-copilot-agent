@@ -1,12 +1,15 @@
 import { Component, MarkdownRenderer, type App } from "obsidian";
-import type { Message } from "../domain/types";
+import type { Message, ToolCall } from "../domain/types";
+import { renderToolCallBlock } from "./ToolCallBlock";
 
 /**
  * Internal render slot tracked per message id. Owned by MessageRenderer.
  */
 interface MessageSlot {
-  /** Outer container that holds role label + body. */
+  /** Outer container that holds role label + tool calls + body. */
   wrapperEl: HTMLElement;
+  /** Container for tool-call blocks (rendered above the message text). */
+  toolCallsEl: HTMLElement;
   /** Body element re-rendered on content change. */
   bodyEl: HTMLElement;
   /**
@@ -19,6 +22,12 @@ interface MessageSlot {
   lastContent: string;
   /** Last `status` we rendered (drives wrapper CSS classes). */
   lastStatus: Message["status"];
+  /**
+   * Cheap signature of the last rendered toolCalls so we can skip
+   * re-rendering when nothing changed. Captures id + outcome + result
+   * length + detail length so any meaningful update invalidates it.
+   */
+  lastToolCallsSig: string;
   /**
    * If the message is currently in `streaming` mode, we render its
    * incremental text into this plain <pre>-like node and skip Markdown.
@@ -79,14 +88,20 @@ export class MessageRenderer {
       }
       const contentChanged = existing.lastContent !== m.content;
       const statusChanged = existing.lastStatus !== m.status;
-      if (!contentChanged && !statusChanged) continue;
+      const toolSig = toolCallsSig(m.toolCalls);
+      const toolsChanged = existing.lastToolCallsSig !== toolSig;
+      if (!contentChanged && !statusChanged && !toolsChanged) continue;
 
-      if (m.status === "streaming") {
-        this.updateStreaming(existing, m);
-      } else {
-        // Any non-streaming status (including a streaming → complete
-        // transition) goes through a full Markdown re-render.
-        this.updateFinal(existing, m);
+      if (toolsChanged) {
+        this.renderToolCalls(existing, m.toolCalls);
+        existing.lastToolCallsSig = toolSig;
+      }
+      if (contentChanged || statusChanged) {
+        if (m.status === "streaming") {
+          this.updateStreaming(existing, m);
+        } else {
+          this.updateFinal(existing, m);
+        }
       }
     }
     for (const [id, slot] of this.slots) {
@@ -122,23 +137,37 @@ export class MessageRenderer {
       text:
         m.role === "user" ? "You" : m.role === "assistant" ? "Copilot" : "System",
     });
+    const toolCallsEl = wrapper.createDiv({
+      cls: "copilot-agent-msg-toolcalls",
+    });
     const body = wrapper.createDiv({ cls: "copilot-agent-msg-body" });
     const component = new Component();
     this.addChild(component);
 
     const slot: MessageSlot = {
       wrapperEl: wrapper,
+      toolCallsEl,
       bodyEl: body,
       component,
       lastContent: m.content,
       lastStatus: m.status,
+      lastToolCallsSig: toolCallsSig(m.toolCalls),
     };
     this.slots.set(m.id, slot);
+    this.renderToolCalls(slot, m.toolCalls);
 
     if (m.status === "streaming") {
       this.installStreamingNode(slot, m.content);
     } else {
       void MarkdownRenderer.render(this.app, m.content, body, "", component);
+    }
+  }
+
+  private renderToolCalls(slot: MessageSlot, calls: ToolCall[] | undefined): void {
+    slot.toolCallsEl.empty();
+    if (!calls || calls.length === 0) return;
+    for (const c of calls) {
+      slot.toolCallsEl.appendChild(renderToolCallBlock(c));
     }
   }
 
@@ -221,4 +250,23 @@ function statusClass(status: Message["status"]): string {
     default:
       return "";
   }
+}
+
+/**
+ * Cheap signature that changes whenever a tool call list would render
+ * differently. Captures id, outcome, source, and lengths of mutable
+ * text fields. We don't hash the full content because it can be large
+ * (full file contents) and `lastToolCallsSig` is compared on every
+ * `sync` — but the lengths catch any append.
+ */
+function toolCallsSig(calls: ToolCall[] | undefined): string {
+  if (!calls || calls.length === 0) return "";
+  return calls
+    .map(
+      (c) =>
+        `${c.id}|${c.outcome}|${c.source ?? ""}|${
+          c.resultContent?.length ?? 0
+        }|${c.detail?.length ?? 0}|${c.argsPreview?.length ?? 0}`,
+    )
+    .join(";");
 }

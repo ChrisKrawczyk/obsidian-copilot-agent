@@ -13,6 +13,7 @@ import { CopilotAgentSettingTab } from "./settings/SettingsTab";
 import { obsidianHttpClient } from "./auth/HttpClient";
 import { TokenStore } from "./auth/TokenStore";
 import { AuthController, type AgentTokenSink } from "./auth/AuthController";
+import { createReadTools } from "./tools/ReadTools";
 
 /**
  * Phase 3 wiring:
@@ -62,6 +63,20 @@ export default class CopilotAgentPlugin extends Plugin {
       decider: denyAll,
       logLevel: "info",
       onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
+      // Phase 5: register vault read tools. They run in-process and
+      // are scoped to the active vault by `resolveVaultPath`. Marked
+      // `skipPermission: true` so the Phase-2 denyAll decider doesn't
+      // refuse them — denyAll still gates every SDK-managed built-in,
+      // which is the Phase-2 safety story we want to keep until the
+      // Phase-6 SafetyPolicy lands.
+      // Casts:
+      //   - Vault → ReadToolsVault: we only use the desktop
+      //     FileSystemAdapter subset, which is the only platform
+      //     Obsidian Desktop supports anyway.
+      //   - Tool[] → SdkTool[]: SDK's `Tool.handler` carries
+      //     `ToolInvocation` typing that's noisier than our
+      //     structural shape; the runtime contract matches.
+      tools: createReadTools(this.app.vault as unknown as Parameters<typeof createReadTools>[0]) as unknown as import("./sdk/AgentSession").SdkTool[],
     });
     this.agent = agent;
 

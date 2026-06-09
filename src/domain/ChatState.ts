@@ -107,6 +107,35 @@ export class ChatState {
     return true;
   }
 
+  /**
+   * Append a tool call to a message's `toolCalls` list, or update an
+   * existing one with the same id. Returns true if state mutated.
+   * Used by Phase 5 to render live tool-call blocks as the SDK fires
+   * `tool.execution_start` / `tool.execution_complete` events.
+   */
+  upsertToolCall(messageId: string, toolCall: ToolCall): boolean {
+    const idx = this.messages.findIndex((m) => m.id === messageId);
+    if (idx < 0) return false;
+    const existing = this.messages[idx];
+    const calls = existing.toolCalls ? existing.toolCalls.slice() : [];
+    const callIdx = calls.findIndex((c) => c.id === toolCall.id);
+    if (callIdx < 0) {
+      calls.push(toolCall);
+    } else {
+      // Merge: keep prior fields that the new update doesn't override
+      // (e.g. `argsPreview` from start event when complete event lacks it).
+      calls[callIdx] = { ...calls[callIdx], ...toolCall };
+    }
+    this.messages[idx] = {
+      ...existing,
+      toolCalls: calls,
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
+    this.emit();
+    return true;
+  }
+
   /** Remove all messages. */
   clear(): void {
     if (this.messages.length === 0) return;

@@ -361,11 +361,15 @@ describe("CopilotAgentSession", () => {
       | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
       | null = null;
     h.session.on = (eventType, handler) => {
-      expect(eventType).toBe("assistant.message_delta");
-      deltaHandler = handler as typeof deltaHandler;
-      return () => {
-        deltaHandler = null;
-      };
+      // Phase 5 subscribes to assistant.message_delta plus the two
+      // tool.execution_* events; only capture the delta handler here.
+      if (eventType === "assistant.message_delta") {
+        deltaHandler = handler as typeof deltaHandler;
+        return () => {
+          deltaHandler = null;
+        };
+      }
+      return () => {};
     };
     let resolveSend!: (resp: unknown) => void;
     h.session.sendAndWait = (prompt) => {
@@ -412,11 +416,14 @@ describe("CopilotAgentSession", () => {
     let deltaHandler:
       | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
       | null = null;
-    h.session.on = (_eventType, handler) => {
-      deltaHandler = handler as typeof deltaHandler;
-      return () => {
-        deltaHandler = null;
-      };
+    h.session.on = (eventType, handler) => {
+      if (eventType === "assistant.message_delta") {
+        deltaHandler = handler as typeof deltaHandler;
+        return () => {
+          deltaHandler = null;
+        };
+      }
+      return () => {};
     };
     let rejectSend!: (err: unknown) => void;
     h.session.sendAndWait = (prompt) => {
@@ -475,11 +482,15 @@ describe("CopilotAgentSession", () => {
       | ((event: { type: "assistant.message_delta"; data: { deltaContent: string } }) => void)
       | null = null;
     let unsubCalls = 0;
-    h.session.on = (_eventType, handler) => {
-      deltaHandler = handler as typeof deltaHandler;
+    h.session.on = (eventType, handler) => {
+      if (eventType === "assistant.message_delta") {
+        deltaHandler = handler as typeof deltaHandler;
+      }
       return () => {
         unsubCalls += 1;
-        deltaHandler = null;
+        if (eventType === "assistant.message_delta") {
+          deltaHandler = null;
+        }
       };
     };
     let rejectSend!: (err: unknown) => void;
@@ -508,10 +519,199 @@ describe("CopilotAgentSession", () => {
     const ret = await iter.return!();
     expect(ret.done).toBe(true);
     // Generator's finally must have aborted the SDK turn and
-    // unsubscribed exactly once.
+    // unsubscribed each event subscription exactly once. Phase 5
+    // subscribes to delta + tool.start + tool.complete = 3 subs.
     expect(abortCalls).toBe(1);
-    expect(unsubCalls).toBe(1);
+    expect(unsubCalls).toBe(3);
 
+    await agent.dispose();
+  });
+
+  test("tool.execution_start + tool.execution_complete events flow into stream and toolCalls", async () => {
+    const h = makeFakeSdk();
+    type ToolStartHandler = (event: {
+      type: "tool.execution_start";
+      data: {
+        toolCallId: string;
+        toolName: string;
+        arguments?: Record<string, unknown>;
+        mcpServerName?: string;
+      };
+    }) => void;
+    type ToolCompleteHandler = (event: {
+      type: "tool.execution_complete";
+      data: {
+        toolCallId: string;
+        success: boolean;
+        result?: { content?: string };
+        error?: { message: string };
+      };
+    }) => void;
+    let toolStart: ToolStartHandler | null = null;
+    let toolComplete: ToolCompleteHandler | null = null;
+    h.session.on = (eventType, handler) => {
+      if (eventType === "tool.execution_start")
+        toolStart = handler as ToolStartHandler;
+      if (eventType === "tool.execution_complete")
+        toolComplete = handler as ToolCompleteHandler;
+      return () => {};
+    };
+    let resolveSend!: (resp: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+
+    const iter = agent
+      .sendMessageStreaming("read inbox/today.md")
+      [Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "call-1",
+        toolName: "read_file",
+        arguments: { path: "inbox/today.md" },
+      },
+    });
+    toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "call-1",
+        success: true,
+        result: { content: "# Today\n\nphase 5 ships" },
+      },
+    });
+
+    const first = await firstP;
+    expect(first.value).toMatchObject({
+      type: "tool_call_start",
+      toolCall: { id: "call-1", name: "read_file", source: "custom" },
+    });
+    const second = await iter.next();
+    expect(second.value).toMatchObject({
+      type: "tool_call_complete",
+      id: "call-1",
+      outcome: "completed",
+      content: "# Today\n\nphase 5 ships",
+    });
+
+    resolveSend({ data: { content: "Your note says: phase 5 ships" } });
+    const third = await iter.next();
+    expect(third.value).toMatchObject({
+      type: "complete",
+      content: "Your note says: phase 5 ships",
+    });
+    // The terminal complete carries the consolidated toolCalls snapshot
+    // with the completed outcome.
+    const complete = third.value as {
+      type: "complete";
+      toolCalls: Array<{
+        id: string;
+        outcome: string;
+        source?: string;
+        resultContent?: string;
+      }>;
+    };
+    expect(complete.toolCalls).toHaveLength(1);
+    expect(complete.toolCalls[0]).toMatchObject({
+      id: "call-1",
+      outcome: "completed",
+      source: "custom",
+    });
+
+    await agent.dispose();
+  });
+
+  test("denied permission request emits live tool_call_start + tool_call_complete during streaming", async () => {
+    const h = makeFakeSdk();
+    h.session.on = () => () => {};
+    let resolveSend!: (resp: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+
+    const agent = makeAgent(h);
+    await agent.init();
+
+    const iter = agent.sendMessageStreaming("run shell")[Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Simulate the SDK asking permission for a shell call.
+    const decision = await h.permissionHandler!({
+      id: "deny-1",
+      kind: "shell",
+      toolName: "shell",
+    });
+    expect(decision.kind).toBe("reject");
+
+    const first = await firstP;
+    expect(first.value).toMatchObject({
+      type: "tool_call_start",
+      toolCall: { id: "deny-1", outcome: "denied", source: "builtin" },
+    });
+    const second = await iter.next();
+    expect(second.value).toMatchObject({
+      type: "tool_call_complete",
+      id: "deny-1",
+      outcome: "denied",
+    });
+
+    resolveSend({ data: { content: "Sorry, I couldn't run that." } });
+    const third = await iter.next();
+    expect(third.value).toMatchObject({ type: "complete" });
+
+    await agent.dispose();
+  });
+
+  test("custom tools from opts.tools are forwarded to createSession", async () => {
+    const h = makeFakeSdk();
+    let lastTools: unknown = null;
+    h.client.createSession = async (opts) => {
+      h.lastCreateSession = {
+        model: opts.model,
+        availableTools: opts.availableTools,
+      };
+      lastTools = opts.tools;
+      h.permissionHandler = opts.onPermissionRequest;
+      return h.session;
+    };
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }, { name: "view" }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(Array.isArray(lastTools)).toBe(true);
+    expect((lastTools as Array<{ name: string }>).map((t) => t.name)).toEqual([
+      "read_file",
+      "view",
+    ]);
     await agent.dispose();
   });
 });

@@ -26,10 +26,21 @@ export interface ToolCall {
   kind: string;
   /** SDK-reported tool name when present. */
   name?: string;
+  /**
+   * Phase 5: high-level source classification for UI rendering.
+   *   - `custom`  — registered by us (vault read tools)
+   *   - `mcp`     — provided by an MCP server
+   *   - `builtin` — bundled with the CLI runtime (shell, web_fetch, …)
+   */
+  source?: "custom" | "mcp" | "builtin";
   /** "denied" in Phase 2 (deny-by-default). */
   outcome: "denied" | "approved" | "completed" | "errored";
-  /** Optional message describing why (e.g. denial reason). */
+  /** Optional message describing why (e.g. denial reason / error). */
   detail?: string;
+  /** Pretty-printed arguments for display. */
+  argsPreview?: string;
+  /** Successful result content for display. */
+  resultContent?: string;
 }
 
 export interface Message {
