@@ -77,17 +77,17 @@ A user (the work-unit author) installs the plugin manually on Obsidian desktop, 
 
 <!-- Ideas surfaced during planning that are intentionally out of scope for v0.1 but worth tracking. -->
 
-- [ ] Register a dedicated OAuth App for the plugin and migrate from the GitHub CLI client ID before any non-private distribution (BRAT, community store, or any release where the plugin is installed by users other than the work-unit author). When this work unit is promoted, amend spec FR-001 In-Scope wording and demote the CLI client ID to dev-only.
-- [ ] Investigate Electron `safeStorage` access from a plugin (or evaluate whether Obsidian could expose it through a plugin API request) to upgrade token storage above plain JSON.
-- [ ] Pre-built local index (embeddings) for retrieval, replacing on-demand grep with vector search for large vaults.
-- [ ] Multi-conversation support (named threads, switch between them, archive).
-- [ ] Cross-restart Undo backed by a small change-journal persisted to plugin data.
-- [ ] Optional `--no-tools` "chat only" mode for high-sensitivity vaults.
-- [ ] MCP server credential management UI (per-server credential fields with secure storage).
-- [ ] User-authored custom tool registration via plugin UI.
-- [ ] Per-folder redaction or "do not send" rules before chunks are passed to the model.
-- [ ] Headless integration tests that drive the SDK against a fixture vault.
-- [ ] Open-editor conflict detection for extra-vault writes (currently vault-only since Obsidian's open-editor APIs are vault-scoped).
+- [x] [deferred] Register a dedicated OAuth App for the plugin and migrate from the GitHub CLI client ID before any non-private distribution (BRAT, community store, or any release where the plugin is installed by users other than the work-unit author). When this work unit is promoted, amend spec FR-001 In-Scope wording and demote the CLI client ID to dev-only.
+- [x] [deferred] Investigate Electron `safeStorage` access from a plugin (or evaluate whether Obsidian could expose it through a plugin API request) to upgrade token storage above plain JSON.
+- [x] [deferred] Pre-built local index (embeddings) for retrieval, replacing on-demand grep with vector search for large vaults.
+- [x] [deferred] Multi-conversation support (named threads, switch between them, archive).
+- [x] [deferred] Cross-restart Undo backed by a small change-journal persisted to plugin data.
+- [x] [deferred] Optional `--no-tools` "chat only" mode for high-sensitivity vaults.
+- [x] [deferred] MCP server credential management UI (per-server credential fields with secure storage).
+- [x] [deferred] User-authored custom tool registration via plugin UI.
+- [x] [deferred] Per-folder redaction or "do not send" rules before chunks are passed to the model.
+- [x] [deferred] Headless integration tests that drive the SDK against a fixture vault.
+- [x] [deferred] Open-editor conflict detection for extra-vault writes (currently vault-only since Obsidian's open-editor APIs are vault-scoped).
 
 ---
 
