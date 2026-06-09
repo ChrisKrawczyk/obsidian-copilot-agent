@@ -319,6 +319,9 @@ export class ChatView extends ItemView {
           // Pending-approval pseudo-tool-call: render an inline
           // ApprovalPrompt block. Resolution comes back via the
           // approval_resolved event below or via real tool execution.
+          // Pass undefined for fields the prior state may have set
+          // (resultContent, detail, undoId, undone) so a same-id
+          // re-prompt doesn't render stale post-execution chrome.
           this.state.upsertToolCall(placeholderId, {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
@@ -327,6 +330,10 @@ export class ChatView extends ItemView {
             outcome: ev.toolCall.outcome,
             argsPreview: ev.toolCall.argsPreview,
             approval: ev.toolCall.approval,
+            resultContent: undefined,
+            detail: undefined,
+            undoId: undefined,
+            undone: undefined,
           });
         } else if (ev.type === "approval_resolved") {
           // Transition pending -> approved/denied so the prompt

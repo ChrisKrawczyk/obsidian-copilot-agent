@@ -240,6 +240,24 @@ export class CopilotAgentSession implements AgentSession {
    */
   private currentToken: string | null;
   private toolCallsThisTurn: AssistantToolCall[] = [];
+
+  /**
+   * Upsert by id into `toolCallsThisTurn`. Used by handlePermission to
+   * avoid creating a duplicate entry when `tool.execution_start` already
+   * fired for the same toolCallId before permissionRequested. Without
+   * this, end-of-stream replay (`yield {type: "complete", toolCalls}`)
+   * would surface the lingering pending_approval entry and regress the
+   * UI from completed back to pending.
+   */
+  private upsertTurnToolCall(call: AssistantToolCall): void {
+    const idx = this.toolCallsThisTurn.findIndex((c) => c.id === call.id);
+    if (idx < 0) {
+      this.toolCallsThisTurn.push(call);
+      return;
+    }
+    this.toolCallsThisTurn[idx] = { ...this.toolCallsThisTurn[idx], ...call };
+  }
+
   private readonly sdkLoader: () => Promise<SdkModule>;
   /**
    * Set during sendMessageStreaming. When non-null, handlePermission +
@@ -277,6 +295,17 @@ export class CopilotAgentSession implements AgentSession {
       promise: Promise<ApprovalChoice>;
     }
   >();
+
+  /**
+   * Memo of approval choices already resolved for a given toolCallId in
+   * this session. The SDK can re-emit `permissionRequested` for an already-
+   * approved/rejected toolCall (e.g., on agent-loop replay or follow-up
+   * iterations). When that happens we must NOT prompt the user again —
+   * we'd flip the UI back to pending_approval after the call has already
+   * completed, and the new Deferred would never resolve. Instead, we
+   * short-circuit with the prior choice.
+   */
+  private readonly resolvedApprovals = new Map<string, ApprovalChoice>();
 
   constructor(
     private readonly opts: AgentSessionOptions,
@@ -487,6 +516,11 @@ export class CopilotAgentSession implements AgentSession {
           const errorMessage = d.error?.message;
           if (existing) {
             existing.outcome = outcome;
+            // Clear approval metadata once the call has executed; the
+            // UI gates the prompt on `outcome === "pending_approval"`,
+            // but a stale approval object on a completed entry is
+            // confusing if anything else inspects it.
+            existing.approval = undefined;
             if (resultContent !== undefined)
               existing.resultContent = resultContent;
             if (errorMessage !== undefined) existing.detail = errorMessage;
@@ -945,12 +979,36 @@ export class CopilotAgentSession implements AgentSession {
     source: "custom" | "mcp" | "builtin",
     argsPreview: string | undefined,
   ): Promise<SdkPermissionResult> {
+    // Short-circuit if this toolCallId was already resolved earlier in
+    // this session. The SDK can re-emit permissionRequested for an
+    // already-handled call; re-prompting would regress the UI from
+    // completed back to pending_approval and the new prompt would never
+    // be resolved.
+    const prior = this.resolvedApprovals.get(toolCallId);
+    if (prior) {
+      console.log(
+        "[copilot-agent] permission re-ask short-circuited",
+        "id:",
+        toolCallId,
+        "priorChoice:",
+        prior.kind,
+      );
+      if (prior.kind === "reject") {
+        return { kind: "reject", feedback: prior.reason ?? "Rejected." };
+      }
+      return { kind: "approve-once" };
+    }
+
     const safety = this.opts.safety!;
     const config = safety.config();
     const input = this.buildSafetyInput(request, safety);
     const decision = decideSafety(input, config, safety.state);
 
     if (decision.decision === "rejected") {
+      this.resolvedApprovals.set(toolCallId, {
+        kind: "reject",
+        reason: decision.reason,
+      });
       return this.recordRejection(
         toolCallId,
         normalised,
@@ -973,8 +1031,9 @@ export class CopilotAgentSession implements AgentSession {
         detail: decision.reason,
         argsPreview,
       };
-      this.toolCallsThisTurn.push(call);
+      this.upsertTurnToolCall(call);
       this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
+      this.resolvedApprovals.set(toolCallId, { kind: "approve-once" });
       return { kind: "approve-once" };
     }
 
@@ -991,7 +1050,7 @@ export class CopilotAgentSession implements AgentSession {
       argsPreview,
       approval: { summary, detail, canOfferSession },
     };
-    this.toolCallsThisTurn.push(pendingCall);
+    this.upsertTurnToolCall(pendingCall);
 
     // If no stream is active (e.g. sendMessage non-streaming path) we
     // have no UI to surface the prompt — fail closed.
@@ -1008,6 +1067,7 @@ export class CopilotAgentSession implements AgentSession {
     } finally {
       this.pendingApprovals.delete(toolCallId);
     }
+    this.resolvedApprovals.set(toolCallId, choice);
 
     // Always emit `approval_resolved` so the UI can transition the
     // pending block to its post-decision state.
