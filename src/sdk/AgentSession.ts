@@ -234,6 +234,18 @@ export class CopilotAgentSession implements AgentSession {
   /** Set once `dispose()` runs. Terminal — blocks all future init(). */
   private disposed = false;
   /**
+   * Monotonic counter incremented whenever the runtime is torn down
+   * (`stopRuntime`, `dispose`). `doInit` captures this value at the
+   * start of its run and bails (cleaning up any client it built) if it
+   * sees the counter has advanced at any `await` boundary. This closes
+   * a Windows-cold-start race where `setToken()` rotates the token,
+   * `stopRuntime` times out waiting for the slow in-flight init, nulls
+   * `this.client`/`this.session`, and then the in-flight init resumes
+   * and re-assigns those fields with a client built from the OLD token
+   * — leaking the subprocess and producing a stale-token session.
+   */
+  private initEpoch = 0;
+  /**
    * Current OAuth token. Mutable so AuthController can rotate it via
    * `setToken()` without rebuilding the AgentSession instance. `null`
    * means "not connected" — init() will reject.
@@ -724,6 +736,10 @@ export class CopilotAgentSession implements AgentSession {
    * Closes the dispose-during-init race the same way `dispose()` did.
    */
   private async stopRuntime(): Promise<void> {
+    // Bump the epoch so any in-flight doInit() can detect that its
+    // runtime is no longer wanted and bail out cleanly. See the
+    // `initEpoch` field docs.
+    this.initEpoch++;
     // If init is still in flight, wait briefly so it can either finish
     // (and we then tear it down) or fail (and stay null). This closes
     // the race where Obsidian unloads — or the token rotates — mid-init
@@ -796,8 +812,12 @@ export class CopilotAgentSession implements AgentSession {
   // ---- internals ----
 
   private async doInit(): Promise<void> {
+    const epoch = this.initEpoch;
     const sdk = await this.sdkLoader();
     if (this.disposed) throw new Error("AgentSession disposed during init");
+    if (this.initEpoch !== epoch) {
+      throw new Error("AgentSession runtime torn down during init");
+    }
     const CopilotClient = sdk.CopilotClient;
     if (!CopilotClient) {
       throw new Error("@github/copilot-sdk does not export CopilotClient");
@@ -813,27 +833,33 @@ export class CopilotAgentSession implements AgentSession {
     });
 
     // From this point on we own a live client. On any post-await disposal
-    // we MUST tear it down ourselves — dispose() can't see it yet.
-    const bailIfDisposed = async (): Promise<void> => {
-      if (!this.disposed) return;
+    // OR epoch advance (token rotation / stopRuntime fired while we were
+    // mid-init) we MUST tear it down ourselves — stopRuntime can't see
+    // a client we haven't assigned to `this.client` yet.
+    const bailIfStale = async (): Promise<void> => {
+      if (!this.disposed && this.initEpoch === epoch) return;
       await safeCall(() => client.stop?.());
-      throw new Error("AgentSession disposed during init");
+      throw new Error(
+        this.disposed
+          ? "AgentSession disposed during init"
+          : "AgentSession runtime torn down during init",
+      );
     };
 
     try {
       if (typeof client.start === "function") {
         await client.start();
-        await bailIfDisposed();
+        await bailIfStale();
       }
       if (typeof client.ping === "function") {
         await client.ping();
-        await bailIfDisposed();
+        await bailIfStale();
       }
 
       this.client = client;
 
       const model = await this.pickModel(client, this.opts.preferredModel);
-      await bailIfDisposed();
+      await bailIfStale();
       this.selectedModel = model;
 
       const session = await client.createSession({
@@ -844,10 +870,19 @@ export class CopilotAgentSession implements AgentSession {
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
-      if (this.disposed) {
+      if (this.disposed || this.initEpoch !== epoch) {
         await safeCall(() => session.disconnect?.());
         await safeCall(() => client.stop?.());
-        throw new Error("AgentSession disposed during init");
+        // Also undo the `this.client = client` assignment above so
+        // stopRuntime doesn't double-tear-down a client we already
+        // stopped here. Guard the null in case a newer init() raced
+        // ahead and assigned its own client.
+        if (this.client === client) this.client = null;
+        throw new Error(
+          this.disposed
+            ? "AgentSession disposed during init"
+            : "AgentSession runtime torn down during init",
+        );
       }
       this.session = session;
     } catch (err) {

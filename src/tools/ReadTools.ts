@@ -50,13 +50,31 @@ const SNIPPET_RADIUS = 80;
  *   3. Delegate the actual I/O to Obsidian's `Vault` API so any
  *      pending modifications in the editor are flushed first.
  *
- * They are registered with `skipPermission: true`. The Phase-2
- * universal permission gate (`denyAll`) still rejects all
- * SDK-managed tool requests; our custom read tools are vault-scoped,
- * path-validated, and read-only — so it's safe to bypass the prompt
- * for v0.1. Phase 6 introduces the SafetyPolicy that will gate
- * writes; Phase 5 keeps the read story simple to make the
- * "agent reads my notes" demo work end-to-end.
+ * They are registered with `skipPermission: true` — i.e. they bypass
+ * the universal SDK permission gate that every other tool flows
+ * through. This is a deliberate exemption for read-only, vault-scoped,
+ * path-validated tools. The "single deny-by-default permission gate"
+ * invariant still holds for everything that mutates state (writes,
+ * MCP, shell, web_fetch, view, etc.) — only side-effect-free reads
+ * over a path-validated scope are exempt.
+ *
+ * **Checklist for future tool authors deciding whether to set
+ * `skipPermission: true`** — ALL of these must be true:
+ *   - Tool is strictly read-only (no filesystem, network, or external
+ *     side effects whatsoever).
+ *   - All inputs that select a resource are validated by something
+ *     equivalent to {@link VaultPath.fromUserInput} (rejects absolute
+ *     paths, `..`, symlinks-out-of-scope, and other escape vectors).
+ *   - Resolved targets are guaranteed to live inside an explicit,
+ *     pre-declared scope (vault root for v0.1; extra-vault roots when
+ *     they land).
+ *   - The data exposed to the model is bounded (no unbounded directory
+ *     walks, no following symlinks out of scope, no reading binary
+ *     blobs that aren't markdown/text).
+ * If any checklist item is uncertain, default to NOT setting
+ * `skipPermission` and let SafetyPolicy decide — the prompt is cheap,
+ * and consistency with the rest of the gate is more valuable than
+ * shaving a click for an edge case.
  */
 export function createReadTools(vault: ReadToolsVault): Tool[] {
   return [

@@ -61,6 +61,12 @@ The SDK exports MCP-related types directly:
 - `ResumeSessionConfig` is exported and is one of the supported `SessionConfig` shapes.
 - Phase 9's plan to use `client.resumeSession({...})` (or equivalent) is feasible; need to inspect the exact resume call signature on the client at runtime to settle whether it lives on `CopilotClient` or is implicit via a `SessionConfig` discriminant. (To be confirmed in §3.)
 
+**Status (post-final-review, after Phase 6 close-out)**: `[deferred]` to the same successor work unit that picks up the remaining Phase Candidates. v0.1 stops at Phase 6 (writes + safety + undo); Phase 9 (cross-restart resume) was descoped before implementation, so confirming the exact `resumeSession` shape is not needed for v0.1 ship. Rationale matches the 11 Phase Candidates deferred in commit 3134dde: out of scope for v0.1, worth tracking, no security/correctness consequence for what shipped.
+
+### 1.6 OAuth scopes (resolves a CodeResearch open question)
+
+**Status (post-final-review)**: `[deferred]` for the same reason. v0.1 uses the GitHub CLI client ID and Device Flow as a private-developer convenience; resolving the precise minimum OAuth scope set needed for Copilot SDK access is only required before non-private distribution (see deferred Phase Candidate "Register a dedicated OAuth App"). Until that candidate is promoted, the empirical scope set returned by Device Flow against the `gh` CLI client ID is sufficient and stable for the dev-only audience v0.1 targets.
+
 ## 2. Build / typecheck (Automated Verification)
 
 | Check                  | Status                                                  |
