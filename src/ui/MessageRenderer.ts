@@ -1,6 +1,6 @@
 import { Component, MarkdownRenderer, type App } from "obsidian";
 import type { Message, ToolCall } from "../domain/types";
-import { renderToolCallBlock } from "./ToolCallBlock";
+import { renderToolCallBlock, type ToolCallBlockHandlers } from "./ToolCallBlock";
 
 /**
  * Internal render slot tracked per message id. Owned by MessageRenderer.
@@ -65,6 +65,12 @@ interface MessageSlot {
  */
 export class MessageRenderer {
   private readonly slots = new Map<string, MessageSlot>();
+  /**
+   * Phase 6: handlers used when rendering tool-call blocks (approval
+   * and undo button clicks). Mutable so ChatView can set them after
+   * MessageRenderer construction without changing the ctor signature.
+   */
+  private toolCallHandlers: ToolCallBlockHandlers = {};
 
   constructor(
     private readonly app: App,
@@ -72,6 +78,10 @@ export class MessageRenderer {
     /** Adds a child component to the parent view's lifecycle. */
     private readonly addChild: (c: Component) => void,
   ) {}
+
+  setToolCallHandlers(handlers: ToolCallBlockHandlers): void {
+    this.toolCallHandlers = handlers;
+  }
 
   /**
    * Sync the DOM against `messages`. Appends new messages, updates
@@ -167,7 +177,9 @@ export class MessageRenderer {
     slot.toolCallsEl.empty();
     if (!calls || calls.length === 0) return;
     for (const c of calls) {
-      slot.toolCallsEl.appendChild(renderToolCallBlock(c));
+      slot.toolCallsEl.appendChild(
+        renderToolCallBlock(c, this.toolCallHandlers),
+      );
     }
   }
 
@@ -266,7 +278,9 @@ function toolCallsSig(calls: ToolCall[] | undefined): string {
       (c) =>
         `${c.id}|${c.outcome}|${c.source ?? ""}|${
           c.resultContent?.length ?? 0
-        }|${c.detail?.length ?? 0}|${c.argsPreview?.length ?? 0}`,
+        }|${c.detail?.length ?? 0}|${c.argsPreview?.length ?? 0}|${
+          c.approval?.summary?.length ?? 0
+        }|${c.undoId ?? ""}|${c.undone ? "u" : ""}`,
     )
     .join(";");
 }

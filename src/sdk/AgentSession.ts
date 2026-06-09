@@ -1,6 +1,14 @@
 import type { PermissionDecider } from "../domain/PermissionDecision";
 import type { PermissionRequest } from "../domain/types";
 import { isAuthError as isAuthErrorLocal } from "../auth/isAuthError";
+import {
+  decideSafety,
+  type SafetyConfig,
+  type SafetyDecisionResult,
+  type SafetyPolicyInput,
+  type SafetyState,
+} from "../domain/SafetyPolicy";
+import { isWriteToolName } from "../tools/WriteTools";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -21,12 +29,25 @@ export interface AssistantToolCall {
    *   - `builtin` — bundled with the CLI runtime (shell, web_fetch, …)
    */
   source?: "custom" | "mcp" | "builtin";
-  outcome: "denied" | "approved" | "completed" | "errored";
+  outcome: "denied" | "approved" | "completed" | "errored" | "pending_approval";
   detail?: string;
   /** Truncated JSON of the tool arguments for display. */
   argsPreview?: string;
   /** Tool result content (when completed). */
   resultContent?: string;
+  /**
+   * Phase 6: when `outcome === "pending_approval"`, populated with the
+   * data needed by the UI approval prompt. Cleared once the user makes
+   * a choice. Always undefined for non-pending entries.
+   */
+  approval?: {
+    /** Human-readable summary line (e.g. "Edit inbox/today.md"). */
+    summary: string;
+    /** Long-form prompt body (e.g. full shell command, write diff). */
+    detail?: string;
+    /** Whether the prompt should offer an "Approve for Session" button. */
+    canOfferSession: boolean;
+  };
 }
 
 export interface AgentSessionOptions {
@@ -41,8 +62,28 @@ export interface AgentSessionOptions {
   gitHubToken?: string | null;
   /** COPILOT_HOME for the runtime (we point it at the plugin dir). */
   baseDirectory: string;
-  /** Universal-approval-gate decider. Phase 2 = denyAll. */
+  /** Universal-approval-gate decider. Phase 2 = denyAll. Used as a fallback when `safety` is not provided. */
   decider: PermissionDecider;
+  /**
+   * Phase 6: when present, replaces `decider` as the policy source.
+   * Each `handlePermission` call routes through `decideSafety(input,
+   * config, state)`; `require-approval` outcomes block on
+   * `onApprovalNeeded` (which the UI fulfils via `resolveApproval`).
+   * Leave undefined to retain Phase 2's legacy `decider` path.
+   */
+  safety?: {
+    /** Live policy configuration; read on every decision so settings updates apply immediately. */
+    config: () => SafetyConfig;
+    /** In-memory session-grants store. */
+    state: SafetyState;
+    /**
+     * Optional: convert an SDK permission request into a vault-relative
+     * path (when the request targets a vault write tool). The session
+     * uses this to feed `SafetyPolicyInput.vaultRelativePath` to the
+     * decision function. Returning undefined means "not a vault path".
+     */
+    extractVaultPath?: (request: SdkPermissionRequest) => string | undefined;
+  };
   /** Optional: skip listModels and force a specific model id. */
   preferredModel?: string;
   /** Optional: forwarded to the SDK CopilotClient as logLevel. */
@@ -101,7 +142,31 @@ export type StreamEvent =
       content?: string;
       errorMessage?: string;
     }
+  | {
+      // Phase 6: emitted by handlePermission when SafetyPolicy returns
+      // `require-approval`. Consumed by ChatView to upsert a pending
+      // tool-call block (containing the ApprovalPrompt UI). When the
+      // user clicks Approve/Reject, ChatView calls
+      // `agent.resolveApproval(toolCallId, choice)`, which resolves a
+      // deferred in pendingApprovals.
+      type: "approval_prompt";
+      toolCall: AssistantToolCall;
+    }
+  | {
+      // Phase 6: emitted from `resolveApproval` so the UI flips the
+      // tool-call block from pending → approved (or denied) before the
+      // SDK's own tool.execution_* events arrive.
+      type: "approval_resolved";
+      id: string;
+      choice: ApprovalChoice;
+    }
   | { type: "complete"; content: string; toolCalls: AssistantToolCall[] };
+
+/** User's response to a pending approval prompt. */
+export type ApprovalChoice =
+  | { kind: "approve-once" }
+  | { kind: "approve-for-session" }
+  | { kind: "reject"; reason?: string };
 
 /**
  * Public adapter surface. The rest of the codebase consumes this — the
@@ -149,6 +214,13 @@ export interface AgentSession {
   dispose(): Promise<void>;
   /** Currently selected model id, or undefined if init hasn't run. */
   getModel(): string | undefined;
+  /**
+   * Phase 6: resolve a pending approval prompt with the user's choice.
+   * Called by the chat view when the user clicks an approval button.
+   * No-op if no approval is pending for this tool-call id (e.g. the
+   * prompt was already auto-rejected during cleanup).
+   */
+  resolveApproval(toolCallId: string, choice: ApprovalChoice): void;
 }
 
 const SDK_TIMEOUT_MS = 60_000;
@@ -189,6 +261,22 @@ export class CopilotAgentSession implements AgentSession {
    * us between the init() and resetConversation() createSession calls.
    */
   private readonly toolsList: SdkTool[] | undefined;
+  /**
+   * Phase 6: in-flight approval prompts keyed by tool-call id. Resolved
+   * by `resolveApproval`; rejected en masse by `cancelAllPendingApprovals`
+   * on cancel/reset/dispose/setToken so a dangling deferred never
+   * leaves the SDK awaiting a response. The value type is a deferred
+   * holding the user's choice (never rejects the underlying promise —
+   * cancellation resolves with `{ kind: "reject", reason: ... }` so
+   * the SDK contract returns a clean PermissionRequestResult).
+   */
+  private readonly pendingApprovals = new Map<
+    string,
+    {
+      resolve: (choice: ApprovalChoice) => void;
+      promise: Promise<ApprovalChoice>;
+    }
+  >();
 
   constructor(
     private readonly opts: AgentSessionOptions,
@@ -528,6 +616,9 @@ export class CopilotAgentSession implements AgentSession {
       acceptingDeltas = false;
       cleanupSubscription();
       this.currentStreamPush = null;
+      this.cancelAllPendingApprovals(
+        "Stream ended before user approved this tool call.",
+      );
       // If the consumer closed the iterator early (break, throw, view
       // teardown) the SDK turn may still be in flight. Abort it on the
       // captured `session` so it doesn't keep running in the background
@@ -546,6 +637,7 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   async cancelCurrent(): Promise<void> {
+    this.cancelAllPendingApprovals("User cancelled the turn.");
     const session = this.session;
     if (!session || typeof session.abort !== "function") return;
     try {
@@ -556,6 +648,7 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   async resetConversation(): Promise<void> {
+    this.cancelAllPendingApprovals("Conversation was reset.");
     if (!this.client) {
       this.initPromise = null;
       this.session = null;
@@ -585,6 +678,7 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.cancelAllPendingApprovals("Agent disposed.");
     await this.stopRuntime();
   }
 
@@ -646,6 +740,7 @@ export class CopilotAgentSession implements AgentSession {
     if (this.disposed) {
       throw new Error("AgentSession disposed");
     }
+    this.cancelAllPendingApprovals("Authentication changed.");
     // Always tear the runtime down first so the next init() picks up
     // the new token. If the token is unchanged we still rebuild — this
     // keeps the lifecycle simple and matches "reconnect" semantics.
@@ -777,14 +872,28 @@ export class CopilotAgentSession implements AgentSession {
       toolName: request.toolName,
       raw: request,
     };
-    const decision = await this.opts.decider(normalised);
-    const toolCallId = request.id ?? `tc${Date.now()}`;
+    const toolCallId =
+      request.toolCallId ?? request.id ?? `tc${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const source = classifyToolSource(
       request.kind,
       request.toolName,
       this.customToolNames,
     );
+    const argsPreview = previewArgs(request);
 
+    // Phase 6 path: SafetyPolicy decides.
+    if (this.opts.safety) {
+      return this.handlePermissionViaSafetyPolicy(
+        request,
+        normalised,
+        toolCallId,
+        source,
+        argsPreview,
+      );
+    }
+
+    // Legacy Phase-2 fallback path (used by tests that don't wire SafetyPolicy).
+    const decision = await this.opts.decider(normalised);
     if (decision.kind === "reject") {
       const call: AssistantToolCall = {
         id: toolCallId,
@@ -793,14 +902,9 @@ export class CopilotAgentSession implements AgentSession {
         source,
         outcome: "denied",
         detail: decision.feedback,
-        argsPreview: previewArgs(request),
+        argsPreview,
       };
       this.toolCallsThisTurn.push(call);
-      // Mirror to the active stream so the chat view can render a
-      // live "denied" tool-call block even when the model never
-      // produces follow-up text. Denied calls don't trigger
-      // tool.execution_complete, so we synthesise the terminal event
-      // ourselves to keep ToolCallBlock state consistent.
       this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
       this.currentStreamPush?.({
         type: "tool_call_complete",
@@ -816,15 +920,232 @@ export class CopilotAgentSession implements AgentSession {
       name: normalised.toolName,
       source,
       outcome: "approved",
-      argsPreview: previewArgs(request),
+      argsPreview,
     };
     this.toolCallsThisTurn.push(call);
-    // Approved calls will produce a tool.execution_start event from the
-    // SDK; the stream handler in sendMessageStreaming emits the
-    // `tool_call_start` event from there (so its `argsPreview` carries
-    // the canonical arguments). We don't push from here to avoid
-    // double-emission.
     return { kind: decision.kind };
+  }
+
+  /**
+   * Phase 6 permission flow. Per design critique:
+   *   - Always return `approve-once` to the SDK (never `approve-for-session`)
+   *     so subsequent calls re-enter this function and re-consult our
+   *     policy; "approve for session" is implemented via our own
+   *     `SafetyState` grants.
+   *   - On `require-approval`, push an `approval_prompt` stream event,
+   *     await user click via `pendingApprovals` deferred, then map the
+   *     choice to an SDK result.
+   *   - On cleanup, `cancelAllPendingApprovals` resolves every deferred
+   *     with `{ kind: "reject" }` so the SDK never hangs.
+   */
+  private async handlePermissionViaSafetyPolicy(
+    request: SdkPermissionRequest,
+    normalised: PermissionRequest,
+    toolCallId: string,
+    source: "custom" | "mcp" | "builtin",
+    argsPreview: string | undefined,
+  ): Promise<SdkPermissionResult> {
+    const safety = this.opts.safety!;
+    const config = safety.config();
+    const input = this.buildSafetyInput(request, safety);
+    const decision = decideSafety(input, config, safety.state);
+
+    if (decision.decision === "rejected") {
+      return this.recordRejection(
+        toolCallId,
+        normalised,
+        source,
+        argsPreview,
+        decision,
+      );
+    }
+
+    if (decision.decision === "auto-apply") {
+      // Push an approved entry so the chat shows the tool call ran
+      // (without prompting). The SDK will fire tool.execution_* events
+      // next; the stream handler will upsert by id.
+      const call: AssistantToolCall = {
+        id: toolCallId,
+        kind: normalised.kind,
+        name: normalised.toolName,
+        source,
+        outcome: "approved",
+        detail: decision.reason,
+        argsPreview,
+      };
+      this.toolCallsThisTurn.push(call);
+      this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
+      return { kind: "approve-once" };
+    }
+
+    // require-approval: surface a prompt in the chat and await user click.
+    const summary = buildApprovalSummary(request, input);
+    const detail = buildApprovalDetail(request);
+    const canOfferSession = request.canOfferSessionApproval !== false;
+    const pendingCall: AssistantToolCall = {
+      id: toolCallId,
+      kind: normalised.kind,
+      name: normalised.toolName,
+      source,
+      outcome: "pending_approval",
+      argsPreview,
+      approval: { summary, detail, canOfferSession },
+    };
+    this.toolCallsThisTurn.push(pendingCall);
+
+    // If no stream is active (e.g. sendMessage non-streaming path) we
+    // have no UI to surface the prompt — fail closed.
+    if (!this.currentStreamPush) {
+      return { kind: "reject", feedback: "No UI available to confirm tool call." };
+    }
+    this.currentStreamPush({ type: "approval_prompt", toolCall: pendingCall });
+
+    const deferred = makeDeferred<ApprovalChoice>();
+    this.pendingApprovals.set(toolCallId, deferred);
+    let choice: ApprovalChoice;
+    try {
+      choice = await deferred.promise;
+    } finally {
+      this.pendingApprovals.delete(toolCallId);
+    }
+
+    // Always emit `approval_resolved` so the UI can transition the
+    // pending block to its post-decision state.
+    this.currentStreamPush?.({
+      type: "approval_resolved",
+      id: toolCallId,
+      choice,
+    });
+
+    if (choice.kind === "reject") {
+      const reason = choice.reason ?? "Rejected by user.";
+      return this.recordRejection(
+        toolCallId,
+        normalised,
+        source,
+        argsPreview,
+        { decision: "rejected", reason },
+      );
+    }
+
+    if (choice.kind === "approve-for-session") {
+      // Apply the grant in our local SafetyState. We narrow the grant
+      // to the same scope SafetyPolicy considered: vault writes ->
+      // grantVault; per-server for MCP; per-kind/per-tool for builtin.
+      switch (input.source) {
+        case "vault":
+          safety.state.grantVault();
+          break;
+        case "extra-vault":
+          if (input.extraVaultRoot)
+            safety.state.grantExtraVault(input.extraVaultRoot);
+          break;
+        case "mcp":
+          if (input.toolName) safety.state.grantMcp(input.toolName);
+          break;
+        case "builtin":
+          if (input.toolName) safety.state.grantBuiltin(input.toolName);
+          break;
+      }
+    }
+
+    // Both approve-once and approve-for-session map to SDK approve-once
+    // (we manage session grants ourselves to keep policy reentrant).
+    return { kind: "approve-once" };
+  }
+
+  /**
+   * Build the SafetyPolicyInput from an SDK permission request. Source
+   * classification rules:
+   *   - Our registered write tools (kind=custom-tool, toolName in WRITE_TOOL_NAMES) → `vault`
+   *   - MCP (kind=mcp) → `mcp`, toolName=serverName
+   *   - Everything else → `builtin`, toolName=kind (or args toolName for custom-tool)
+   */
+  private buildSafetyInput(
+    request: SdkPermissionRequest,
+    safety: NonNullable<AgentSessionOptions["safety"]>,
+  ): SafetyPolicyInput {
+    const kind = request.kind ?? "";
+    const toolName = request.toolName;
+
+    if (kind === "custom-tool" && toolName && isWriteToolName(toolName)) {
+      const vaultPath =
+        safety.extractVaultPath?.(request) ??
+        (typeof request.args?.path === "string"
+          ? (request.args.path as string)
+          : undefined);
+      return {
+        source: "vault",
+        toolName,
+        vaultRelativePath: vaultPath,
+      };
+    }
+
+    if (kind === "mcp") {
+      return {
+        source: "mcp",
+        toolName: request.serverName ?? toolName ?? "(unknown)",
+      };
+    }
+
+    // Built-in. Key by SDK kind for shell/url/memory/hook/read/write,
+    // or by tool name for unregistered custom-tool kinds.
+    let key = kind;
+    if (kind === "custom-tool" && toolName) key = toolName;
+    return { source: "builtin", toolName: key };
+  }
+
+  private recordRejection(
+    toolCallId: string,
+    normalised: PermissionRequest,
+    source: "custom" | "mcp" | "builtin",
+    argsPreview: string | undefined,
+    decision: { decision: "rejected"; reason: string } | SafetyDecisionResult,
+  ): SdkPermissionResult {
+    const reason = decision.reason;
+    const call: AssistantToolCall = {
+      id: toolCallId,
+      kind: normalised.kind,
+      name: normalised.toolName,
+      source,
+      outcome: "denied",
+      detail: reason,
+      argsPreview,
+    };
+    this.toolCallsThisTurn.push(call);
+    this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
+    this.currentStreamPush?.({
+      type: "tool_call_complete",
+      id: toolCallId,
+      outcome: "denied",
+      errorMessage: reason,
+    });
+    return { kind: "reject", feedback: reason };
+  }
+
+  resolveApproval(toolCallId: string, choice: ApprovalChoice): void {
+    const deferred = this.pendingApprovals.get(toolCallId);
+    if (!deferred) return;
+    this.pendingApprovals.delete(toolCallId);
+    deferred.resolve(choice);
+  }
+
+  /**
+   * Resolve every pending approval with a reject so the SDK never
+   * hangs waiting for a user that cannot respond. Called on:
+   *   - cancelCurrent (user clicked Stop)
+   *   - stream generator early-close / finally
+   *   - resetConversation (Clear conversation)
+   *   - setToken / reconnect (token rotation)
+   *   - dispose (plugin unload)
+   */
+  private cancelAllPendingApprovals(reason: string): void {
+    if (this.pendingApprovals.size === 0) return;
+    const reject: ApprovalChoice = { kind: "reject", reason };
+    for (const [, deferred] of this.pendingApprovals) {
+      deferred.resolve(reject);
+    }
+    this.pendingApprovals.clear();
   }
 }
 
@@ -852,14 +1173,107 @@ export function classifyToolSource(
   return "builtin";
 }
 
-/** Truncate JSON args to a short single-line preview for UI display. */
+/** Kind-aware args preview for the UI tool-call block. */
 function previewArgs(request: SdkPermissionRequest): string | undefined {
-  // The SDK doesn't put args on the PermissionRequest in our local
-  // shape; the chat layer typically wants something to show next to
-  // the tool name. Return the kind as a fallback. Phase 6 expands this
-  // when the SDK passes structured arguments through.
-  const raw = (request as { arguments?: unknown }).arguments;
-  return stringifyArgsForPreview(raw);
+  switch (request.kind) {
+    case "shell":
+      return request.fullCommandText
+        ? truncate(request.fullCommandText, 200)
+        : undefined;
+    case "url":
+      return request.url ? truncate(request.url, 200) : undefined;
+    case "read":
+      return request.path ? `read: ${truncate(request.path, 180)}` : undefined;
+    case "write":
+      return request.fileName
+        ? `write: ${truncate(request.fileName, 180)}`
+        : undefined;
+    case "memory":
+      return request.fact ? truncate(request.fact, 200) : undefined;
+    case "custom-tool":
+    case "mcp":
+      return stringifyArgsForPreview(request.args);
+    default: {
+      // Legacy fallback used by tests that pass `arguments` directly.
+      const raw = (request as { arguments?: unknown }).arguments;
+      return stringifyArgsForPreview(raw);
+    }
+  }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/** Build a short human-readable summary line for the approval prompt header. */
+function buildApprovalSummary(
+  request: SdkPermissionRequest,
+  input: SafetyPolicyInput,
+): string {
+  if (input.source === "vault" && input.toolName && input.vaultRelativePath) {
+    return `${input.toolName} ${input.vaultRelativePath}`;
+  }
+  switch (request.kind) {
+    case "shell":
+      return `Run shell command`;
+    case "url":
+      return `Fetch URL`;
+    case "write":
+      return `Write ${request.fileName ?? "(file)"}`;
+    case "read":
+      return `Read ${request.path ?? "(path)"}`;
+    case "memory":
+      return `Update memory`;
+    case "mcp":
+      return `MCP tool ${request.serverName ?? request.toolName ?? ""}`.trim();
+    case "custom-tool":
+      return `${request.toolName ?? "custom tool"}`;
+    default:
+      return request.kind ?? "Tool call";
+  }
+}
+
+/** Build the long-form detail body (e.g. full shell command, URL, args JSON). */
+function buildApprovalDetail(
+  request: SdkPermissionRequest,
+): string | undefined {
+  switch (request.kind) {
+    case "shell":
+      return request.fullCommandText;
+    case "url":
+      return request.url;
+    case "write":
+      return request.fileName;
+    case "read":
+      return request.path;
+    case "memory":
+      return request.fact;
+    case "mcp":
+    case "custom-tool":
+      return request.args ? safeJson(request.args) : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function safeJson(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+/** Minimal deferred — resolve only (never rejects, simplifying error paths). */
+function makeDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+} {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 /** Shared truncation helper for both permission-request and execution_start arg previews. */
@@ -1023,8 +1437,26 @@ export interface SdkSession {
 
 export interface SdkPermissionRequest {
   id?: string;
+  /** SDK-canonical correlation id; used as our chat-block id when present. */
+  toolCallId?: string;
   kind?: string;
   toolName?: string;
+  /** Custom-tool / MCP arguments. */
+  args?: Record<string, unknown>;
+  /** Built-in `shell` request — full text to execute. */
+  fullCommandText?: string;
+  /** Built-in `write` request — target file (CLI-relative). */
+  fileName?: string;
+  /** Built-in `read` request — target path. */
+  path?: string;
+  /** Built-in `url` request — target URL. */
+  url?: string;
+  /** Built-in `memory` request — fact being stored / voted. */
+  fact?: string;
+  /** MCP request — server name. */
+  serverName?: string;
+  /** Whether the SDK considers session approval valid for this request. */
+  canOfferSessionApproval?: boolean;
 }
 
 export type SdkPermissionResult =

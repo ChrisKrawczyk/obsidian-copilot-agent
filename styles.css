@@ -323,3 +323,66 @@
   font-style: italic;
   color: var(--text-muted);
 }
+
+/* Phase 6: Approval prompt + Undo button */
+.copilot-agent-toolcall-approval {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 4px;
+}
+.copilot-agent-toolcall-approval-headline {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.copilot-agent-toolcall-approval-detail {
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0;
+  color: var(--text-muted);
+}
+.copilot-agent-toolcall-approval-help {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin: 6px 0 8px;
+}
+.copilot-agent-toolcall-approval-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.copilot-agent-toolcall-approval-buttons button {
+  font-size: 0.85em;
+  padding: 3px 10px;
+}
+.copilot-agent-toolcall-approve { background: var(--interactive-accent); color: var(--text-on-accent); }
+.copilot-agent-toolcall-approve-session { background: var(--background-modifier-success); }
+.copilot-agent-toolcall-reject { background: var(--background-modifier-error); color: var(--text-on-accent); }
+.copilot-agent-toolcall-undo {
+  margin-left: 6px;
+  font-size: 0.8em;
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.copilot-agent-toolcall-undo:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+.copilot-agent-toolcall-undone {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin-left: 6px;
+  font-style: italic;
+}
+.copilot-agent-toolcall-pending_approval .copilot-agent-toolcall-status {
+  background: var(--background-modifier-error-rgb, rgba(255,165,0,0.15));
+  color: var(--text-warning, #c97e00);
+}

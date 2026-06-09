@@ -33,14 +33,39 @@ export interface ToolCall {
    *   - `builtin` — bundled with the CLI runtime (shell, web_fetch, …)
    */
   source?: "custom" | "mcp" | "builtin";
-  /** "denied" in Phase 2 (deny-by-default). */
-  outcome: "denied" | "approved" | "completed" | "errored";
+  /** "denied" in Phase 2 (deny-by-default). Phase 6 adds `pending_approval`. */
+  outcome:
+    | "denied"
+    | "approved"
+    | "completed"
+    | "errored"
+    | "pending_approval";
   /** Optional message describing why (e.g. denial reason / error). */
   detail?: string;
   /** Pretty-printed arguments for display. */
   argsPreview?: string;
   /** Successful result content for display. */
   resultContent?: string;
+  /**
+   * Phase 6: populated when `outcome === "pending_approval"` so the UI
+   * can render an inline ApprovalPrompt block. Cleared on resolution.
+   */
+  approval?: {
+    summary: string;
+    detail?: string;
+    canOfferSession: boolean;
+  };
+  /**
+   * Phase 6: id of the corresponding UndoJournal entry for successful
+   * vault writes. Drives the inline Undo button. Undefined for
+   * non-write or failed calls.
+   */
+  undoId?: string;
+  /**
+   * Phase 6: true once the user has clicked Undo and the action was
+   * reverted successfully. The Undo button becomes inert.
+   */
+  undone?: boolean;
 }
 
 export interface Message {

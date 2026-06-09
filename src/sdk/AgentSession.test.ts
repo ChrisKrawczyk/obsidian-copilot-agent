@@ -8,6 +8,7 @@ import {
   type SdkSession,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
+import { SafetyState } from "../domain/SafetyPolicy";
 
 interface FakeHandles {
   sdk: SdkModule;
@@ -712,6 +713,159 @@ describe("CopilotAgentSession", () => {
       "read_file",
       "view",
     ]);
+    await agent.dispose();
+  });
+});
+
+describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
+  function makeSafetyAgent(
+    handles: FakeHandles,
+    overrides: {
+      defaultMode?: "auto-apply-with-undo" | "require-approval";
+      vaultAllowlist?: string[];
+      builtinAutoApprove?: Record<string, boolean>;
+    } = {},
+  ) {
+    const state = new SafetyState();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        safety: {
+          config: () => ({
+            fsDefaultMode: overrides.defaultMode ?? "auto-apply-with-undo",
+            vaultAllowlist: overrides.vaultAllowlist ?? [],
+            builtinAutoApprove: overrides.builtinAutoApprove ?? {},
+            mcpAutoApprove: {},
+          }),
+          state,
+        },
+      },
+      async () => handles.sdk,
+    );
+    return { agent, state };
+  }
+
+  test("auto-applies vault writes in default mode and returns approve-once", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h);
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-w1",
+      kind: "custom-tool",
+      toolName: "create_file",
+      args: { path: "inbox/new.md", content: "x" },
+    });
+    expect(result.kind).toBe("approve-once");
+    await agent.dispose();
+  });
+
+  test("rejects when no UI stream is attached and mode requires approval", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, { defaultMode: "require-approval" });
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-w2",
+      kind: "custom-tool",
+      toolName: "edit_file",
+      args: { path: "x.md", content: "y" },
+    });
+    expect(result.kind).toBe("reject");
+    if (result.kind === "reject") {
+      expect(result.feedback).toMatch(/No UI/i);
+    }
+    await agent.dispose();
+  });
+
+  test("MCP and built-in calls require approval by default (no UI -> reject)", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h);
+    await agent.init();
+    const mcpResult = await h.permissionHandler!({
+      toolCallId: "tc-mcp",
+      kind: "mcp",
+      serverName: "my-server",
+      toolName: "do-thing",
+    });
+    expect(mcpResult.kind).toBe("reject");
+
+    const shellResult = await h.permissionHandler!({
+      toolCallId: "tc-sh",
+      kind: "shell",
+      fullCommandText: "ls -la",
+    });
+    expect(shellResult.kind).toBe("reject");
+    await agent.dispose();
+  });
+
+  test("built-in toggle auto-approves matching kind", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, {
+      builtinAutoApprove: { shell: true },
+    });
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-sh2",
+      kind: "shell",
+      fullCommandText: "echo hi",
+    });
+    expect(result.kind).toBe("approve-once");
+    await agent.dispose();
+  });
+
+  test("allowlist auto-approves matching vault path even when default mode is require-approval", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, {
+      defaultMode: "require-approval",
+      vaultAllowlist: ["inbox"],
+    });
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-w3",
+      kind: "custom-tool",
+      toolName: "create_file",
+      args: { path: "inbox/today.md", content: "x" },
+    });
+    expect(result.kind).toBe("approve-once");
+    await agent.dispose();
+  });
+
+  test("resolveApproval is a no-op for an unknown id", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h);
+    await agent.init();
+    // Should not throw.
+    agent.resolveApproval("does-not-exist", { kind: "approve-once" });
+    await agent.dispose();
+  });
+
+  test("cancelCurrent rejects pending approvals so SDK does not hang", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, { defaultMode: "require-approval" });
+    await agent.init();
+    // Start streaming so currentStreamPush is set, then race a
+    // permission request that requires approval. We don't ever click
+    // approve — cancelCurrent should resolve the deferred as reject.
+    const iter = agent.sendMessageStreaming("trigger");
+    const collector = (async () => {
+      const seen: unknown[] = [];
+      for await (const ev of iter) seen.push(ev);
+      return seen;
+    })();
+    // Wait one tick so the stream subscribes its handlers.
+    await new Promise((r) => setTimeout(r, 5));
+    const permissionResultPromise = h.permissionHandler!({
+      toolCallId: "tc-pending",
+      kind: "shell",
+      fullCommandText: "rm -rf /",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    await agent.cancelCurrent();
+    const result = await permissionResultPromise;
+    expect(result.kind).toBe("reject");
+    await collector.catch(() => {});
     await agent.dispose();
   });
 });

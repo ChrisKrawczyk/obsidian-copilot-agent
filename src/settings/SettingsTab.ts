@@ -2,6 +2,10 @@ import { App, PluginSettingTab, Setting, type Plugin } from "obsidian";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import type { TokenStore } from "../auth/TokenStore";
 import { DeviceFlowModal } from "../ui/DeviceFlowModal";
+import {
+  KNOWN_BUILTIN_KINDS,
+  type SafetySettingsStore,
+} from "./SafetySettingsStore";
 
 /**
  * Phase 3 settings. Surfaces the auth state machine + persistence toggle.
@@ -18,6 +22,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     plugin: Plugin,
     private readonly authController: AuthController,
     private readonly tokenStore: TokenStore,
+    private readonly safetyStore?: SafetySettingsStore,
   ) {
     super(app, plugin);
   }
@@ -54,13 +59,88 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl)
-      .setName("Permission policy")
-      .setDesc(
-        "Phase 2/3: deny-by-default. Every tool invocation (built-in, " +
-          "MCP, or custom) is rejected at the universal-approval-gate. " +
-          "Phase 6 introduces SafetyPolicy with vault-scoped allow rules.",
-      );
+    // ---- Phase 6: SafetyPolicy ----
+    if (this.safetyStore) {
+      const safety = this.safetyStore.snapshot();
+      containerEl.createEl("h3", { text: "Safety" });
+
+      new Setting(containerEl)
+        .setName("Default policy for vault writes")
+        .setDesc(
+          "Auto-apply with undo: vault writes (create/edit/delete) " +
+            "proceed silently and a journal entry is recorded so you " +
+            "can revert from the chat. Require approval: every write " +
+            "surfaces an inline Approve / Approve-for-session / Reject " +
+            "prompt before it runs. Built-ins (shell, url, …) always " +
+            "require approval unless individually toggled below.",
+        )
+        .addDropdown((dd) =>
+          dd
+            .addOption("require-approval", "Require approval (recommended)")
+            .addOption(
+              "auto-apply-with-undo",
+              "Auto-apply with undo (vault only)",
+            )
+            .setValue(safety.defaultMode)
+            .onChange(async (value) => {
+              await this.safetyStore!.setDefaultMode(
+                value === "auto-apply-with-undo"
+                  ? "auto-apply-with-undo"
+                  : "require-approval",
+              );
+            }),
+        );
+
+      new Setting(containerEl)
+        .setName("Vault allowlist")
+        .setDesc(
+          "Vault-relative path prefixes that bypass the approval prompt " +
+            "for writes (one per line). E.g. `Inbox/copilot` permits " +
+            "writes to that subfolder and any file inside it. Path " +
+            "traversal (`..`), absolute paths, and Windows drive " +
+            "letters are rejected.",
+        )
+        .addTextArea((ta) => {
+          ta.inputEl.rows = 4;
+          ta.inputEl.style.width = "100%";
+          ta.setValue(safety.allowlist.join("\n")).onChange(async (raw) => {
+            const entries = raw
+              .split(/\r?\n/)
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            await this.safetyStore!.setAllowlist(entries);
+          });
+        });
+
+      containerEl.createEl("h4", { text: "Auto-approve built-ins" });
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text:
+          "Each toggle silently approves the matching SDK permission " +
+          "category. Keep these OFF unless you trust the model to act " +
+          "without confirmation — there is NO undo for built-ins.",
+      });
+
+      for (const kind of KNOWN_BUILTIN_KINDS) {
+        new Setting(containerEl)
+          .setName(builtinLabel(kind))
+          .setDesc(builtinDesc(kind))
+          .addToggle((toggle) =>
+            toggle
+              .setValue(safety.autoApproveBuiltins[kind] ?? false)
+              .onChange(async (value) => {
+                await this.safetyStore!.setBuiltinAutoApprove(kind, value);
+              }),
+          );
+      }
+    } else {
+      new Setting(containerEl)
+        .setName("Permission policy")
+        .setDesc(
+          "Phase 2/3: deny-by-default. Every tool invocation (built-in, " +
+            "MCP, or custom) is rejected at the universal-approval-gate.",
+        );
+    }
 
     new Setting(containerEl)
       .setName("Copilot CLI binary")
@@ -161,5 +241,43 @@ function buttonDesc(state: AuthState): string {
       return "Disconnect drops the token immediately and stops the SDK runtime.";
     case "error":
       return "Click Reconnect to start a fresh Device Flow.";
+  }
+}
+
+function builtinLabel(kind: string): string {
+  switch (kind) {
+    case "shell":
+      return "Shell commands";
+    case "url":
+      return "URL fetches (web_fetch)";
+    case "memory":
+      return "Memory writes";
+    case "hook":
+      return "Hook execution";
+    case "write":
+      return "Non-vault file writes";
+    case "read":
+      return "Non-vault file reads";
+    default:
+      return kind;
+  }
+}
+
+function builtinDesc(kind: string): string {
+  switch (kind) {
+    case "shell":
+      return "Approves every shell command the agent proposes — high risk. Leave OFF in most cases.";
+    case "url":
+      return "Approves every outbound HTTP fetch the agent proposes (web pages, APIs).";
+    case "memory":
+      return "Approves writes to Copilot's long-term memory file.";
+    case "hook":
+      return "Approves execution of plugin/CLI hooks the model triggers.";
+    case "write":
+      return "Approves writes to files OUTSIDE the active vault. Vault writes are governed by the policy above.";
+    case "read":
+      return "Approves reads from files OUTSIDE the active vault. Vault reads are always allowed (Phase 5 read tools).";
+    default:
+      return "";
   }
 }

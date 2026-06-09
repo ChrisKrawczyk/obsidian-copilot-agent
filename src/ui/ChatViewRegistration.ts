@@ -2,11 +2,13 @@ import { Plugin } from "obsidian";
 import { ChatView, CHAT_VIEW_TYPE } from "./ChatView";
 import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController } from "../auth/AuthController";
+import type { UndoJournal } from "../domain/UndoJournal";
 
 interface ChatViewRegistrationDeps {
   agent: AgentSession;
   auth: AuthController;
   openSettings: () => void;
+  undoJournal?: UndoJournal;
 }
 
 export function registerChatView(

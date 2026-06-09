@@ -14,6 +14,10 @@ import { obsidianHttpClient } from "./auth/HttpClient";
 import { TokenStore } from "./auth/TokenStore";
 import { AuthController, type AgentTokenSink } from "./auth/AuthController";
 import { createReadTools } from "./tools/ReadTools";
+import { createWriteTools } from "./tools/WriteTools";
+import { SafetyState } from "./domain/SafetyPolicy";
+import { UndoJournal } from "./domain/UndoJournal";
+import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 
 /**
  * Phase 3 wiring:
@@ -51,10 +55,32 @@ export default class CopilotAgentPlugin extends Plugin {
       saveData: (data) => this.saveData(data),
     });
 
+    const safetySettingsStore = new SafetySettingsStore({
+      loadData: () => this.loadData(),
+      saveData: (data) => this.saveData(data),
+    });
+    const safetyState = new SafetyState();
+    const undoJournal = new UndoJournal(
+      this.app.vault as unknown as ConstructorParameters<typeof UndoJournal>[0],
+    );
+
     // We need the AuthController reference before the agent (for
     // onAuthError) AND vice-versa (AuthController wraps the agent
     // token sink). Resolve by assigning post-construction.
     let controllerRef: AuthController | null = null;
+
+    const readTools = createReadTools(
+      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+    );
+    const writeTools = createWriteTools({
+      vault: this.app.vault as unknown as Parameters<
+        typeof createWriteTools
+      >[0]["vault"],
+      workspace: this.app.workspace as unknown as Parameters<
+        typeof createWriteTools
+      >[0]["workspace"],
+      undoJournal,
+    });
 
     const agent = new CopilotAgentSession({
       cliPath,
@@ -63,20 +89,33 @@ export default class CopilotAgentPlugin extends Plugin {
       decider: denyAll,
       logLevel: "info",
       onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
-      // Phase 5: register vault read tools. They run in-process and
-      // are scoped to the active vault by `resolveVaultPath`. Marked
-      // `skipPermission: true` so the Phase-2 denyAll decider doesn't
-      // refuse them — denyAll still gates every SDK-managed built-in,
-      // which is the Phase-2 safety story we want to keep until the
-      // Phase-6 SafetyPolicy lands.
-      // Casts:
-      //   - Vault → ReadToolsVault: we only use the desktop
-      //     FileSystemAdapter subset, which is the only platform
-      //     Obsidian Desktop supports anyway.
-      //   - Tool[] → SdkTool[]: SDK's `Tool.handler` carries
-      //     `ToolInvocation` typing that's noisier than our
-      //     structural shape; the runtime contract matches.
-      tools: createReadTools(this.app.vault as unknown as Parameters<typeof createReadTools>[0]) as unknown as import("./sdk/AgentSession").SdkTool[],
+      // Phase 5+6: register vault read/write tools. Read tools use
+      // skipPermission (always allowed inside vault). Write tools
+      // intentionally DO NOT skip permission — every invocation flows
+      // through SafetyPolicy below.
+      tools: [
+        ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+      ],
+      // Phase 6: route all permission requests through SafetyPolicy.
+      // `config` is read on every decision so settings changes apply
+      // immediately. `extractVaultPath` pulls the candidate vault
+      // path out of write-tool args for allowlist matching.
+      safety: {
+        config: () => {
+          const snap = safetySettingsStore.snapshot();
+          return {
+            fsDefaultMode: snap.defaultMode,
+            vaultAllowlist: snap.allowlist,
+            builtinAutoApprove: snap.autoApproveBuiltins,
+          };
+        },
+        state: safetyState,
+        extractVaultPath: (req) => {
+          const args = (req as { args?: { path?: unknown } }).args;
+          return typeof args?.path === "string" ? args.path : undefined;
+        },
+      },
     });
     this.agent = agent;
 
@@ -97,6 +136,7 @@ export default class CopilotAgentPlugin extends Plugin {
     void (async () => {
       try {
         await tokenStore.load();
+        await safetySettingsStore.load();
         await controller.hydrate();
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);
@@ -114,12 +154,14 @@ export default class CopilotAgentPlugin extends Plugin {
       this,
       controller,
       tokenStore,
+      safetySettingsStore,
     );
     this.addSettingTab(settingsTab);
 
     registerChatView(this, {
       agent,
       auth: controller,
+      undoJournal,
       openSettings: () => {
         // Obsidian doesn't expose a typed API for "open my settings tab",
         // but the workspace command does the right thing. Falls back to

@@ -8,6 +8,7 @@ import { ChatState } from "../domain/ChatState";
 import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
+import type { UndoJournal } from "../domain/UndoJournal";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -24,6 +25,12 @@ interface ChatViewDeps {
    * Obsidian's internal `setting.openTabById`.
    */
   openSettings: () => void;
+  /**
+   * Phase 6: undo journal for vault write tools. Click on the inline
+   * Undo button routes here. Optional so Phase 5 tests still construct
+   * the view without it.
+   */
+  undoJournal?: UndoJournal;
 }
 
 export class ChatView extends ItemView {
@@ -31,6 +38,7 @@ export class ChatView extends ItemView {
   private agent: AgentSession;
   private auth: AuthController;
   private openSettings: () => void;
+  private undoJournal?: UndoJournal;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
@@ -79,6 +87,7 @@ export class ChatView extends ItemView {
     this.agent = deps.agent;
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
+    this.undoJournal = deps.undoJournal;
   }
 
   getViewType(): string {
@@ -111,6 +120,22 @@ export class ChatView extends ItemView {
       this.listEl,
       (c) => this.addChild(c),
     );
+    // Phase 6: wire ApprovalPrompt + Undo button clicks into the
+    // agent's resolveApproval / undo journal entry points. The view
+    // (not the renderer) owns these effects so the renderer stays
+    // pure-render.
+    this.renderer.setToolCallHandlers({
+      onApprove: (id) =>
+        this.agent.resolveApproval(id, { kind: "approve-once" }),
+      onApproveForSession: (id) =>
+        this.agent.resolveApproval(id, { kind: "approve-for-session" }),
+      onReject: (id) =>
+        this.agent.resolveApproval(id, {
+          kind: "reject",
+          reason: "Rejected by user.",
+        }),
+      onUndo: (id) => void this.handleUndoClick(id),
+    });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
     this.inputEl = composer.createEl("textarea", {
@@ -273,14 +298,51 @@ export class ChatView extends ItemView {
             detail: ev.toolCall.detail,
             argsPreview: ev.toolCall.argsPreview,
             resultContent: ev.toolCall.resultContent,
+            approval: ev.toolCall.approval,
           });
         } else if (ev.type === "tool_call_complete") {
+          // Capture the undoId surfaced by our write-tool handlers so
+          // the ToolCallBlock can render an Undo button for vault
+          // writes. We look at the JSON result content for a
+          // `"undoId"` field set by createFileImpl/editFileImpl/
+          // deleteFileImpl. If absent, undoId stays undefined.
+          const undoId = extractUndoId(ev.content);
           this.state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: ev.outcome,
             resultContent: ev.content,
             detail: ev.errorMessage,
+            undoId,
+          });
+        } else if (ev.type === "approval_prompt") {
+          // Pending-approval pseudo-tool-call: render an inline
+          // ApprovalPrompt block. Resolution comes back via the
+          // approval_resolved event below or via real tool execution.
+          this.state.upsertToolCall(placeholderId, {
+            id: ev.toolCall.id,
+            kind: ev.toolCall.kind,
+            name: ev.toolCall.name,
+            source: ev.toolCall.source,
+            outcome: ev.toolCall.outcome,
+            argsPreview: ev.toolCall.argsPreview,
+            approval: ev.toolCall.approval,
+          });
+        } else if (ev.type === "approval_resolved") {
+          // Transition pending -> approved/denied so the prompt
+          // disappears. tool_call_complete (or tool.execution_*) will
+          // overwrite this immediately if execution proceeds.
+          const newOutcome =
+            ev.choice.kind === "reject" ? "denied" : "approved";
+          this.state.upsertToolCall(placeholderId, {
+            id: ev.id,
+            kind: "tool",
+            outcome: newOutcome,
+            detail:
+              ev.choice.kind === "reject"
+                ? (ev.choice.reason ?? "Rejected by user.")
+                : undefined,
+            approval: undefined,
           });
         } else if (ev.type === "complete") {
           finalContent = ev.content;
@@ -390,5 +452,61 @@ export class ChatView extends ItemView {
     if (!this.renderer) return;
     this.renderer.sync(this.state.getMessages());
   }
+
+  /**
+   * Handle an Undo button click. Finds the journal entry, runs the
+   * revert, and updates the message's tool-call entry so the block
+   * flips into its "reverted" state. Failures surface as a Notice so
+   * the user sees the reason (e.g. file has been modified since).
+   */
+  private async handleUndoClick(undoId: string): Promise<void> {
+    if (!this.undoJournal) {
+      new Notice("Undo is not available in this build.");
+      return;
+    }
+    const entry = this.undoJournal.get(undoId);
+    if (!entry) {
+      new Notice("Cannot undo: no journal entry for this action.");
+      return;
+    }
+    const outcome = await this.undoJournal.undo(entry.id);
+    if (!outcome.ok) {
+      new Notice(outcome.reason ?? "Undo failed.");
+      return;
+    }
+    const messages = this.state.getMessages();
+    for (const m of messages) {
+      const hit = m.toolCalls?.find((c) => c.undoId === entry.id);
+      if (hit) {
+        this.state.upsertToolCall(m.id, {
+          id: hit.id,
+          kind: hit.kind,
+          outcome: "completed",
+          undoId: entry.id,
+          undone: true,
+        });
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Pull the undoId from a write-tool result. Our handlers return a
+ * `{ ok: true, undoId: "..." }` JSON envelope; we parse it leniently
+ * here so non-write tool results (which never carry undoId) just
+ * yield undefined.
+ */
+function extractUndoId(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { ok?: boolean; undoId?: string };
+    if (parsed?.ok === true && typeof parsed.undoId === "string") {
+      return parsed.undoId;
+    }
+  } catch {
+    // Result wasn't JSON; that's expected for many built-in tools.
+  }
+  return undefined;
 }
 
