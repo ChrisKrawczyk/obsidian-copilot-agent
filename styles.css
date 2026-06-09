@@ -1,0 +1,388 @@
+/* Copilot Agent (Spike) — Phase 2 chat view styles.
+ * Use Obsidian CSS variables so themes apply automatically. */
+
+.copilot-agent-chat-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  gap: 0;
+  /* Obsidian sets user-select: none on workspace leaves so headers are
+   * draggable. Re-enable selection inside our chat view so users can
+   * copy assistant output. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.copilot-agent-chat-root *,
+.copilot-agent-messages,
+.copilot-agent-msg,
+.copilot-agent-msg-body {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.copilot-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+
+.copilot-agent-title {
+  font-weight: 600;
+  font-size: var(--font-ui-medium);
+}
+
+.copilot-agent-status {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.copilot-agent-status-error {
+  color: var(--text-error);
+}
+
+.copilot-agent-messages {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.copilot-agent-msg {
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.copilot-agent-msg-user {
+  background: var(--background-primary-alt);
+}
+
+.copilot-agent-msg.is-pending {
+  opacity: 0.7;
+}
+
+.copilot-agent-msg.is-streaming {
+  /* Subtle pulse to signal the message is still arriving. */
+  border-color: var(--interactive-accent);
+}
+
+.copilot-agent-msg.is-interrupted {
+  border-color: var(--text-warning, var(--text-muted));
+  opacity: 0.85;
+}
+
+.copilot-agent-msg.is-interrupted .copilot-agent-msg-body::after {
+  content: " (stopped)";
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-style: italic;
+}
+
+.copilot-agent-msg-stream {
+  /* Plain-text streaming canvas — keep the Markdown look but skip the
+     expensive Markdown re-render until the message completes. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  margin: 0;
+}
+
+.copilot-agent-msg.is-error {
+  border-color: var(--text-error);
+}
+
+.copilot-agent-msg-role {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+  font-weight: 600;
+}
+
+.copilot-agent-msg-body p:first-child {
+  margin-top: 0;
+}
+.copilot-agent-msg-body p:last-child {
+  margin-bottom: 0;
+}
+
+.copilot-agent-composer {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.copilot-agent-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 3rem;
+  font-family: inherit;
+  font-size: var(--font-ui-small);
+}
+
+.copilot-agent-send {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.copilot-agent-send.is-loading {
+  cursor: pointer;
+}
+
+.copilot-agent-send-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.copilot-agent-send-label {
+  display: inline-block;
+}
+
+/* Stop button state — Send button morphs into a stop control while
+ * a streaming turn is in flight. */
+.copilot-agent-send.mod-warning {
+  background: var(--text-warning, var(--background-modifier-error));
+  color: var(--text-on-accent);
+}
+
+/* Phase 3: Connect-CTA shown in the composer when not connected. */
+.copilot-agent-connect-cta {
+  align-self: stretch;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.copilot-agent-connect-cta:hover {
+  background: var(--interactive-accent-hover);
+}
+
+/* Phase 3: Device Flow modal layout. */
+.copilot-agent-device-flow .copilot-agent-device-intro {
+  margin: 0.25rem 0 1rem;
+  color: var(--text-muted);
+}
+.copilot-agent-device-flow .copilot-agent-device-code-row,
+.copilot-agent-device-flow .copilot-agent-device-url-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.copilot-agent-device-flow .copilot-agent-device-label {
+  flex: 0 0 7rem;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.copilot-agent-device-flow .copilot-agent-device-code {
+  font-family: var(--font-monospace);
+  font-size: 1.4rem;
+  letter-spacing: 0.1rem;
+  font-weight: 700;
+  flex: 1 1 auto;
+  user-select: all;
+}
+.copilot-agent-device-flow .copilot-agent-device-url {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  flex: 1 1 auto;
+  user-select: all;
+  word-break: break-all;
+}
+.copilot-agent-device-flow .copilot-agent-device-status {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--background-secondary);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+/* ---- Phase 5: tool call blocks ---- */
+
+.copilot-agent-msg-toolcalls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.25rem 0;
+}
+
+.copilot-agent-msg-toolcalls:empty {
+  display: none;
+}
+
+.copilot-agent-toolcall {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-size: 0.9em;
+  overflow: hidden;
+}
+
+.copilot-agent-toolcall-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.copilot-agent-toolcall-summary::-webkit-details-marker {
+  display: none;
+}
+
+.copilot-agent-toolcall-icon {
+  flex: 0 0 auto;
+  font-size: 1em;
+}
+
+.copilot-agent-toolcall-name {
+  font-family: var(--font-monospace);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+
+.copilot-agent-toolcall-source {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.copilot-agent-toolcall-status {
+  font-size: 0.75em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.copilot-agent-toolcall-status-completed {
+  background: var(--color-green);
+  color: white;
+}
+
+.copilot-agent-toolcall-status-errored,
+.copilot-agent-toolcall-status-denied {
+  background: var(--color-red);
+  color: white;
+}
+
+.copilot-agent-toolcall-status-approved {
+  background: var(--color-yellow);
+  color: var(--text-on-accent);
+}
+
+.copilot-agent-toolcall-body {
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.copilot-agent-toolcall-section-label {
+  font-size: 0.75em;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 0.15rem;
+}
+
+.copilot-agent-toolcall-section-content {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  background: var(--background-primary);
+  border-radius: 4px;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16em;
+  overflow: auto;
+}
+
+.copilot-agent-toolcall-running {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+/* Phase 6: Approval prompt + Undo button */
+.copilot-agent-toolcall-approval {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  border-radius: 4px;
+}
+.copilot-agent-toolcall-approval-headline {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.copilot-agent-toolcall-approval-detail {
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 4px 0;
+  color: var(--text-muted);
+}
+.copilot-agent-toolcall-approval-help {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin: 6px 0 8px;
+}
+.copilot-agent-toolcall-approval-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.copilot-agent-toolcall-approval-buttons button {
+  font-size: 0.85em;
+  padding: 3px 10px;
+}
+.copilot-agent-toolcall-approve { background: var(--interactive-accent); color: var(--text-on-accent); }
+.copilot-agent-toolcall-approve-session { background: var(--background-modifier-success); }
+.copilot-agent-toolcall-reject { background: var(--background-modifier-error); color: var(--text-on-accent); }
+.copilot-agent-toolcall-undo {
+  margin-left: 6px;
+  font-size: 0.8em;
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.copilot-agent-toolcall-undo:hover {
+  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+}
+.copilot-agent-toolcall-undone {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin-left: 6px;
+  font-style: italic;
+}
+.copilot-agent-toolcall-pending_approval .copilot-agent-toolcall-status {
+  background: var(--background-modifier-error-rgb, rgba(255,165,0,0.15));
+  color: var(--text-warning, #c97e00);
+}
