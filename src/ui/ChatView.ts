@@ -9,6 +9,7 @@ import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
 import type { UndoJournal } from "../domain/UndoJournal";
+import { decideKeydownAction } from "./chatKeydown";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -81,6 +82,15 @@ export class ChatView extends ItemView {
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private currentAuthKind: AuthState["kind"] = "disconnected";
+  /**
+   * IME composition state, tracked via the textarea's compositionstart /
+   * compositionend events. Mirrors `KeyboardEvent.isComposing` but lets us
+   * cover browsers/Electron versions that fire `keydown` before
+   * `compositionend` updates `event.isComposing`. The keydown handler also
+   * inspects `event.isComposing` and `event.keyCode === 229` for defence
+   * in depth.
+   */
+  private isComposing = false;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
@@ -142,10 +152,40 @@ export class ChatView extends ItemView {
       cls: "copilot-agent-input",
       attr: { rows: "3", placeholder: "Ask Copilot…" },
     });
+    this.inputEl.addEventListener("compositionstart", () => {
+      this.isComposing = true;
+    });
+    this.inputEl.addEventListener("compositionend", () => {
+      this.isComposing = false;
+    });
     this.inputEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        void this.handleSendOrStop();
+      const action = decideKeydownAction({
+        key: e.key,
+        shiftKey: e.shiftKey,
+        // Respect BOTH the native event flag and our tracked flag — either
+        // being true means an IME composition is in progress.
+        isComposing: e.isComposing || this.isComposing,
+        keyCode: e.keyCode,
+        hasText: this.inputEl.value.trim().length > 0,
+        isStreaming: this.streaming,
+        isPending: this.pending,
+        isConnected: this.currentAuthKind === "connected",
+      });
+      switch (action) {
+        case "submit":
+          e.preventDefault();
+          void this.submitMessage();
+          break;
+        case "noop-prevent":
+          // Suppress newline-then-no-send to avoid surprising the user, but
+          // do NOT route into the Stop handler — only the Stop button
+          // aborts a stream (spec FR-009 / FR-010).
+          e.preventDefault();
+          break;
+        case "newline":
+        case "passthrough":
+          // Default textarea behaviour (newline or other keys).
+          break;
       }
     });
     this.sendBtnEl = composer.createEl("button", {
@@ -218,6 +258,19 @@ export class ChatView extends ItemView {
   }
 
   // ---- send pipeline ----
+
+  /**
+   * Single entry point that the Send button click AND the Enter-key
+   * handler both call. Keeps the two surfaces in lockstep so future
+   * changes to "what does sending mean" land in one place.
+   *
+   * Unlike `handleSendOrStop`, this NEVER routes into Stop — it is the
+   * pure "submit" path. The keyboard handler is contractually responsible
+   * for not invoking this while a stream is in flight.
+   */
+  private submitMessage(): Promise<void> {
+    return this.handleSend();
+  }
 
   private handleSendOrStop(): Promise<void> {
     if (this.streaming) {
