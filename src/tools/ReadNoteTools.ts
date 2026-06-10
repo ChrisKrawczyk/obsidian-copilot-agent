@@ -12,6 +12,7 @@ import {
   MAX_TREE_DEPTH,
 } from "./ObsidianApi";
 import { READ_NOTE_TOOL_NAMES } from "../domain/vaultToolManifest";
+import { findTasksImpl, type FindTasksFilter } from "./FindTasks";
 
 // Re-export so callers can construct the manifest-name list without
 // reaching into `domain/`.
@@ -177,6 +178,51 @@ export function createReadNoteTools(
           throw new Error("`path` is required and must be a string");
         }
         return vaultMetadataImpl(api, vault, parsed.path);
+      },
+    }),
+
+    defineTool("find_tasks", {
+      description:
+        "List task-list items across the vault (or a single note when " +
+        "`path` is given) filtered by status, tag, due-date range, and/or " +
+        "description regex. Returns up to 500 results with 1-based line " +
+        "numbers, the raw line text, and the parsed task. Read-only — use " +
+        "BEFORE `update_task` and pass back the `path`, `line`, AND " +
+        "`expectedRawLine` from each result for safe re-anchoring.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Vault-relative path of one note to scope to. Omit for whole vault." },
+          tag: { type: "string", description: "Tag (without leading #) to filter by — exact, case-insensitive." },
+          status: {
+            type: "string",
+            enum: ["todo", "in-progress", "done", "cancelled"],
+            description: "Filter by task status.",
+          },
+          dueBefore: { type: "string", description: "Inclusive YYYY-MM-DD upper bound on due date." },
+          dueAfter: { type: "string", description: "Inclusive YYYY-MM-DD lower bound on due date." },
+          descriptionRegex: { type: "string", description: "JavaScript regex tested against the task description." },
+        },
+        additionalProperties: false,
+      },
+      skipPermission: true,
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as Record<string, unknown>;
+        const filter: FindTasksFilter = {};
+        if (typeof a.path === "string") filter.path = a.path;
+        if (typeof a.tag === "string") filter.tag = a.tag;
+        if (
+          a.status === "todo" ||
+          a.status === "in-progress" ||
+          a.status === "done" ||
+          a.status === "cancelled"
+        ) {
+          filter.status = a.status;
+        }
+        if (typeof a.dueBefore === "string") filter.dueBefore = a.dueBefore;
+        if (typeof a.dueAfter === "string") filter.dueAfter = a.dueAfter;
+        if (typeof a.descriptionRegex === "string") filter.descriptionRegex = a.descriptionRegex;
+        return findTasksImpl(filter, { api, vault });
       },
     }),
   ];

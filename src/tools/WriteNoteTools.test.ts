@@ -485,7 +485,7 @@ describe("insert_into_active_note path equivalence (gate ↔ handler)", () => {
 });
 
 describe("createWriteNoteTools factory", () => {
-  test("registers exactly create_note, edit_note, open_note, insert_into_active_note, create_daily_note, create_task", () => {
+  test("registers exactly create_note, edit_note, open_note, insert_into_active_note, create_daily_note, create_task, update_task", () => {
     const world = makeWorld();
     const deps = makeDeps(world);
     const tools = createWriteNoteTools(deps);
@@ -497,6 +497,7 @@ describe("createWriteNoteTools factory", () => {
       "insert_into_active_note",
       "create_daily_note",
       "create_task",
+      "update_task",
     ]);
   });
 
@@ -507,7 +508,7 @@ describe("createWriteNoteTools factory", () => {
     const skipFlags = tools.map(
       (t) => (t as unknown as { skipPermission?: boolean }).skipPermission ?? false,
     );
-    expect(skipFlags).toEqual([false, false, true, false, false, false]);
+    expect(skipFlags).toEqual([false, false, true, false, false, false, false]);
   });
 });
 

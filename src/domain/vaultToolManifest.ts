@@ -94,6 +94,11 @@ export const READ_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     hint: "Return headings + tags + frontmatter for one note WITHOUT its body. Cheap structural inspection.",
     readOnly: true,
   },
+  {
+    name: "find_tasks",
+    hint: "List task-list items across the vault (or one note) filtered by status/tag/due range/regex. Read-only.",
+    readOnly: true,
+  },
 ];
 
 /**
@@ -129,6 +134,11 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "create_task",
     hint: "Append a Tasks-plugin-compatible checkbox line (with optional 📅 YYYY-MM-DD due) to the daily note or a configured path.",
+    readOnly: false,
+  },
+  {
+    name: "update_task",
+    hint: "Edit a single task line (status, dates, priority, tags, description) by line + expectedRawLine. Single approval, journal-undoable. Status -> done/cancelled auto-stamps today.",
     readOnly: false,
   },
 ];

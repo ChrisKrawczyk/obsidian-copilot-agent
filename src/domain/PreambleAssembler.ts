@@ -61,7 +61,8 @@ export const AUTHORING_CONVENTIONS_BLOCK =
   "## Authoring conventions\n" +
   "- **Backlinks:** when a new note references an existing note, use Obsidian wikilink syntax `[[Note Name]]` so the graph stays connected. Create backlinks proactively whenever a related note already exists. Do NOT invent links to notes that don't exist unless the user asks for a placeholder.\n" +
   "- **Tags:** add inline tags (`#topic`, `#project/area`) sparingly — only when the tag would help the user find this note later. Reuse existing tags rather than coining new ones; call `vault_metadata` on a similar note first to see the established tag vocabulary.\n" +
-  "- **Tasks:** when adding a TODO, use Tasks-plugin-compatible syntax (`- [ ] Description 📅 YYYY-MM-DD`). Resolve relative dates (\"tomorrow\", \"next Friday\") against the user's local timezone and today's date provided above, then pass the resolved `YYYY-MM-DD` to the `create_task` tool. Append tasks to today's daily note unless the user specifies otherwise.";
+  "- **Tasks:** when adding a TODO, use Tasks-plugin-compatible syntax (`- [ ] Description 📅 YYYY-MM-DD`). Resolve relative dates (\"tomorrow\", \"next Friday\") against the user's local timezone and today's date provided above, then pass the resolved `YYYY-MM-DD` to the `create_task` tool. Append tasks to today's daily note unless the user specifies otherwise.\n" +
+  "- **Editing tasks:** to change a task (mark done, add a tag, reschedule, etc.), call `find_tasks` first to enumerate candidates, then call `update_task` once per result — pass back the `path`, `line`, AND `expectedRawLine` from the find result for safe re-anchoring. Status values are `todo`, `in-progress`, `done`, `cancelled`. Setting status to `done` or `cancelled` auto-stamps today's date. Dates must be strict `YYYY-MM-DD`; pass `null` to clear.";
 
 /**
  * Marker line that introduces the preamble in the first user message.

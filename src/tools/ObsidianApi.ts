@@ -50,6 +50,16 @@ export interface FileCacheLike {
     original: string;
     position?: unknown;
   }>;
+  /**
+   * Tasks/list items discovered by Obsidian's metadata cache. `task`
+   * is the status char inside `[ ]` (e.g. `' '`, `'/'`, `'x'`, `'-'`)
+   * when the list item is a task; absent for plain bullets.
+   * `position.start.line` is **0-based** (Obsidian convention).
+   */
+  listItems?: Array<{
+    position: { start: { line: number }; end?: { line: number } };
+    task?: string;
+  }>;
 }
 
 /** Editor-like surface used by Phase 4 mutating tools. */

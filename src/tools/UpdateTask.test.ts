@@ -1,0 +1,453 @@
+import { describe, test, expect, beforeAll, afterAll } from "vitest";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { updateTaskImpl, type UpdateTaskInput } from "./UpdateTask";
+import {
+  DEFAULT_VAULT_AWARENESS_SETTINGS,
+  type VaultAwarenessSettings,
+} from "../settings/VaultAwarenessSettings";
+import { ObsidianApi, type AppLike } from "./ObsidianApi";
+import type { TFileLike } from "./ReadTools";
+import type { WriteNoteToolsDeps } from "./WriteNoteTools";
+import { UndoJournal } from "../domain/UndoJournal";
+
+let tmpRoot: string;
+
+beforeAll(() => {
+  tmpRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "copilot-agent-updatetask-")),
+  );
+});
+
+afterAll(() => {
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+interface FakeFile extends TFileLike {
+  content: string;
+}
+
+interface FakeWorld {
+  files: Map<string, FakeFile>;
+  basePath: string;
+  vaultAwareness?: VaultAwarenessSettings;
+  now: Date;
+}
+
+function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
+  return {
+    files: new Map(),
+    basePath: tmpRoot,
+    now: new Date(2026, 5, 9, 12, 0, 0),
+    ...opts,
+  };
+}
+
+function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
+  const app: AppLike = {
+    vault: {
+      adapter: { getBasePath: () => world.basePath },
+      getAbstractFileByPath: (p: string) => world.files.get(p) ?? null,
+      read: async (file: TFileLike) =>
+        world.files.get(file.path)?.content ?? "",
+      cachedRead: async (file: TFileLike) =>
+        world.files.get(file.path)?.content ?? "",
+      create: async (path: string, data: string) => {
+        const f: FakeFile = { path, content: data };
+        world.files.set(path, f);
+        return f;
+      },
+      modify: async (file: TFileLike, data: string) => {
+        const f = world.files.get(file.path);
+        if (f) f.content = data;
+        else world.files.set(file.path, { path: file.path, content: data });
+      },
+    } as unknown as AppLike["vault"],
+    workspace: {
+      getActiveFile: () => null,
+      getLeavesOfType: () => [],
+    } as unknown as AppLike["workspace"],
+  };
+  const api = new ObsidianApi(app);
+  const undoJournal = new UndoJournal(
+    app.vault as unknown as ConstructorParameters<typeof UndoJournal>[0],
+  );
+  return {
+    api,
+    vault: app.vault as unknown as WriteNoteToolsDeps["vault"],
+    workspace: app.workspace as unknown as WriteNoteToolsDeps["workspace"],
+    undoJournal,
+    now: () => world.now,
+    vaultAwareness: () =>
+      world.vaultAwareness ?? { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
+  };
+}
+
+function seedFile(world: FakeWorld, p: string, content: string): void {
+  world.files.set(p, { path: p, content });
+}
+
+describe("updateTaskImpl — patch application", () => {
+  test("setStatus done auto-stamps today and changes checkbox", async () => {
+    const world = makeWorld();
+    seedFile(world, "tasks.md", "- [ ] write tests 📅 2026-06-12");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "tasks.md",
+        line: 1,
+        expectedRawLine: "- [ ] write tests 📅 2026-06-12",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.changed).toBe(true);
+    expect(r.after).toBe("- [x] write tests 📅 2026-06-12 ✅ 2026-06-09");
+    expect(r.changedFields).toContain("status");
+    expect(r.changedFields).toContain("completedDate");
+    expect(world.files.get("tasks.md")?.content).toBe(
+      "- [x] write tests 📅 2026-06-12 ✅ 2026-06-09",
+    );
+    expect(r.undoSurface).toBe("journal");
+    expect(typeof r.undoId).toBe("string");
+  });
+
+  test("re-marking done preserves existing completion date (idempotent)", async () => {
+    const world = makeWorld();
+    seedFile(world, "tasks.md", "- [x] write tests ✅ 2026-06-01");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "tasks.md", line: 1, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.changed).toBe(false);
+    expect(r.changedFields).toEqual([]);
+    expect(world.files.get("tasks.md")?.content).toBe("- [x] write tests ✅ 2026-06-01");
+  });
+
+  test("setStatus cancelled auto-stamps cancelledDate and clears completedDate", async () => {
+    const world = makeWorld();
+    seedFile(world, "tasks.md", "- [x] do thing ✅ 2026-06-01");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "tasks.md", line: 1, patch: { setStatus: "cancelled" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.after).toBe("- [-] do thing ❌ 2026-06-09");
+    expect(r.changedFields).toContain("status");
+    expect(r.changedFields).toContain("cancelledDate");
+    expect(r.changedFields).toContain("completedDate");
+  });
+
+  test("setStatus back to todo clears both date stamps", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [x] x ✅ 2026-06-01");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setStatus: "todo" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("- [ ] x");
+  });
+
+  test("setStatus in-progress emits [/]", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setStatus: "in-progress" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("- [/] task");
+  });
+
+  test("addTags + removeTags in one call", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task #old #shared");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 1,
+        patch: { addTags: ["new"], removeTags: ["old"] },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Tags appear in insertion order (Set preserves it).
+    expect(r.after).toBe("- [ ] task #shared #new");
+    expect(r.changedFields).toContain("tags");
+  });
+
+  test("setPriority null clears existing priority", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task ⏫");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setPriority: null } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("- [ ] task");
+  });
+
+  test("setDueDate strict format rejected", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setDueDate: "tomorrow" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === "invalid_date_format") {
+      expect(r.field).toBe("setDueDate");
+    }
+    expect(world.files.get("t.md")?.content).toBe("- [ ] task");
+  });
+
+  test("setScheduledDate null clears", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task ⏳ 2026-06-12");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setScheduledDate: null } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("- [ ] task");
+  });
+
+  test("setDescription replaces description", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] old desc 📅 2026-06-12");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setDescription: "new desc" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("- [ ] new desc 📅 2026-06-12");
+  });
+
+  test("invalid status rejected", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] x");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      // @ts-expect-error testing runtime rejection
+      { path: "t.md", line: 1, patch: { setStatus: "blocked" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("invalid_status");
+  });
+
+  test("preserves leadingIndent for nested tasks", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- parent\n    - [ ] nested task 📅 2026-06-12");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 2, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.after).toBe("    - [x] nested task 📅 2026-06-12 ✅ 2026-06-09");
+  });
+
+  test("preserves extras (recurrence) through edit", async () => {
+    const world = makeWorld();
+    seedFile(
+      world,
+      "t.md",
+      "- [ ] Weekly review 📅 2026-06-14 🔁 every Sunday",
+    );
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.after).toContain("🔁 every Sunday");
+    expect(r.after).toContain("✅ 2026-06-09");
+  });
+
+  test("preserves source flavor (gfm stays gfm)", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task (due: 2026-06-12)");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.after).toBe("- [x] task (due: 2026-06-12) (completed: 2026-06-09)");
+    }
+  });
+});
+
+describe("updateTaskImpl — re-anchoring", () => {
+  test("expectedRawLine matches at given line (happy path)", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] alpha 📅 2026-06-12\n- [ ] beta 📅 2026-06-13");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 2,
+        expectedRawLine: "- [ ] beta 📅 2026-06-13",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.line).toBe(2);
+      expect(r.after).toBe("- [x] beta 📅 2026-06-13 ✅ 2026-06-09");
+    }
+  });
+
+  test("expectedRawLine matches after line has shifted (re-anchor scan)", async () => {
+    const world = makeWorld();
+    // Caller thinks task is at line 2 but it has moved to line 4.
+    seedFile(world, "t.md", "new line\nanother\n- [ ] other\n- [ ] target task\n");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 2,
+        expectedRawLine: "- [ ] target task",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.line).toBe(4);
+  });
+
+  test("expectedRawLine not found anywhere → task_not_found", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] alpha");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 1,
+        expectedRawLine: "- [ ] missing",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("task_not_found");
+    expect(world.files.get("t.md")?.content).toBe("- [ ] alpha");
+  });
+
+  test("expectedRawLine ambiguous → ambiguous_match with candidates", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] dup\nfiller\n- [ ] dup");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 1,
+        expectedRawLine: "- [ ] dup",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    // expectedRawLine matches at line 1 (the optimistic try) so it WILL
+    // use line 1. To force ambiguous_match, the optimistic line must
+    // NOT match — i.e. the caller's line is wrong.
+    expect(r.ok).toBe(true);
+    // Now retry with wrong line.
+    seedFile(world, "t.md", "- [ ] dup\nfiller\n- [ ] dup");
+    const r2 = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 2,
+        expectedRawLine: "- [ ] dup",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r2.ok).toBe(false);
+    if (!r2.ok && r2.reason === "ambiguous_match") {
+      expect(r2.candidates).toHaveLength(2);
+      expect(r2.candidates.map((c) => c.line)).toEqual([1, 3]);
+    }
+    expect(world.files.get("t.md")?.content).toBe("- [ ] dup\nfiller\n- [ ] dup");
+  });
+
+  test("descriptionMatch fallback — unique match succeeds", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] alpha\n- [ ] something else");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 1,
+        descriptionMatch: "something",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.line).toBe(2);
+  });
+
+  test("descriptionMatch fallback — multiple → ambiguous_match, no mutation", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] call Alice\n- [ ] call Bob");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "t.md",
+        line: 99,
+        descriptionMatch: "call",
+        patch: { setStatus: "done" },
+      },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok && r.reason === "ambiguous_match") {
+      expect(r.candidates).toHaveLength(2);
+    }
+    expect(world.files.get("t.md")?.content).toBe("- [ ] call Alice\n- [ ] call Bob");
+  });
+
+  test("file not found → not_found", async () => {
+    const world = makeWorld();
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "nope.md", line: 1, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("not_found");
+  });
+
+  test("line points to non-task line → not_a_task", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "just text\n- [ ] task");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("not_a_task");
+  });
+});

@@ -1,5 +1,11 @@
 import { describe, test, expect } from "vitest";
-import { formatTaskLine, STRICT_DATE_REGEX, type TaskInput } from "./TaskFormat";
+import {
+  formatTaskLine,
+  parseTaskLine,
+  STRICT_DATE_REGEX,
+  type TaskInput,
+  type TaskFormatSource,
+} from "./TaskFormat";
 
 describe("formatTaskLine — tasks-plugin source", () => {
   test("description only", () => {
@@ -135,6 +141,193 @@ describe("formatTaskLine — gfm source", () => {
     ).toBe("- [ ] Note this (created: 2026-06-09)");
   });
 });
+
+describe("formatTaskLine — status checkbox symbol", () => {
+  test.each([
+    ["todo", " "],
+    ["in-progress", "/"],
+    ["done", "x"],
+    ["cancelled", "-"],
+  ] as const)("status %s emits [%s]", (status, sym) => {
+    expect(
+      formatTaskLine({ description: "X", status }, "tasks-plugin"),
+    ).toBe(`- [${sym}] X`);
+    expect(formatTaskLine({ description: "X", status }, "gfm")).toBe(
+      `- [${sym}] X`,
+    );
+  });
+
+  test("completedDate emitted after createdDate, before tags", () => {
+    expect(
+      formatTaskLine(
+        {
+          description: "X",
+          status: "done",
+          createdDate: "2026-06-09",
+          completedDate: "2026-06-11",
+          tags: ["a"],
+        },
+        "tasks-plugin",
+      ),
+    ).toBe("- [x] X ➕ 2026-06-09 ✅ 2026-06-11 #a");
+  });
+
+  test("cancelledDate (gfm)", () => {
+    expect(
+      formatTaskLine(
+        { description: "X", status: "cancelled", cancelledDate: "2026-06-11" },
+        "gfm",
+      ),
+    ).toBe("- [-] X (cancelled: 2026-06-11)");
+  });
+
+  test("extras appended verbatim at end of line", () => {
+    expect(
+      formatTaskLine(
+        {
+          description: "Weekly review",
+          dueDate: "2026-06-14",
+          tags: ["weekly"],
+          extras: "🔁 every Sunday ^abc123",
+        },
+        "tasks-plugin",
+      ),
+    ).toBe("- [ ] Weekly review 📅 2026-06-14 #weekly 🔁 every Sunday ^abc123");
+  });
+});
+
+describe("parseTaskLine", () => {
+  test("rejects non-task line", () => {
+    expect(parseTaskLine("just text").ok).toBe(false);
+    expect(parseTaskLine("- [?] unknown status").ok).toBe(false);
+    expect(parseTaskLine("").ok).toBe(false);
+  });
+
+  test.each([
+    [" ", "todo"],
+    ["/", "in-progress"],
+    ["x", "done"],
+    ["X", "done"],
+    ["-", "cancelled"],
+  ] as const)("recognizes status symbol [%s] -> %s", (sym, status) => {
+    const r = parseTaskLine(`- [${sym}] hello`);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.parsed.status).toBe(status);
+      expect(r.parsed.description).toBe("hello");
+      expect(r.parsed.rawStatusSymbol).toBe(sym);
+    }
+  });
+
+  test("parses tasks-plugin flavor with all fields", () => {
+    const r = parseTaskLine(
+      "- [x] Ship it ⏫ 📅 2026-06-12 ⏳ 2026-06-10 ➕ 2026-06-09 ✅ 2026-06-11 #work #release",
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.parsed).toMatchObject({
+      description: "Ship it",
+      status: "done",
+      priority: "high",
+      dueDate: "2026-06-12",
+      scheduledDate: "2026-06-10",
+      createdDate: "2026-06-09",
+      completedDate: "2026-06-11",
+      tags: ["work", "release"],
+      source: "tasks-plugin",
+      extras: "",
+    });
+  });
+
+  test("parses gfm flavor with all fields and tag", () => {
+    const r = parseTaskLine(
+      "- [ ] Buy milk (priority: medium) (due: 2026-06-12) #shopping",
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.parsed).toMatchObject({
+      description: "Buy milk",
+      status: "todo",
+      priority: "medium",
+      dueDate: "2026-06-12",
+      tags: ["shopping"],
+      source: "gfm",
+    });
+  });
+
+  test("preserves leading indent for nested tasks", () => {
+    const r = parseTaskLine("    - [ ] nested");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.parsed.leadingIndent).toBe("    ");
+  });
+
+  test("captures recurrence + block-id as extras", () => {
+    const r = parseTaskLine(
+      "- [ ] Weekly review 📅 2026-06-14 🔁 every Sunday ^abc123",
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.parsed.description).toBe("Weekly review");
+    expect(r.parsed.dueDate).toBe("2026-06-14");
+    expect(r.parsed.extras).toBe("🔁 every Sunday ^abc123");
+  });
+
+  test("captures unmodeled emoji (🛫 start) as extras", () => {
+    const r = parseTaskLine("- [ ] task 🛫 2026-06-01");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.parsed.extras).toBe("🛫 2026-06-01");
+  });
+});
+
+describe("round-trip parse-then-format (post-normalization)", () => {
+  function normalize(input: TaskInput): TaskInput {
+    const out: TaskInput = { ...input, description: (input.description ?? "").trim() };
+    if (input.tags) {
+      const sanitized: string[] = [];
+      for (const t of input.tags) {
+        if (typeof t !== "string") continue;
+        const trimmed = t.trim().replace(/^#+/, "").replace(/\s+/g, "-");
+        if (trimmed) sanitized.push(trimmed);
+      }
+      if (sanitized.length) out.tags = sanitized; else delete out.tags;
+    }
+    if (!out.status) out.status = "todo";
+    return out;
+  }
+
+  const cases: Array<[TaskInput, TaskFormatSource]> = [
+    [{ description: "Buy milk" }, "tasks-plugin"],
+    [{ description: "Pay bill", dueDate: "2026-06-12" }, "tasks-plugin"],
+    [{ description: "Ship it", status: "done", priority: "high", dueDate: "2026-06-12", completedDate: "2026-06-13", tags: ["release"] }, "tasks-plugin"],
+    [{ description: "Buy milk", dueDate: "2026-06-12" }, "gfm"],
+    [{ description: "Plan", status: "in-progress", scheduledDate: "2026-07-01", tags: ["plan"] }, "gfm"],
+    [{ description: "Weekly", dueDate: "2026-06-14", extras: "🔁 every Sunday" }, "tasks-plugin"],
+  ];
+
+  test.each(cases)("normalize(input) == parse(format(input)) — case %#", (input, source) => {
+    const formatted = formatTaskLine(input, source);
+    const r = parseTaskLine(formatted);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const n = normalize(input);
+    // Strip parsed-only fields before comparing.
+    const { leadingIndent, source: parsedSource, rawStatusSymbol, ...rest } = r.parsed;
+    void leadingIndent; void parsedSource; void rawStatusSymbol;
+    // Compare extras explicitly (round-trip preserves them).
+    if (!n.extras) {
+      expect(rest.extras).toBe("");
+    } else {
+      expect(rest.extras).toBe(n.extras);
+    }
+    // Drop empty extras from comparison shape.
+    const restWithoutEmpty: Record<string, unknown> = { ...rest };
+    if (restWithoutEmpty.extras === "") delete restWithoutEmpty.extras;
+    const expected: Record<string, unknown> = { ...n };
+    if (!expected.extras) delete expected.extras;
+    expect(restWithoutEmpty).toEqual(expected);
+  });
+});
+
 
 describe("STRICT_DATE_REGEX", () => {
   test.each([
