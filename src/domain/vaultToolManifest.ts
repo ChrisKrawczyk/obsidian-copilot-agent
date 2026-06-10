@@ -153,5 +153,7 @@ export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 /** Phase 3 read-only tool names — exported for `skipPermission` wiring. */
 export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 
-/** Phase 4/5 mutating + workspace tool names. */
-export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.map((e) => e.name);
+/** Phase 4/5 mutating + workspace tool names (excludes read-equivalent `open_note`). */
+export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.filter(
+  (e) => !e.readOnly,
+).map((e) => e.name);

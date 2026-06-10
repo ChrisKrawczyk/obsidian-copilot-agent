@@ -87,28 +87,28 @@ The v0.1 tools (`view`, `read_file`, `search_content`, `create_file`, `edit_file
 
 ## API Reference
 
-### Read-only capabilities (auto-approved)
+### Read-only capabilities (auto-approved — `skipPermission: true`)
 
 | Tool | Signature (input → result) | Notes |
 |---|---|---|
 | `get_active_note` | `{} → { path, content }` | Returns the active editor's note or `not_found` if no editor active. |
-| `list_recent_notes` | `{ limit?: number=10 } → { notes: Array<{path, mtime}> }` | Sorted by mtime desc. |
-| `find_backlinks` | `{ path } → { backlinks: Array<{path, kind: 'wikilink'\|'markdown-link'\|'embed'}>, usedFallback }` | Uses `metadataCache.resolvedLinks` when available; bounded-scan fallback. |
-| `vault_tree` | `{ path?, maxDepth?=4, maxNodes?=500 } → { tree: { ... }, truncated, usedFallback }` | Depth- and node-bounded. |
+| `list_recent_notes` | `{ n?: number=20 } → { notes: Array<{path, mtime}> }` | Sorted by mtime desc. `n` clamped to [1, 100]. |
+| `find_backlinks` | `{ targetPath } → { backlinks: Array<{sourcePath, linkForm: 'wikilink'\|'markdown', original}>, usedFallback }` | Uses `metadataCache.resolvedLinks` when available; bounded-scan fallback. |
+| `vault_tree` | `{ folder?, depth?=2 } → { tree, truncated }` | `folder` defaults to vault root. `depth` capped at 6. Node count internally bounded; `truncated: true` when cap hit. |
 | `vault_metadata` | `{ path } → { headings, tags, frontmatter }` | Body NOT returned (SC-012). |
 | `find_tasks` | `{ path?, status?, tag?, dueBefore?, dueAfter?, descriptionRegex? } → { results, truncated, scanned }` | 500-result cap; 5MB per-file cap. Filters AND-composed. 1-based line numbers in output. Structured errors: `invalid_regex`, `invalid_date_format`. |
+| `open_note` | `{ path } → { ok, path }` | Navigation only — no read/write. Registered with `skipPermission: true`. |
 
 ### Mutating capabilities (approval-gated, undoable)
 
 | Tool | Signature | Notes |
 |---|---|---|
-| `create_note` | `{ path, content?, frontmatter? }` | No overwrite — `path_exists` error on collision. |
+| `create_note` | `{ path, content? }` | No overwrite — `path_exists` error on collision. |
 | `edit_note` | `{ path, mode: 'append'\|'prepend'\|'replace', content }` | Dirty-buffer guard refuses when the file has unsaved editor changes. |
-| `open_note` | `{ path, mode?: 'tab'\|'split' }` | Read-only (`skipPermission: true`); navigation only. |
-| `insert_into_active_note` | `{ position: 'cursor'\|'append'\|'prepend'\|'replace', content }` | Preserves cursor / selection where possible; falls back to `edit_note` when no editor active. |
-| `create_daily_note` | `{ template? }` | Resolves folder + format + template via `internalPlugins.plugins['daily-notes']`. |
-| `create_task` | `{ description, priority?, dueDate?, scheduledDate?, createdDate?, tags?, targetPath? }` | `createdDate` defaults to today. Strict `YYYY-MM-DD`. Auto-detects tasks-plugin vs GFM flavor. Appends to configured target (default: today's daily note). |
-| `update_task` | `{ path, line, expectedRawLine?, descriptionMatch?, patch }` | Patch fields: `setStatus`, `addTags`, `removeTags`, `setPriority\|null`, `setDueDate\|null`, `setScheduledDate\|null`, `setDescription`. Returns `{ changed, changedFields[], before, after, line, undoId, undoSurface }` on success, structured errors otherwise: `task_not_found`, `ambiguous_match` (with candidates), `not_a_task`, `not_found`, `invalid_date_format`, `invalid_status`. |
+| `insert_into_active_note` | `{ mode: 'append'\|'prepend'\|'replace', content }` | Uses the live editor surface when one is open (Obsidian Ctrl+Z handles undo); otherwise falls back to a disk write recorded in the Undo journal. |
+| `create_daily_note` | `{}` | Resolves folder + format via `internalPlugins.plugins['daily-notes']`. Creates today's note if absent; opens it either way. |
+| `create_task` | `{ description, priority?, dueDate?, scheduledDate?, createdDate?, tags? }` | `createdDate` defaults to today. Strict `YYYY-MM-DD`. Auto-detects tasks-plugin vs GFM flavor. Appends to settings-configured target (default: today's daily note). |
+| `update_task` | `{ path, line, expectedRawLine?, descriptionMatch?, patch }` | Patch fields: `setStatus`, `addTags`, `removeTags`, `setPriority\|null`, `setDueDate\|null`, `setScheduledDate\|null`, `setDescription`. Returns `{ ok: true, changed, changedFields[], before, after, line, undoId, undoSurface }` on success, structured errors otherwise: `task_not_found`, `ambiguous_match` (with candidates), `not_a_task`, `not_found`, `invalid_date_format`, `invalid_status`. |
 
 ### Task line format
 

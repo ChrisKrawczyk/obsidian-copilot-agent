@@ -206,6 +206,19 @@ export default class CopilotAgentPlugin extends Plugin {
           if (tool === "insert_into_active_note") {
             return obsidianApi.getActiveNotePath() ?? undefined;
           }
+          if (tool === "create_task") {
+            // F2: mirror createTaskImpl's target resolution so the per-path
+            // allowlist sees the same path the handler will write to.
+            const va = safetySettingsStore.snapshot().vaultAwareness;
+            if (
+              va.taskTargetMode === "custom-path" &&
+              typeof va.customTaskTargetPath === "string" &&
+              va.customTaskTargetPath.trim().length > 0
+            ) {
+              return va.customTaskTargetPath.trim();
+            }
+            return resolveDailyNotePath(obsidianApi, now()).path;
+          }
           const args = r.args;
           return typeof args?.path === "string" ? args.path : undefined;
         },

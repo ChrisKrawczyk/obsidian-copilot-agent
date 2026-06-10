@@ -9,8 +9,8 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 - **Keyboard-first chat input** — Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty input is rejected. While a response is streaming Enter is inert (Stop is the only cancel path).
 - **Vault-aware preamble** — a deterministic system block prepended to the first send of each session: vault root path, timezone, today, and an inventory of the vault-aware tools (so the model picks them instead of `shell` for discovery). Includes an authoring-conventions block covering wikilinks, hash-prefixed tags, and Tasks-plugin checkbox syntax. Configurable via Settings → Copilot Agent → Vault Awareness (Default / Custom / None).
 3. **Thirteen Obsidian-API-backed capabilities** registered alongside the v0.1 tools:
-  - Read-only (auto-approved): `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`, `find_tasks`.
-  - Mutating (one approval each, undoable): `create_note`, `edit_note`, `open_note`, `insert_into_active_note`, `create_daily_note`, `create_task`, `update_task`.
+  - Read-only (auto-approved): `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`, `find_tasks`, plus `open_note` (navigation only).
+  - Mutating (one approval each, undoable): `create_note`, `edit_note`, `insert_into_active_note`, `create_daily_note`, `create_task`, `update_task`.
 - **Task editing** — `find_tasks` enumerates checkbox tasks across the vault with filters (status, tag, due range, regex, single-file); `update_task` applies a structured patch (status, dates, priority, tags, description) to a single line with two-tier re-anchor (byte-exact `expectedRawLine` then `descriptionMatch`), idempotent status auto-stamping (✅/❌ today), and recurrence preservation.
 - **Daily Notes + Tasks integration** — `create_daily_note` honors the Daily Notes core plugin's folder/format/template (falls back to `<vault-root>/YYYY-MM-DD.md` when disabled). `create_task` auto-detects Tasks-plugin presence and emits the matching flavor (📅/✅ vs `(due: …)`/`(completed: …)`).
 - **Privacy default**: the preamble sends only vault root path + timezone + today + tool inventory + authoring conventions. NO folder or file enumeration, NO note contents, NO recent-activity metadata, NO per-file timestamps. Folder/file structure is fetched on demand via the read-only `vault_tree` / `vault_metadata` tools, which are auto-approved but explicit. Switch Vault Awareness to **None** in Settings to suppress the preamble entirely for the most sensitive vaults.
@@ -19,7 +19,7 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 
 - **OAuth Device Flow sign-in** via the GitHub CLI client ID (private-developer convenience; see [OAuth client ID](#oauth-client-id)). Token optionally persisted to plugin data.
 - **Streaming chat** with the Copilot SDK, including Stop-to-cancel mid-stream.
-- **Vault read tools** — the agent can `read_file`, `list_files`, `search_content` over the active vault without prompting (scope-locked, side-effect-free; see [Read-tool exemption](#read-tool-exemption)).
+- **Vault read tools** — the agent can `view`, `read_file`, `search_content` over the active vault without prompting (scope-locked, side-effect-free; see [Read-tool exemption](#read-tool-exemption)).
 - **Vault write tools** — `create_file`, `edit_file`, `delete_file`, plus the SDK's built-in `shell` / `write` / `view` etc., all routed through a single per-call **approval gate** (deny-by-default for everything that mutates state).
 - **Undo** for any applied vault write within the active session.
 - **Safety policy** with three modes (require-approval / auto-apply-with-undo / allowlist) plus persistent trust scopes (path allowlist, per-built-in toggles).
@@ -69,7 +69,7 @@ After any approved write, an **Undo** affordance appears on the tool-call block 
 
 ### Read-tool exemption
 
-`read_file`, `list_files`, and `search_content` register with `skipPermission: true` and bypass the prompt. They are strictly read-only, vault-scoped, and use [`VaultPath`](src/domain/VaultPath.ts) to reject absolute paths, `..`, and symlink-escape. The "deny-by-default" invariant continues to apply to every mutating call. See the JSDoc at the top of `src/tools/ReadTools.ts` for the checklist future tool authors must satisfy before reusing this exemption.
+`view`, `read_file`, and `search_content` register with `skipPermission: true` and bypass the prompt. They are strictly read-only, vault-scoped, and use [`VaultPath`](src/domain/VaultPath.ts) to reject absolute paths, `..`, and symlink-escape. The "deny-by-default" invariant continues to apply to every mutating call. See the JSDoc at the top of `src/tools/ReadTools.ts` for the checklist future tool authors must satisfy before reusing this exemption.
 
 ## Token persistence (security note)
 
