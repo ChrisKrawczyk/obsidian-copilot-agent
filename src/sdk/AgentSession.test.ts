@@ -841,6 +841,31 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     await agent.dispose();
   });
 
+  test("Phase 4 vault-write tools classify as source: vault and auto-apply in default mode", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h);
+    await agent.init();
+    for (const toolName of [
+      "create_note",
+      "edit_note",
+      "insert_into_active_note",
+      "create_daily_note",
+      "create_task",
+    ]) {
+      const result = await h.permissionHandler!({
+        toolCallId: `tc-vw-${toolName}`,
+        kind: "custom-tool",
+        toolName,
+        args: { path: "inbox/x.md" },
+      });
+      expect(
+        result.kind,
+        `tool ${toolName} should be classified as vault and auto-applied`,
+      ).toBe("approve-once");
+    }
+    await agent.dispose();
+  });
+
   test("resolveApproval is a no-op for an unknown id", async () => {
     const h = makeFakeSdk();
     const { agent } = makeSafetyAgent(h);

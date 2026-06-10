@@ -8,7 +8,7 @@ import {
   type SafetyPolicyInput,
   type SafetyState,
 } from "../domain/SafetyPolicy";
-import { isWriteToolName } from "../tools/WriteTools";
+import { isVaultWriteToolName } from "../tools/WriteTools";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -1252,7 +1252,7 @@ export class CopilotAgentSession implements AgentSession {
     const kind = request.kind ?? "";
     const toolName = request.toolName;
 
-    if (kind === "custom-tool" && toolName && isWriteToolName(toolName)) {
+    if (kind === "custom-tool" && toolName && isVaultWriteToolName(toolName)) {
       const vaultPath =
         safety.extractVaultPath?.(request) ??
         (typeof request.args?.path === "string"

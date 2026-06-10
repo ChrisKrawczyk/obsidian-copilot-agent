@@ -558,4 +558,246 @@ describe("ObsidianApi.getDailyNotesConfig / isCommunityPluginEnabled", () => {
     expect(api.isCommunityPluginEnabled("obsidian-tasks-plugin")).toBe(true);
     expect(api.isCommunityPluginEnabled("not-installed")).toBe(false);
   });
+
+  describe("createNote / modifyNote / isActiveFileReadOnly (Phase 4)", () => {
+    test("createNote: index-unavailable when adapter has no create()", async () => {
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.createNote("foo.md", "x");
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("index-unavailable");
+    });
+
+    test("createNote: happy path forwards to vault.create and returns the file", async () => {
+      const created: Array<{ path: string; data: string }> = [];
+      const fakeFile: TFileLike = { path: "foo.md" };
+      const app: AppLike = {
+        vault: {
+          adapter: { getBasePath: () => tmpRoot },
+          create: async (path: string, data: string) => {
+            created.push({ path, data });
+            return fakeFile;
+          },
+        },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.createNote("foo.md", "hello");
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value).toBe(fakeFile);
+      expect(created).toEqual([{ path: "foo.md", data: "hello" }]);
+    });
+
+    test("createNote: native-failed when vault.create throws", async () => {
+      const app: AppLike = {
+        vault: {
+          adapter: { getBasePath: () => tmpRoot },
+          create: async () => {
+            throw new Error("disk full");
+          },
+        },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.createNote("foo.md", "x");
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("native-failed");
+    });
+
+    test("modifyNote: forwards to vault.modify", async () => {
+      const calls: Array<{ path: string; data: string }> = [];
+      const fakeFile: TFileLike = { path: "foo.md" };
+      const app: AppLike = {
+        vault: {
+          adapter: { getBasePath: () => tmpRoot },
+          modify: async (file: TFileLike, data: string) => {
+            calls.push({ path: file.path, data });
+          },
+        },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.modifyNote(fakeFile, "new content");
+      expect(r.ok).toBe(true);
+      expect(calls).toEqual([{ path: "foo.md", data: "new content" }]);
+    });
+
+    test("modifyNote: index-unavailable when adapter has no modify()", async () => {
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.modifyNote({ path: "x.md" }, "data");
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("index-unavailable");
+    });
+
+    test("isActiveFileReadOnly: false when no editor is active", () => {
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(false);
+    });
+
+    test("isActiveFileReadOnly: true when active view is in preview mode", () => {
+      const fakeFile: TFileLike = { path: "x.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: fakeFile,
+                  getMode: () => "preview",
+                } as never)
+              : null,
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(true);
+    });
+
+    test("isActiveFileReadOnly: true when getMode() returns 'source' but state.mode is 'preview'", () => {
+      const fakeFile: TFileLike = { path: "x.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: fakeFile,
+                  getMode: () => "source",
+                  getState: () => ({ mode: "preview" }),
+                } as never)
+              : null,
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(true);
+    });
+
+    test("isActiveFileReadOnly: true when state.source is false", () => {
+      const fakeFile: TFileLike = { path: "x.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: fakeFile,
+                  getState: () => ({ source: false }),
+                } as never)
+              : null,
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(true);
+    });
+
+    test("isActiveFileReadOnly: true when frontmatter cssclasses contains 'readonly'", () => {
+      const fakeFile: TFileLike = { path: "x.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveFile: () => fakeFile,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: fakeFile,
+                  getMode: () => "source",
+                } as never)
+              : null,
+        },
+        metadataCache: {
+          getFileCache: (_f: TFileLike) => ({
+            frontmatter: { cssclasses: ["readonly", "tag-other"] },
+          }),
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(true);
+    });
+
+    test("isActiveFileReadOnly: false when frontmatter cssclasses lacks readonly", () => {
+      const fakeFile: TFileLike = { path: "x.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveFile: () => fakeFile,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: fakeFile,
+                  getMode: () => "source",
+                } as never)
+              : null,
+        },
+        metadataCache: {
+          getFileCache: (_f: TFileLike) => ({
+            frontmatter: { cssclasses: "tag-foo" },
+          }),
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.isActiveFileReadOnly()).toBe(false);
+    });
+
+    test("getActiveNotePath: prefers editor view's file when present", () => {
+      const editorFile: TFileLike = { path: "editor-active.md" };
+      const wsFile: TFileLike = { path: "workspace-active.md" };
+      const sym = Symbol("MarkdownView");
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          markdownViewSymbol: sym,
+          getActiveFile: () => wsFile,
+          getActiveViewOfType: (k: unknown) =>
+            k === sym
+              ? ({
+                  editor: { getValue: () => "x", replaceRange: () => {} } as never,
+                  file: editorFile,
+                } as never)
+              : null,
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.getActiveNotePath()).toBe("editor-active.md");
+    });
+
+    test("getActiveNotePath: falls back to workspace.getActiveFile when editor missing", () => {
+      const wsFile: TFileLike = { path: "workspace-active.md" };
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: {
+          getActiveFile: () => wsFile,
+        },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.getActiveNotePath()).toBe("workspace-active.md");
+    });
+
+    test("getActiveNotePath: null when neither editor nor workspace has a file", () => {
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+        workspace: { getActiveFile: () => null },
+      };
+      const api = new ObsidianApi(app);
+      expect(api.getActiveNotePath()).toBeNull();
+    });
+  });
 });

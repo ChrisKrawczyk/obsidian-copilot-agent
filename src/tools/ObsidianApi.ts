@@ -497,6 +497,145 @@ export class ObsidianApi {
       return false;
     }
   }
+
+  /**
+   * Create a markdown note via Obsidian's `vault.create`. Phase 4's
+   * `create_note` calls this as the **richer surface**; on
+   * `native-failed` the caller falls back to `createFileImpl` from
+   * `WriteTools.ts` so we still record an `UndoJournal` entry. Returns
+   * `index-unavailable` if the vault adapter doesn't expose `create`,
+   * which the caller treats as a reason to take the fallback path.
+   */
+  async createNote(
+    vaultRelPath: string,
+    content: string,
+  ): Promise<ApiResult<TFileLike>> {
+    const vault = this.app.vault;
+    if (!vault || typeof vault.create !== "function") {
+      return { ok: false, reason: "index-unavailable" };
+    }
+    try {
+      const file = (await vault.create(vaultRelPath, content)) as TFileLike;
+      return { ok: true, value: file };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
+   * Modify an existing markdown note via `vault.modify`. Phase 4's
+   * `edit_note` calls this as the **richer surface**; the caller pre-
+   * composes the full post-write content (append/prepend/replace) so
+   * we don't second-guess the mode here.
+   */
+  async modifyNote(
+    file: TFileLike,
+    content: string,
+  ): Promise<ApiResult<void>> {
+    const vault = this.app.vault;
+    if (!vault || typeof vault.modify !== "function") {
+      return { ok: false, reason: "index-unavailable" };
+    }
+    try {
+      await vault.modify(file, content);
+      return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
+   * Path of the note the user is currently focused on, used by both
+   * `insert_into_active_note`'s handler AND `main.ts`'s
+   * `safety.extractVaultPath` so the gate matches the actual write
+   * target. Prefers the active editor's file (which is what the
+   * editor-surface write path mutates) and falls back to
+   * `getActiveFile` (which is what the disk-fallback write path uses).
+   * Returns `null` when no markdown note is in focus.
+   */
+  getActiveNotePath(): string | null {
+    const ed = this.getEditorForActive();
+    if (ed.ok) {
+      const p = (ed.value.file as { path?: string } | null)?.path;
+      if (typeof p === "string") return p;
+    }
+    const af = this.getActiveFile();
+    if (af.ok) {
+      const p = (af.value as { path?: string } | null)?.path;
+      if (typeof p === "string") return p;
+    }
+    return null;
+  }
+
+  /**
+   * FR-012 read-only guard. True when the active markdown leaf is in
+   * preview/read-only mode, OR the active note's frontmatter declares
+   * a `cssclasses` entry that signals read-only (the community
+   * convention is the literal string `readonly`). Returns `false`
+   * defensively when no view is detectable so the caller can take the
+   * no-active-note path without an extra branch.
+   */
+  isActiveFileReadOnly(): boolean {
+    const ws = this.app.workspace;
+    if (ws && typeof ws.getActiveViewOfType === "function") {
+      try {
+        const view = ws.getActiveViewOfType(ws.markdownViewSymbol) as
+          | {
+              getMode?: () => string;
+              getState?: () => { mode?: string; source?: boolean };
+            }
+          | null;
+        if (view) {
+          const state = view.getState?.();
+          const modeFromMethod =
+            typeof view.getMode === "function" ? view.getMode() : undefined;
+          const modeFromState = state?.mode;
+          if (modeFromMethod === "preview") return true;
+          if (modeFromState === "preview") return true;
+          // Obsidian markdown leaf state has `source: false` when in
+          // reading view even if `mode` is undefined on some versions.
+          if (state && state.source === false) return true;
+        }
+      } catch {
+        // Fall through to frontmatter check.
+      }
+    }
+    // Frontmatter cssclasses signal — Obsidian community convention.
+    const af = this.getActiveFile();
+    if (af.ok) {
+      const cache = this.getFileCache(af.value as TFileLike);
+      if (cache.ok) {
+        const fm = cache.value.frontmatter as
+          | { cssclasses?: unknown; cssclass?: unknown }
+          | undefined;
+        const classes = collectCssClasses(fm);
+        if (classes.includes("readonly")) return true;
+      }
+    }
+    return false;
+  }
+}
+
+/** Normalize Obsidian's `cssclasses` (array OR space/comma string). */
+function collectCssClasses(
+  fm: { cssclasses?: unknown; cssclass?: unknown } | undefined,
+): string[] {
+  if (!fm) return [];
+  const out: string[] = [];
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        if (typeof item === "string") out.push(item.trim());
+      }
+    } else if (typeof v === "string") {
+      for (const item of v.split(/[\s,]+/)) {
+        if (item.length > 0) out.push(item);
+      }
+    }
+  };
+  collect(fm.cssclasses);
+  collect(fm.cssclass);
+  return out;
 }
 
 function walkFolder(

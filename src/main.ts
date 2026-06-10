@@ -17,6 +17,8 @@ import { createReadTools } from "./tools/ReadTools";
 import { createWriteTools } from "./tools/WriteTools";
 import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
+import { createWriteNoteTools } from "./tools/WriteNoteTools";
+import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { UndoJournal } from "./domain/UndoJournal";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
@@ -143,6 +145,22 @@ export default class CopilotAgentPlugin extends Plugin {
       obsidianApi,
       this.app.vault as unknown as Parameters<typeof createReadTools>[0],
     );
+    // Phase 4: vault-write note tools. Reuses writeTools' deps + the
+    // shared ObsidianApi instance + a deterministic clock (for daily
+    // notes). Each handler enforces FR-012 (read-only guard) where
+    // applicable; permission gating is handled by SafetyPolicy below.
+    const now = (): Date => new Date();
+    const writeNoteTools = createWriteNoteTools({
+      vault: this.app.vault as unknown as Parameters<
+        typeof createWriteTools
+      >[0]["vault"],
+      workspace: this.app.workspace as unknown as Parameters<
+        typeof createWriteTools
+      >[0]["workspace"],
+      undoJournal,
+      api: obsidianApi,
+      now,
+    });
 
     const agent = new CopilotAgentSession({
       cliPath,
@@ -151,19 +169,23 @@ export default class CopilotAgentPlugin extends Plugin {
       decider: denyAll,
       logLevel: "info",
       onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
-      // Phase 5+6: register vault read/write tools. Read tools use
+      // Phase 3+4: register vault read/write tools. Read tools use
       // skipPermission (always allowed inside vault). Write tools
       // intentionally DO NOT skip permission — every invocation flows
-      // through SafetyPolicy below.
+      // through SafetyPolicy below. `open_note` is the one exception:
+      // it's read-equivalent navigation and sets skipPermission itself.
       tools: [
         ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
       ],
       // Phase 6: route all permission requests through SafetyPolicy.
       // `config` is read on every decision so settings changes apply
       // immediately. `extractVaultPath` pulls the candidate vault
-      // path out of write-tool args for allowlist matching.
+      // path out of write-tool args for allowlist matching. For
+      // `create_daily_note` we synthesize the path the same way the
+      // handler will, so gate-side and write-side paths match exactly.
       safety: {
         config: () => {
           const snap = safetySettingsStore.snapshot();
@@ -175,7 +197,15 @@ export default class CopilotAgentPlugin extends Plugin {
         },
         state: safetyState,
         extractVaultPath: (req) => {
-          const args = (req as { args?: { path?: unknown } }).args;
+          const r = req as { toolName?: unknown; args?: { path?: unknown } };
+          const tool = typeof r.toolName === "string" ? r.toolName : "";
+          if (tool === "create_daily_note") {
+            return resolveDailyNotePath(obsidianApi, now()).path;
+          }
+          if (tool === "insert_into_active_note") {
+            return obsidianApi.getActiveNotePath() ?? undefined;
+          }
+          const args = r.args;
           return typeof args?.path === "string" ? args.path : undefined;
         },
       },
