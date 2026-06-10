@@ -312,40 +312,42 @@ The plan is structured so each phase is independently reviewable and lands behin
   - Add `completedDate?: string` and `cancelledDate?: string` to `TaskInput` (strict `YYYY-MM-DD`). Tasks plugin emits these as `✅ <date>` / `❌ <date>` on terminal transitions (Tasks docs `Getting Started/Dates.md`).
   - Add `status?: TaskStatus` to `TaskInput`. `formatTaskLine` currently hard-codes `- [ ]`; change to emit the correct checkbox symbol (`[ ]`/`[/]`/`[x]`/`[-]`) based on `status` (default `"todo"`).
   - Extend stable field ordering: `<checkbox> <desc> [priority] [📅 due] [⏳ scheduled] [➕ created] [✅ completed] [❌ cancelled] [#tag …]` for tasks-plugin source; mirror with `(completed: …)` / `(cancelled: …)` for gfm.
-  - Add `parseTaskLine(line: string): { ok: true; parsed: TaskInput & { status, completedDate?, cancelledDate?, leadingIndent: string, source: TaskFormatSource, rawStatusSymbol: string } } | { ok: false }`. Tolerant parser — handles both tasks-plugin emoji and our gfm `(field: value)` flavor, recognizes the 4 canonical status symbols, preserves leading indent. Unparseable / non-task lines return `{ ok: false }`. Round-trip invariant: `parseTaskLine(formatTaskLine(input, src)).parsed` equals `input` for all valid inputs (covered by a property-style test).
+  - Add `parseTaskLine(line: string): { ok: true; parsed: ParsedTask } | { ok: false }` where `ParsedTask = TaskInput & { status, completedDate?, cancelledDate?, leadingIndent, source, rawStatusSymbol, extras: string }`. Tolerant parser — handles both tasks-plugin emoji and our gfm `(field: value)` flavor, recognizes the 4 canonical status symbols, preserves leading indent. Unparseable / non-task lines return `{ ok: false }`.
+  - **Unknown-metadata pass-through (`extras`)**: any text between recognized fields and EOL that we don't model (recurrence `🔁`, start `🛫`, block IDs `^abc123`, custom emoji, arbitrary trailing text) is captured verbatim into `parsed.extras`. `formatTaskLine` then appends `extras` (if non-empty) at the very end of the line, after tags. This guarantees round-trip preservation of recurrence and any future Tasks-plugin metadata we don't yet model — Tasks docs (`Getting Started/Recurring Tasks.md`) explicitly require retaining `🔁` markers across edits (CodeResearch.md Phase 6 §2).
+  - **Round-trip invariant (normalized)**: `parseTaskLine(formatTaskLine(input, src)).parsed` equals `normalize(input)` for all valid inputs, where `normalize` applies the same description-trim and tag-sanitization that `formatTaskLine` performs (covered by a property-style test that constructs inputs through `normalize` first, or asserts the second parse-then-format is byte-identical to the first format).
   - Re-emission: when `update_task` writes back, it calls `formatTaskLine(patched, parsed.source)` so the same flavor is preserved (do not flip a tasks-plugin line into gfm).
-- **`src/tools/TaskFormat.test.ts`** (modify): add parse tests for all 4 statuses in both flavors, both date-stamp emoji, round-trip property tests, unparseable-line rejection, format tests for new status checkbox symbol, completedDate/cancelledDate ordering.
+- **`src/tools/TaskFormat.test.ts`** (modify): add parse tests for all 4 statuses in both flavors, both date-stamp emoji, round-trip property tests (post-normalization), `extras` pass-through (recurrence `🔁`, start `🛫`, block IDs, unknown trailing emoji), unparseable-line rejection, format tests for new status checkbox symbol, completedDate/cancelledDate ordering.
 
 - **`src/tools/ObsidianApi.ts`** (modify):
   - Extend `FileCacheLike` to expose `listItems?: ReadonlyArray<{ position: { start: { line: number } }; task?: string }>` (currently exposes tags/headings/frontmatter/links only — see CodeResearch.md Phase 6 §3). This is a narrow surface for Tasks discovery.
   - No new method needed; `find_tasks` calls `api.getFileCache(file)` and reads `listItems`.
 
 - **`src/tools/FindTasks.ts`** (new) + tests:
-  - `findTasksImpl(filter: FindTasksFilter, deps): Promise<FindTasksResult>` where filter accepts `{ tag?, status?, dueBefore?, dueAfter?, descriptionRegex?, path? }`. Enumerates via `vault.getMarkdownFiles()` (mirrors `search_vault` in `ReadTools.ts:275-359`); per-file: `api.getFileCache(file).listItems` filtered to `task !== undefined` gives candidate line numbers; read file content once and slice the matching lines; `parseTaskLine` each; apply filter; return `[{ path, line, raw, parsed }]` with **1-based** `line` numbers (matching existing search convention — note: Obsidian's cache is 0-based, we adjust).
+  - `findTasksImpl(filter: FindTasksFilter, deps): Promise<FindTasksResult>` where filter accepts `{ tag?, status?, dueBefore?, dueAfter?, descriptionRegex?, path? }`. Enumerates via `vault.getMarkdownFiles()` (mirrors `search_vault` in `ReadTools.ts:275-359`); per-file: `api.getFileCache(file).listItems` filtered to `task !== undefined` gives candidate line numbers; read file content once and slice the matching lines; `parseTaskLine` each; apply filter; return `[{ path, line, raw, parsed }]` with **1-based** `line` numbers — Obsidian's cache stores 0-based `Loc.line` per `obsidian.d.ts:3840-3848` (CodeResearch.md Phase 6 §3); we add 1 at the boundary.
   - Optional `path` filter restricts to a single file (avoids enumerating the whole vault for "find tasks in today's daily note").
   - Caps: 500 results per call (mirrors `search_vault`), 5 MB per-file size limit.
+  - Regex safety: `descriptionRegex` is wrapped in a try/catch on `new RegExp(…)`; invalid patterns return `{ ok: false, reason: 'invalid_regex', error }`. We do NOT impose a regex execution timeout (Node's regex engine is reasonably resilient; pathological patterns are a model-quality concern not a safety one).
   - Returns `{ ok: true, results, truncated, scanned }`.
 
 - **`src/tools/UpdateTask.ts`** (new) + tests:
   - `updateTaskImpl(input: UpdateTaskInput, deps): Promise<UpdateTaskResult>` where input is:
     - `path: string` — vault-relative
     - `line: number` — 1-based line number from `find_tasks`
-    - `descriptionMatch?: string` — optional re-anchor; if the line at `line` doesn't parse as a task containing `descriptionMatch`, search nearby (±10 lines) for a matching task and use the first hit. If still no match, return `{ ok: false, reason: 'task_not_found' }`.
+    - `expectedRawLine?: string` — preferred re-anchor: the exact raw line text returned by `find_tasks`. If the line at `line` doesn't match `expectedRawLine` byte-for-byte (after trimming trailing whitespace only), search the file for an exact match. Zero or multiple matches → `{ ok: false, reason: 'task_not_found' | 'ambiguous_match' }`. Single match → use it. This is the **primary** identification mechanism.
+    - `descriptionMatch?: string` — fallback re-anchor used only when `expectedRawLine` is absent. If the line at `line` doesn't parse as a task containing `descriptionMatch`, search the entire file (not ±10 — see below) for tasks whose description contains the substring. Zero matches → `{ ok: false, reason: 'task_not_found' }`. Multiple matches → `{ ok: false, reason: 'ambiguous_match', candidates: [{ line, raw }, …] }` — fail-loud so the agent can disambiguate rather than silently editing the wrong task.
     - `patch`: structured `{ addTags?: string[], removeTags?: string[], setPriority?: TaskPriority | null, setDueDate?: string | null, setScheduledDate?: string | null, setStatus?: TaskStatus, setDescription?: string }`. `null` clears the field; omitted = leave alone.
-  - Flow: read file → parse target line → apply patch (tag merge is set-union with sanitization, idempotent; status changes auto-stamp/strip ✅/❌ today via `deps.now()`) → re-format via `formatTaskLine(patched, parsed.source)` → preserve `parsed.leadingIndent` → write whole-file via `editFileImpl` (single journal undo entry).
+  - Flow: read file → identify target line (line→expectedRawLine→descriptionMatch in priority order) → parse → apply patch (tag merge is set-union with sanitization, idempotent per field; status changes auto-stamp/strip ✅/❌ today via `deps.now()`; preserve `parsed.extras` through re-emission) → re-format via `formatTaskLine(patched, parsed.source)` → preserve `parsed.leadingIndent` → write whole-file via `editFileImpl` (single journal undo entry).
   - **Strict-date contract** (same as `create_task`): `setDueDate` / `setScheduledDate` accept strict `YYYY-MM-DD` or `null` only. Anything else → `{ ok: false, reason: 'invalid_date_format', field }` (vault not mutated). Model resolves relative dates against preamble timezone (FR-006).
-  - **Idempotency**: if the patch is a no-op (e.g., `addTags: ['x']` when `#x` already present and no other field changed), return `{ ok: true, changed: false, reason: 'no_change' }` without writing. No approval prompt for no-ops handled by SafetyPolicy gate inspecting an early return.
+  - **Idempotency / changed-tracking**: after applying the patch, compare the formatted result against the original raw line. If byte-identical → return `{ ok: true, changed: false, reason: 'no_change' }` and DO NOT call `editFileImpl` (no journal entry, no file write). The user still saw an approval prompt — see "Approval limitation" below; we accept one redundant approval over a complex preflight protocol. Partial changes (e.g., `addTags: ['#x']` already present AND `setPriority: 'high'` is new) proceed normally; the result reports `changed: true` plus `changedFields: ['priority']` so the caller can see what actually moved.
   - **Status auto-stamping**:
-    - `setStatus: 'done'` → adds `completedDate = today` (only if not already set), clears `cancelledDate`
-    - `setStatus: 'cancelled'` → adds `cancelledDate = today` (only if not already set), clears `completedDate`
-    - `setStatus: 'todo'` or `'in-progress'` → clears both `completedDate` and `cancelledDate` (transitioning out of terminal state)
-  - **Approval prompt detail** (rendered as plain-text `<pre>` — CodeResearch.md Phase 6 §5):
-    ```
-    file: <path>:<line>
-    before: <raw line>
-    after:  <formatted line>
-    ```
-  - Returns `{ ok: true, path, line, changed, before, after, undoId, undoSurface: 'journal' }`. Undo restores the file's prior content (single modify entry from `editFileImpl`).
+    - `setStatus: 'done'` → adds `completedDate = today` only if `completedDate` is currently unset (preserves existing completion date — Tasks plugin convention is not to refresh on re-completion); clears `cancelledDate`.
+    - `setStatus: 'cancelled'` → adds `cancelledDate = today` only if currently unset; clears `completedDate`.
+    - `setStatus: 'todo'` or `'in-progress'` → clears both `completedDate` and `cancelledDate` (transitioning out of terminal state).
+  - **Approval limitation (architectural)**: the SDK approval prompt is built **before** the tool handler runs and only shows tool args (see `AgentSession.ts:1164-1176, 1420-1437` and plan-review finding #1). Phase 6 does NOT attempt to surface a `before/after` line diff inside the approval prompt — that would require an architectural change to either preflight tool calls or pass a content-resolver callback to the SDK approval pipeline. Instead:
+    - Approval prompt shows the structured args (path, line, patch object) — descriptive enough for the user to evaluate intent.
+    - The COMPLETED tool-call body renders `before:` / `after:` so the user can see what changed retrospectively (this happens AFTER the handler runs and writes the result, which is well-supported by the existing tool-call render path — CodeResearch.md Phase 6 §5).
+    - No-op short-circuit happens INSIDE the handler (post-approval). Vault still not mutated; the user sees an approval they could have skipped, with `changed: false` in the result. Acceptable tradeoff; a future phase can add an SDK preflight hook to skip approval for no-ops.
+  - Returns `{ ok: true, path, line, changed, changedFields, before, after, undoId, undoSurface: 'journal' }`. Undo restores the file's prior content (single modify entry from `editFileImpl`).
 
 - **`src/tools/WriteNoteTools.ts`** (modify): register `update_task` in the factory (gated like `create_task`); handler delegates to `updateTaskImpl`. No re-entry into other gated tools (calls `editFileImpl` directly).
 
@@ -356,32 +358,34 @@ The plan is structured so each phase is independently reviewable and lands behin
 - **`src/domain/vaultToolManifest.ts`** (modify): add entries for both new tools (`update_task` = write/non-read-only, `find_tasks` = read-only) so the preamble inventory stays accurate.
 
 - **`src/domain/PreambleAssembler.ts`** (modify): extend the authoring-conventions block with:
-  - One-sentence mention of `update_task` / `find_tasks` with the standard workflow ("call `find_tasks` first, then `update_task` per result with the returned `path` + `line`").
+  - One-sentence mention of `update_task` / `find_tasks` with the standard workflow ("call `find_tasks` first, then `update_task` per result — pass back the `path`, `line`, AND `expectedRawLine` from the find result for safe re-anchoring").
   - Note the strict-date contract applies to `update_task` too.
   - Status vocabulary: `todo` / `in-progress` / `done` / `cancelled`.
   - Re-run Phase 2 deterministic-output tests after this tweak.
 
-- **`src/sdk/AgentSession.ts`** (modify): `buildSafetyInput`'s `extractVaultPath` (line 1241-1266) needs a case for `update_task` to extract `args.path` (already the default; verify no override needed since args already have `path`).
+- **`src/sdk/AgentSession.ts`** (modify): `buildSafetyInput`'s `extractVaultPath` (line 1241-1266) needs a case for `update_task` to extract `args.path` (already the default; verify no override needed since args already have `path`). Classification assertion lives in `AgentSession` / `WriteTools.VAULT_WRITE_TOOL_NAMES`, not `SafetyPolicy`.
 
 - **`src/main.ts`** (modify): no factory wiring changes needed — both tools are registered through existing `createReadNoteTools` / `createWriteNoteTools` factories with the same deps.
 
 - **Tests**:
-  - `src/tools/FindTasks.test.ts` (new): single-file filter, tag filter, status filter (all 4), due-range filter, regex filter, 500-result truncation, 1-based line numbers, non-task lines ignored, both format flavors.
-  - `src/tools/UpdateTask.test.ts` (new): each patch field individually (addTags/removeTags/setPriority/setDueDate/setScheduledDate/setStatus×4/setDescription), idempotent no-op short-circuit, strict-date rejection for both date fields, descriptionMatch re-anchor (line moved up/down within ±10), task_not_found when re-anchor fails, status auto-stamp on done/cancelled, strip ✅/❌ when transitioning back to todo/in-progress, undoId surfaced, leadingIndent preserved, source flavor preserved (tasks-plugin stays tasks-plugin).
+  - `src/tools/FindTasks.test.ts` (new): single-file filter, tag filter, status filter (all 4), due-range filter, regex filter, invalid regex returns structured error, 500-result truncation, 1-based line numbers (cache→output adjustment verified explicitly), non-task lines ignored, both format flavors, recurring task `🔁` preserved in `raw`.
+  - `src/tools/UpdateTask.test.ts` (new): each patch field individually (addTags/removeTags/setPriority/setDueDate/setScheduledDate/setStatus×4/setDescription); idempotent no-op short-circuit (no file write, no journal entry, `changed: false`); partial-change reports correct `changedFields`; strict-date rejection for both date fields; **expectedRawLine identification** (happy path, line moved up/down to any distance, file lacks expected → `task_not_found`); **descriptionMatch fallback** (unique match in file succeeds; **multiple matches → `ambiguous_match` with candidates list, NO mutation**); status auto-stamp on done/cancelled; preserves existing completedDate on re-completion (does NOT refresh); strip ✅/❌ when transitioning back to todo/in-progress; multi-tag add+remove in one call; undoId surfaced; leadingIndent preserved; source flavor preserved (tasks-plugin stays tasks-plugin); `extras` (recurrence `🔁`, block ID) round-tripped through the edit.
   - `src/domain/PreambleAssembler.test.ts` (modify): update fixture for the conventions block.
-  - `src/domain/SafetyPolicy.test.ts` (modify): `update_task` classified as vault; `find_tasks` classified as read-only.
+  - `src/sdk/AgentSession.test.ts` (modify): assert `update_task` classifies as vault and `find_tasks` classifies as read-only via the existing classification test pattern.
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `npm test` — all new tests pass; Phase 2 / 5 tests still green after authoring-conventions tweak; total test count grows by ~40.
+- [ ] `npm test` — all new tests pass; Phase 2 / 5 tests still green after authoring-conventions tweak; total test count grows by ~50.
 - [ ] `npm run typecheck` — clean.
 - [ ] `npm run build` — clean.
 
 #### Manual Verification:
 - [ ] In a vault with several tasks across multiple notes: ask "find all my tasks tagged #work that are due before next Friday" — single read-only call (no approval), structured candidate list returned in chat.
-- [ ] Pick one and ask "mark that done" — single approval showing `before:` / `after:` for ONE line; the task line gets `- [x] … ✅ <today>` (or `(completed: <today>)` for gfm); Undo button reverts cleanly.
-- [ ] Ask "tag all my communication tasks with #communication" — model uses `find_tasks` to enumerate candidates, then issues one `update_task` per result. Each approval shows a tiny per-line diff. Re-running is idempotent (no-op approvals reported, vault not mutated).
+- [ ] Pick one and ask "mark that done" — single approval showing the structured patch args; the task line gets `- [x] … ✅ <today>` (or `(completed: <today>)` for gfm); the completed tool-call body shows `before:` / `after:` for the line; Undo button reverts cleanly.
+- [ ] Ask "tag all my communication tasks with #communication" — model uses `find_tasks` to enumerate candidates (passing `path` + `line` + `expectedRawLine` back to `update_task`), then issues one `update_task` per result. Each approval shows the structured patch. Re-running is idempotent (each call returns `changed: false`; vault not mutated).
+- [ ] Create a recurring task (manually in editor): `- [ ] Weekly review 🔁 every Sunday 📅 2026-06-14`. Mark it done via `update_task setStatus: 'done'` — verify the `🔁 every Sunday` marker is preserved in the resulting line.
+- [ ] Add a task with a duplicate description in two places. Call `update_task` with `descriptionMatch` only (no `expectedRawLine`) — verify `ambiguous_match` is returned with the candidate list and the vault is NOT mutated.
 - [ ] Mark a task in-progress (`setStatus: 'in-progress'`) — produces `- [/]`. Verify Tasks plugin Theme picks it up as IN_PROGRESS.
 - [ ] Mark a `done` task back to `todo` — `✅` date is stripped.
 - [ ] Edit a task in a file open in the editor with unsaved changes — refused with same error as `edit_note`'s dirty-buffer guard.
