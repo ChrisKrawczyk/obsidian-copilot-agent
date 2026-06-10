@@ -73,9 +73,9 @@ The plan is structured so each phase is independently reviewable and lands behin
 ## Phase Candidates
 <!-- Empty initially. Items added during planning if work surfaces. -->
 - [x] [promoted-to-phase-6] Task editing toolset: `update_task` (status + tags + priority + dates) and `find_tasks` (filter by tag/status/regex). Supports all four statuses (`todo`/`in-progress`/`done`/`cancelled`) with auto-stamped completion/cancellation dates. Surgical line-level edits with line-diff approval and journal undo. Promoted mid-flight after Phase 5 ship; full elaboration in Phase 6 below.
-- [ ] Re-prioritize / hide v0.1 raw-filesystem capabilities behind a setting after observing model preference in real use (risk mitigation from spec).
-- [ ] Per-vault Daily Notes target override (if the core plugin's config proves unreliable).
-- [ ] **Richer vault search capabilities** (deferred from cycle-2 design pivot):
+- [x] [deferred] Re-prioritize / hide v0.1 raw-filesystem capabilities behind a setting after observing model preference in real use (risk mitigation from spec).
+- [x] [deferred] Per-vault Daily Notes target override (if the core plugin's config proves unreliable).
+- [x] [deferred] **Richer vault search capabilities** (deferred from cycle-2 design pivot):
   - `search_by_tag(tag: string)` — list notes tagged with a given tag via `metadataCache.getTags()`.
   - `search_by_name(query: string)` — fuzzy match note names via `app.vault.getMarkdownFiles()`.
   - `list_all_tags()` — enumerate every tag in the vault from `metadataCache.getTags()`.
