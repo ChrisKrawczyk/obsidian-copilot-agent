@@ -9,7 +9,9 @@
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "npm run build && node scripts/deploy.mjs",
+    "deploy:no-build": "node scripts/deploy.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

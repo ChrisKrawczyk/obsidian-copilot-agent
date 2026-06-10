@@ -29,6 +29,12 @@ Tracked as `[deferred]` candidates in `.paw/work/copilot-sdk-spike/Implementatio
      - macOS: `node_modules/@github/copilot-darwin-{arm64,x64}/copilot`
      - Linux: `node_modules/@github/copilot-linux-{arm64,x64}/copilot`
    - In Obsidian → Settings → Community plugins, enable "Copilot Agent".
+   - **Tip:** after first install, create a `.deploy-target` file at the
+     repo root with the absolute path to that plugin folder (one line,
+     gitignored) and use `npm run deploy` to redeploy `main.js`,
+     `manifest.json`, and `styles.css` after each build. Use
+     `npm run deploy -- --with-binary` to also re-copy the CLI binary
+     when `@github/copilot-sdk` is upgraded.
 4. **Sign in**: open Settings → Copilot Agent → click **Connect**. A modal shows the GitHub URL + a one-time code. Authorise the request and the chat view becomes usable.
 5. **Use it**: click the bot ribbon icon (left sidebar) to open the chat panel.
    - Ask the agent to read or search the vault (no prompt — read tools are exempt; see below).
