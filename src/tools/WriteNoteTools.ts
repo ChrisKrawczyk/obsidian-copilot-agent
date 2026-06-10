@@ -389,9 +389,18 @@ export interface CreateTaskResult {
   existingTargetCreated?: boolean;
   /** True if the inner create-or-edit took the lower-level vault adapter fallback. */
   usedFallback?: boolean;
+  /**
+   * Undo handle for the operation. When we had to create the target
+   * file, this is the create-entry id so reverting deletes the whole
+   * file (the user had no task target before this call). When the
+   * target already existed, this is the modify-entry id so reverting
+   * just removes the appended task line.
+   */
+  undoId?: string;
+  undoSurface?: "journal";
   /** Set when `dueDate` or `scheduledDate` is not strict YYYY-MM-DD. */
   reason?: "invalid_date_format" | "invalid_priority" | "missing_description";
-  field?: "dueDate" | "scheduledDate";
+  field?: "dueDate" | "scheduledDate" | "createdDate";
   /** Free-form error message for callers / users. */
   error?: string;
 }
@@ -425,6 +434,18 @@ function validateTaskInput(input: TaskInput): CreateTaskResult | null {
       field: "scheduledDate",
       error:
         `create_task rejected scheduledDate "${input.scheduledDate}": expected strict YYYY-MM-DD.`,
+    };
+  }
+  if (
+    input.createdDate !== undefined &&
+    !STRICT_DATE_REGEX.test(input.createdDate)
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_date_format",
+      field: "createdDate",
+      error:
+        `create_task rejected createdDate "${input.createdDate}": expected strict YYYY-MM-DD.`,
     };
   }
   if (
@@ -473,7 +494,15 @@ export async function createTaskImpl(
   input: TaskInput,
   deps: WriteNoteToolsDeps,
 ): Promise<CreateTaskResult> {
-  const validation = validateTaskInput(input);
+  // Default createdDate to today (from deps.now()) so the user gets a
+  // Tasks-plugin ➕ / GFM (created: …) marker for free. The model may
+  // override with an explicit createdDate (e.g. backdating a forgotten
+  // task); validation enforces strict YYYY-MM-DD either way.
+  const withCreatedDate: TaskInput = {
+    ...input,
+    createdDate: input.createdDate ?? formatYmd(deps.now()),
+  };
+  const validation = validateTaskInput(withCreatedDate);
   if (validation) return validation;
 
   // Determine target path from settings. Custom-path mode wins; otherwise
@@ -498,7 +527,7 @@ export async function createTaskImpl(
   )
     ? "tasks-plugin"
     : "gfm";
-  const taskLine = formatTaskLine(input, formatSource);
+  const taskLine = formatTaskLine(withCreatedDate, formatSource);
 
   // Create-or-read target. We call createFileImpl / editFileImpl
   // DIRECTLY rather than create_note / edit_note so the entire create-
@@ -507,6 +536,11 @@ export async function createTaskImpl(
   // line 281.
   let existingTargetCreated = false;
   let usedFallback = false;
+  // Capture the create-entry undoId when we made the target; this is
+  // what we surface so a single undo deletes the whole file (the user
+  // had no task target before this call). When the target already
+  // existed, we surface the modify-entry undoId from the append.
+  let createUndoId: string | undefined;
   const existing = lookupTFile(targetPath, deps.vault);
   if (existing === null) {
     // Seed with daily-notes template content for daily-note targets.
@@ -523,6 +557,7 @@ export async function createTaskImpl(
       };
     }
     existingTargetCreated = true;
+    createUndoId = created.undoId;
   }
 
   // Read current content so we can append the task line. The target
@@ -593,13 +628,28 @@ export async function createTaskImpl(
   // mid-approval).
   usedFallback = true;
 
+  // Prefer the create-entry undoId when we made the file (one click
+  // reverts the entire operation). Otherwise surface the append's
+  // modify-entry undoId so undo just removes the task line.
+  const undoId = createUndoId ?? edited.undoId;
+
   return {
     ok: true,
     targetPath,
     formatSource,
     existingTargetCreated,
     usedFallback,
+    undoId,
+    undoSurface: "journal",
   };
+}
+
+/** Format a Date as strict `YYYY-MM-DD` in local time. */
+function formatYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 
@@ -746,6 +796,13 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
             type: "string",
             description: "Optional strict YYYY-MM-DD scheduled date.",
           },
+          createdDate: {
+            type: "string",
+            description:
+              "Optional strict YYYY-MM-DD created date. Defaults to today " +
+              "(the user's local date) when omitted. Override only to " +
+              "backdate a forgotten task.",
+          },
           priority: {
             type: "string",
             enum: ["high", "medium", "low"],
@@ -765,6 +822,7 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
           description?: unknown;
           dueDate?: unknown;
           scheduledDate?: unknown;
+          createdDate?: unknown;
           priority?: unknown;
           tags?: unknown;
         };
@@ -773,6 +831,8 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
           dueDate: typeof a.dueDate === "string" ? a.dueDate : undefined,
           scheduledDate:
             typeof a.scheduledDate === "string" ? a.scheduledDate : undefined,
+          createdDate:
+            typeof a.createdDate === "string" ? a.createdDate : undefined,
           priority:
             a.priority === "high" || a.priority === "medium" || a.priority === "low"
               ? (a.priority as TaskPriority)

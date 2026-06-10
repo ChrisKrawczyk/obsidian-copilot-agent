@@ -23,6 +23,12 @@ export interface TaskInput {
   dueDate?: string;
   /** Strict `YYYY-MM-DD`. The caller has already validated this. */
   scheduledDate?: string;
+  /**
+   * Strict `YYYY-MM-DD`. The tool layer populates this from `deps.now()`
+   * by default; callers may pass an explicit value (e.g. backdating a
+   * forgotten task).
+   */
+  createdDate?: string;
   priority?: TaskPriority;
   /** Tags WITHOUT the leading `#`. Whitespace within a tag is stripped. */
   tags?: string[];
@@ -49,10 +55,10 @@ export const STRICT_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
  * Format a single task line. Output is one line WITHOUT a trailing
  * newline — the caller appends `\n` when joining onto file content.
  *
- * Field ordering is stable across calls so tests can pin the output:
- *   `- [ ] <description> [priority] [📅 due] [⏳ scheduled] [#tag …]`
+ * Field ordering is stable across calls so tests can pin the output.
+ *   `- [ ] <description> [priority] [📅 due] [⏳ scheduled] [➕ created] [#tag …]`
  * for the tasks-plugin source, and:
- *   `- [ ] <description> (priority: …) (due: …) (scheduled: …) [#tag …]`
+ *   `- [ ] <description> (priority: …) (due: …) (scheduled: …) (created: …) [#tag …]`
  * for the gfm source.
  */
 export function formatTaskLine(
@@ -67,11 +73,13 @@ export function formatTaskLine(
     if (input.priority) parts.push(PRIORITY_EMOJI[input.priority]);
     if (input.dueDate) parts.push(`📅 ${input.dueDate}`);
     if (input.scheduledDate) parts.push(`⏳ ${input.scheduledDate}`);
+    if (input.createdDate) parts.push(`➕ ${input.createdDate}`);
     for (const t of tags) parts.push(`#${t}`);
   } else {
     if (input.priority) parts.push(`(priority: ${PRIORITY_TEXT[input.priority]})`);
     if (input.dueDate) parts.push(`(due: ${input.dueDate})`);
     if (input.scheduledDate) parts.push(`(scheduled: ${input.scheduledDate})`);
+    if (input.createdDate) parts.push(`(created: ${input.createdDate})`);
     for (const t of tags) parts.push(`#${t}`);
   }
   return parts.join(" ");

@@ -550,8 +550,12 @@ describe("createTaskImpl", () => {
     expect(r.targetPath).toBe("2026-06-09.md");
     expect(r.existingTargetCreated).toBe(false);
     expect(r.usedFallback).toBe(true);
+    // Undo surfaced so the UI renders an Undo button. Target already
+    // existed, so this is the append's modify-entry id.
+    expect(typeof r.undoId).toBe("string");
+    expect(r.undoSurface).toBe("journal");
     const written = world.files.get("2026-06-09.md")!.content!;
-    expect(written).toBe("- [ ] Email Bob ⏫ 📅 2026-06-12\n");
+    expect(written).toBe("- [ ] Email Bob ⏫ 📅 2026-06-12 ➕ 2026-06-09\n");
   });
 
   test("Tasks plugin absent → emits GFM inline metadata", async () => {
@@ -569,7 +573,9 @@ describe("createTaskImpl", () => {
     expect(r.formatSource).toBe("gfm");
     const written = world.files.get("2026-06-09.md")!.content!;
     // Separator newline inserted before task because existing content didn't end with \n.
-    expect(written).toBe("Hello\n- [ ] Write notes (scheduled: 2026-06-15)\n");
+    expect(written).toBe(
+      "Hello\n- [ ] Write notes (scheduled: 2026-06-15) (created: 2026-06-09)\n",
+    );
   });
 
   test("target daily note doesn't exist → creates it and reports existingTargetCreated: true", async () => {
@@ -579,7 +585,16 @@ describe("createTaskImpl", () => {
     expect(r.ok).toBe(true);
     expect(r.existingTargetCreated).toBe(true);
     expect(r.targetPath).toBe("2026-06-09.md");
-    expect(world.files.get("2026-06-09.md")?.content).toBe("- [ ] Buy milk\n");
+    expect(world.files.get("2026-06-09.md")?.content).toBe(
+      "- [ ] Buy milk (created: 2026-06-09)\n",
+    );
+    // When we created the target, undoId references the create entry so
+    // one undo deletes the whole file (cleanest revert — the user had
+    // no task target before this call).
+    expect(typeof r.undoId).toBe("string");
+    const entry = deps.undoJournal.get(r.undoId!);
+    expect(entry?.kind).toBe("create");
+    expect(entry?.path).toBe("2026-06-09.md");
   });
 
   test("daily-note target seeded from Daily Notes template when freshly created", async () => {
@@ -597,7 +612,9 @@ describe("createTaskImpl", () => {
     expect(r.ok).toBe(true);
     expect(r.existingTargetCreated).toBe(true);
     const written = world.files.get("2026-06-09.md")!.content!;
-    expect(written).toBe("# {{date}}\n\n## Tasks\n- [ ] Stretch\n");
+    expect(written).toBe(
+      "# {{date}}\n\n## Tasks\n- [ ] Stretch (created: 2026-06-09)\n",
+    );
   });
 
   test("custom-path mode appends to configured file and never touches the daily note", async () => {
@@ -617,10 +634,13 @@ describe("createTaskImpl", () => {
     expect(r.targetPath).toBe("Inbox.md");
     expect(r.existingTargetCreated).toBe(false);
     expect(world.files.get("Inbox.md")?.content).toBe(
-      "Existing\n- [ ] Triage\n",
+      "Existing\n- [ ] Triage (created: 2026-06-09)\n",
     );
     // Daily note must NOT be created in custom-path mode.
     expect(world.files.get("2026-06-09.md")).toBeUndefined();
+    // Target pre-existed → undoId is modify-entry, not create-entry.
+    const entry = deps.undoJournal.get(r.undoId!);
+    expect(entry?.kind).toBe("modify");
   });
 
   test("custom-path mode whitespace-only target falls back to daily-note mode", async () => {
@@ -706,5 +726,34 @@ describe("createTaskImpl", () => {
     expect(r.error).toMatch(/unsaved changes/);
     // Disk content untouched.
     expect(world.files.get("2026-06-09.md")?.content).toBe("On disk");
+  });
+
+  test("explicit createdDate overrides the default (e.g. backdated task)", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: true,
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "Forgotten call", createdDate: "2026-06-01" },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    expect(written).toBe("- [ ] Forgotten call ➕ 2026-06-01\n");
+  });
+
+  test("rejects non-strict createdDate without mutating the vault", async () => {
+    const world = makeWorld({ tasksPluginEnabled: false });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "X", createdDate: "yesterday" },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_date_format");
+    expect(r.field).toBe("createdDate");
+    expect(world.files.size).toBe(0);
   });
 });

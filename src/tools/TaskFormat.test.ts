@@ -51,19 +51,29 @@ describe("formatTaskLine — tasks-plugin source", () => {
     ).toBe("- [ ] X #work #home #two-words");
   });
 
-  test("stable ordering: priority before due before scheduled before tags", () => {
+  test("stable ordering: priority before due before scheduled before created before tags", () => {
     expect(
       formatTaskLine(
         {
           description: "X",
           dueDate: "2026-06-12",
           scheduledDate: "2026-06-10",
+          createdDate: "2026-06-09",
           priority: "high",
           tags: ["a", "b"],
         },
         "tasks-plugin",
       ),
-    ).toBe("- [ ] X ⏫ 📅 2026-06-12 ⏳ 2026-06-10 #a #b");
+    ).toBe("- [ ] X ⏫ 📅 2026-06-12 ⏳ 2026-06-10 ➕ 2026-06-09 #a #b");
+  });
+
+  test("created date alone (tasks-plugin)", () => {
+    expect(
+      formatTaskLine(
+        { description: "Note this", createdDate: "2026-06-09" },
+        "tasks-plugin",
+      ),
+    ).toBe("- [ ] Note this ➕ 2026-06-09");
   });
 });
 
@@ -106,11 +116,23 @@ describe("formatTaskLine — gfm source", () => {
           priority: "medium",
           dueDate: "2026-06-12",
           scheduledDate: "2026-06-10",
+          createdDate: "2026-06-09",
           tags: ["release"],
         },
         "gfm",
       ),
-    ).toBe("- [ ] Ship it (priority: medium) (due: 2026-06-12) (scheduled: 2026-06-10) #release");
+    ).toBe(
+      "- [ ] Ship it (priority: medium) (due: 2026-06-12) (scheduled: 2026-06-10) (created: 2026-06-09) #release",
+    );
+  });
+
+  test("created date alone (gfm)", () => {
+    expect(
+      formatTaskLine(
+        { description: "Note this", createdDate: "2026-06-09" },
+        "gfm",
+      ),
+    ).toBe("- [ ] Note this (created: 2026-06-09)");
   });
 });
 
