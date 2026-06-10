@@ -178,6 +178,13 @@ export function parseTaskLine(
   let source: TaskFormatSource = "gfm";
   let sawGfmMeta = false;
   const GFM_SENTINEL = "\u0000GFM\u0000";
+  const OPAQUE_PREFIX = "\u0000OPAQUE\u0000";
+  // Original-text storage for unrecognized `(field: value)` clauses so
+  // we can restore them verbatim after whitespace tokenization (F4 —
+  // previously we replaced internal whitespace with `_` which corrupted
+  // the user's content; e.g. `(due: bogus value)` round-tripped as
+  // `(due:_bogus_value)`).
+  const opaqueClauses: string[] = [];
 
   // Replace gfm `(field: value)` clauses with a sentinel — they emit as
   // a single visual unit but whitespace tokenization would split them.
@@ -191,11 +198,22 @@ export function parseTaskLine(
     if (field === "created" && STRICT_DATE_REGEX.test(v)) { createdDate = v; sawGfmMeta = true; return ` ${GFM_SENTINEL} `; }
     if (field === "completed" && STRICT_DATE_REGEX.test(v)) { completedDate = v; sawGfmMeta = true; return ` ${GFM_SENTINEL} `; }
     if (field === "cancelled" && STRICT_DATE_REGEX.test(v)) { cancelledDate = v; sawGfmMeta = true; return ` ${GFM_SENTINEL} `; }
-    // Unrecognized — collapse whitespace so it tokenizes as one extras chunk.
-    return ` ${full.replace(/\s+/g, "_")} `;
+    // Unrecognized — preserve the original clause verbatim by stashing
+    // it and emitting an opaque single-token placeholder.
+    const idx = opaqueClauses.length;
+    opaqueClauses.push(full);
+    return ` ${OPAQUE_PREFIX}${idx}\u0000 `;
   });
 
   const tokens = restNoGfm.split(/\s+/).filter((t) => t.length > 0);
+  // Restore any opaque placeholders to their original full text BEFORE
+  // they're routed into descParts / extras / tags so the user's content
+  // is preserved verbatim across a parse/format round-trip (F4).
+  const OPAQUE_RE = new RegExp(`^${OPAQUE_PREFIX}(\\d+)\u0000$`);
+  for (let i = 0; i < tokens.length; i++) {
+    const m = OPAQUE_RE.exec(tokens[i]);
+    if (m) tokens[i] = opaqueClauses[Number(m[1])] ?? tokens[i];
+  }
   const descParts: string[] = [];
   const tags: string[] = [];
   const extras: string[] = [];

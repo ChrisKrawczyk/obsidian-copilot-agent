@@ -235,13 +235,10 @@ function identifyTargetLine(
   // Tier 2: descriptionMatch
   if (typeof input.descriptionMatch === "string" && input.descriptionMatch.length > 0) {
     const needle = input.descriptionMatch;
-    // Try the optimistic line first.
-    if (tryLine !== undefined) {
-      const pr = parseTaskLine(tryLine);
-      if (pr.ok && pr.parsed.description.includes(needle)) {
-        return { ok: true, line: lineIdx };
-      }
-    }
+    // Always scan ALL lines first so ambiguity is detected even when the
+    // optimistic `line` hint happens to match (F5 — previously this
+    // short-circuited and silently picked the hinted line, masking
+    // duplicates and committing changes to the wrong task).
     const matches: number[] = [];
     for (let i = 0; i < lines.length; i++) {
       const pr = parseTaskLine(lines[i]);
@@ -249,6 +246,10 @@ function identifyTargetLine(
     }
     if (matches.length === 0) return { ok: false, err: { ok: false, reason: "task_not_found" } };
     if (matches.length === 1) return { ok: true, line: matches[0] };
+    // Multiple matches — never auto-disambiguate from the optimistic
+    // `line` hint, which may just be the model's stale default. Force
+    // the caller to either use `expectedRawLine` (the canonical re-
+    // anchor) or refine `descriptionMatch` to a unique substring.
     return {
       ok: false,
       err: {

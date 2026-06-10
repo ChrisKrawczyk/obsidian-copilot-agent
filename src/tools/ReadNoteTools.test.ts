@@ -395,3 +395,56 @@ describe("createReadNoteTools tool registration", () => {
     }
   });
 });
+
+describe("findBacklinksImpl — final-review F10 (strict linkpath match)", () => {
+  test("does NOT treat 'alpha-prime' or 'alphabet' as a link to 'alpha'", async () => {
+    const target: FixtureFile = { path: "alpha.md", extension: "md" };
+    const sourceWithDistinctLinks: FixtureFile = { path: "src.md", extension: "md" };
+    // The cache has links to OTHER notes whose basenames merely CONTAIN
+    // "alpha" as a substring (e.g. alpha-prime, alphabet). Previously
+    // these false-positived because of an original.includes(target)
+    // check. We assert they no longer appear.
+    const fileCaches = new Map<string, FileCacheLike>([
+      [
+        "src.md",
+        {
+          links: [
+            { link: "alpha-prime", original: "[[alpha-prime]]" },
+            { link: "alphabet", original: "[[alphabet]]" },
+          ],
+        },
+      ],
+    ]);
+    // resolvedLinks claims src.md does in fact have a resolved link
+    // to lpha.md (perhaps via a different link the test doesn't model),
+    // so the per-link filter is the gate under test.
+    const resolvedLinks = { "src.md": { "alpha.md": 1 } };
+    const { app, vault } = makeApp({
+      files: [target, sourceWithDistinctLinks],
+      fileCaches,
+      resolvedLinks,
+    });
+    const r = await findBacklinksImpl(new ObsidianApi(app), vault, "alpha.md");
+    expect(r.backlinks.length).toBe(0);
+  });
+
+  test("accepts wikilink with section + alias suffixes", async () => {
+    const target: FixtureFile = { path: "alpha.md", extension: "md" };
+    const source: FixtureFile = { path: "src.md", extension: "md" };
+    const fileCaches = new Map<string, FileCacheLike>([
+      [
+        "src.md",
+        { links: [{ link: "alpha", original: "[[alpha#Heading|nice alias]]" }] },
+      ],
+    ]);
+    const resolvedLinks = { "src.md": { "alpha.md": 1 } };
+    const { app, vault } = makeApp({
+      files: [target, source],
+      fileCaches,
+      resolvedLinks,
+    });
+    const r = await findBacklinksImpl(new ObsidianApi(app), vault, "alpha.md");
+    expect(r.backlinks.length).toBe(1);
+    expect(r.backlinks[0].linkForm).toBe("wikilink");
+  });
+});

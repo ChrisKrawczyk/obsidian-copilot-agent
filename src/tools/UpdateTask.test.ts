@@ -483,3 +483,53 @@ describe("updateTaskImpl — re-anchoring", () => {
     if (!r.ok) expect(r.reason).toBe("not_a_task");
   });
 });
+
+describe("updateTaskImpl — final-review F5 (descriptionMatch ambiguity)", () => {
+  test("descriptionMatch returns ambiguous_match when multiple lines match (even if line hint matches one)", async () => {
+    const world = makeWorld();
+    seedFile(
+      world,
+      "tasks.md",
+      "- [ ] call bob\n- [ ] call margret\n- [ ] call carol",
+    );
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "tasks.md",
+        line: 1,
+        descriptionMatch: "call",
+        patch: { setStatus: "done" },
+      } as UpdateTaskInput,
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("ambiguous_match");
+    // Original content unchanged.
+    expect(world.files.get("tasks.md")?.content).toBe(
+      "- [ ] call bob\n- [ ] call margret\n- [ ] call carol",
+    );
+  });
+
+  test("descriptionMatch unique substring still resolves to a single line", async () => {
+    const world = makeWorld();
+    seedFile(
+      world,
+      "tasks.md",
+      "- [ ] call bob\n- [ ] call margret\n- [ ] call carol",
+    );
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      {
+        path: "tasks.md",
+        line: 2,
+        descriptionMatch: "margret",
+        patch: { setStatus: "done" },
+      } as UpdateTaskInput,
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.after.startsWith("- [x] call margret")).toBe(true);
+  });
+});

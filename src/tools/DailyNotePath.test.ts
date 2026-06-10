@@ -93,3 +93,42 @@ describe("resolveDailyNotePath", () => {
     expect(r.path).toBe("J/2026-06-09.md");
   });
 });
+
+describe("formatDailyNoteName — final-review F14 (unsupported tokens)", () => {
+  const day = new Date(2026, 5, 9, 14, 37, 12);
+
+  test("falls back to YYYY-MM-DD when format contains MMM", () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (m: unknown) => { warns.push(String(m)); };
+    try {
+      expect(formatDailyNoteName(day, "YYYY-MMM-DD")).toBe("2026-06-09");
+    } finally {
+      console.warn = orig;
+    }
+    expect(warns.length).toBe(1);
+    expect(warns[0]).toMatch(/MMM/);
+  });
+
+  test("falls back to YYYY-MM-DD when format contains HH:mm time tokens", () => {
+    const orig = console.warn;
+    console.warn = () => {};
+    try {
+      expect(formatDailyNoteName(day, "YYYY-MM-DD HH:mm")).toBe("2026-06-09");
+    } finally {
+      console.warn = orig;
+    }
+  });
+
+  test("supported tokens still format normally (no warn, no fallback)", () => {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (m: unknown) => { warns.push(String(m)); };
+    try {
+      expect(formatDailyNoteName(day, "YYYY/MM/DD")).toBe("2026/06/09");
+    } finally {
+      console.warn = orig;
+    }
+    expect(warns).toEqual([]);
+  });
+});

@@ -18,6 +18,13 @@ import type { ReadToolsVault, TFileLike } from "./ReadTools";
  */
 export interface WriteToolsVault extends ReadToolsVault {
   create?: (path: string, content: string) => Promise<unknown>;
+  /**
+   * Create a folder (and any missing intermediates). Obsidian's vault
+   * adapter accepts `/`-separated paths. Optional because not every
+   * fake vault in tests bothers to implement it; callers must
+   * defensively check before invoking.
+   */
+  createFolder?: (path: string) => Promise<unknown>;
   modify?: (file: TFileLike, content: string) => Promise<unknown>;
   delete?: (file: TFileLike, system?: boolean) => Promise<void>;
   trash?: (file: TFileLike, system?: boolean) => Promise<void>;

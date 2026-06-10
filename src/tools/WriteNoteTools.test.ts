@@ -550,7 +550,6 @@ describe("createTaskImpl", () => {
     expect(r.formatSource).toBe("tasks-plugin");
     expect(r.targetPath).toBe("2026-06-09.md");
     expect(r.existingTargetCreated).toBe(false);
-    expect(r.usedFallback).toBe(true);
     // Undo surfaced so the UI renders an Undo button. Target already
     // existed, so this is the append's modify-entry id.
     expect(typeof r.undoId).toBe("string");
@@ -694,7 +693,7 @@ describe("createTaskImpl", () => {
     expect(world.files.size).toBe(0);
   });
 
-  test("usedFallback is always true in current Phase-5 wiring (editFileImpl path)", async () => {
+  test("succeeds via the lower-level editFileImpl path (Phase-5 wiring intentionally bypasses api.modifyNote during the gated approval)", async () => {
     const today: FakeFile = { path: "2026-06-09.md", content: "" };
     const world = makeWorld({
       files: new Map([[today.path, today]]),
@@ -703,7 +702,8 @@ describe("createTaskImpl", () => {
     const deps = makeDeps(world);
     const r = await createTaskImpl({ description: "Anything" }, deps);
     expect(r.ok).toBe(true);
-    expect(r.usedFallback).toBe(true);
+    expect(typeof r.undoId).toBe("string");
+    expect(r.undoSurface).toBe("journal");
   });
 
   test("refuses to append when the target has unsaved editor changes", async () => {

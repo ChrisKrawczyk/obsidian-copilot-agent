@@ -34,8 +34,15 @@ export interface ResolvedDailyNotePath {
  * moment.js to opt characters out of formatting.
  *
  * If `format` is empty / undefined / produces an empty string we
- * fall back to `YYYY-MM-DD`.
+ * fall back to `YYYY-MM-DD`. If the format contains common moment.js
+ * tokens we deliberately don't model (`MMM`, `MMMM`, `Do`, `ddd`,
+ * `dddd`, `Q`, `Wo`, hour/minute/second `HH`/`mm`/`ss`/`A`/`a`),
+ * we also fall back to `YYYY-MM-DD` and emit a console.warn — silently
+ * passing those tokens through as literals would produce visibly wrong
+ * filenames (e.g. `MMM` rendering as `06M` because `MM` matched first).
  */
+const UNSUPPORTED_MOMENT_TOKEN_RE = /MMMM|MMM|Do|dddd|ddd|HH|hh|mm|ss|SSS|Q|Wo|Z+|A|a/;
+
 export function formatDailyNoteName(now: Date, format?: string): string {
   const fmt = format && format.trim().length > 0 ? format : "YYYY-MM-DD";
   const yyyy = String(now.getFullYear()).padStart(4, "0");
@@ -65,6 +72,23 @@ export function formatDailyNoteName(now: Date, format?: string): string {
     while (j < fmt.length && fmt[j] !== "[") j += 1;
     segments.push({ literal: false, text: fmt.slice(i, j) });
     i = j;
+  }
+
+  // Scan only the format segments (not literals) for unsupported tokens.
+  // If any are present, fall back rather than emitting a misformatted name.
+  const formatText = segments
+    .filter((s) => !s.literal)
+    .map((s) => s.text)
+    .join("");
+  if (UNSUPPORTED_MOMENT_TOKEN_RE.test(formatText)) {
+    if (typeof console !== "undefined" && typeof console.warn === "function") {
+      console.warn(
+        `[copilot-agent] Daily Notes format "${fmt}" contains moment.js tokens ` +
+          `we don't model (e.g. MMM, HH, mm). Falling back to YYYY-MM-DD ` +
+          `to avoid generating a wrong filename.`,
+      );
+    }
+    return `${yyyy}-${mm}-${dd}`;
   }
 
   const out = segments

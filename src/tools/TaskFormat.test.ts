@@ -357,3 +357,30 @@ describe("type guard sanity (compile-time only)", () => {
     expect(t.description).toBe("x");
   });
 });
+
+// ---------------- final-review regression tests ----------------
+
+describe("parseTaskLine — final-review F4 (unrecognized GFM clauses preserved)", () => {
+  test("known field with bogus value preserves the original clause verbatim (no underscore corruption)", () => {
+    const line = "- [ ] Do thing (due: not a date)";
+    const r = parseTaskLine(line);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The clause should appear somewhere in the round-trippable output
+    // (description + extras), preserved verbatim — not corrupted into
+    // `(due:_not_a_date)` by the old underscore-replace fallback.
+    const allOutput = `${r.parsed.description} ${r.parsed.extras ?? ""}`;
+    expect(allOutput).toContain("(due: not a date)");
+    expect(allOutput).not.toContain("due:_not_a_date");
+  });
+
+  test("known field with bogus value alongside a valid known field", () => {
+    const r = parseTaskLine("- [ ] Task (due: 2026-06-12) (priority: bogus)");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.parsed.dueDate).toBe("2026-06-12");
+    const allOutput = `${r.parsed.description} ${r.parsed.extras ?? ""}`;
+    expect(allOutput).toContain("(priority: bogus)");
+    expect(allOutput).not.toContain("priority:_bogus");
+  });
+});

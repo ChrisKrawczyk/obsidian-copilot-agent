@@ -347,17 +347,55 @@ export async function findBacklinksImpl(
   };
 }
 
-/** True if an `original` link string (from `metadataCache.links[].original`) refers to `target`. */
+/**
+ * True if an `original` link string (from `metadataCache.links[].original`)
+ * refers to `target`. Parses the embedded linkpath out of the wikilink
+ * or markdown-link syntax and matches it against `target` by full path
+ * or basename — strictly, not via substring (F10 — previously
+ * `lowerOriginal.includes(targetNoExt)` produced false positives for
+ * any link whose path happened to contain the target's slug).
+ */
 function linkRefersTo(original: string, target: string): boolean {
   if (!original) return false;
-  const lowerOriginal = original.toLowerCase();
-  const lowerTarget = target.toLowerCase();
-  const targetNoExt = lowerTarget.replace(/\.md$/, "");
-  const basename = targetNoExt.split("/").pop() ?? targetNoExt;
-  return (
-    lowerOriginal.includes(targetNoExt) ||
-    lowerOriginal.includes(basename)
-  );
+  const linkpath = extractLinkpath(original);
+  if (!linkpath) return false;
+  const lp = linkpath.toLowerCase().replace(/\.md$/, "");
+  const tgt = target.toLowerCase().replace(/\.md$/, "");
+  if (lp === tgt) return true;
+  const tgtBase = tgt.split("/").pop() ?? tgt;
+  // Wikilinks frequently use the basename only ("[[Welcome]]"); accept
+  // that as a match for the target whose basename matches and whose
+  // resolution we already verified at the resolvedLinks layer.
+  if (lp === tgtBase) return true;
+  // Also tolerate embedded folder hints that end in the target path
+  // (e.g. "folder/Welcome" -> "Welcome.md" at root is NOT a match,
+  // but "subdir/Welcome" matching "subdir/Welcome.md" already hit
+  // the `lp === tgt` branch above).
+  return false;
+}
+
+/**
+ * Extract the linkpath portion of a wikilink (`[[Foo|alias]]` -> `Foo`)
+ * or markdown link (`[alias](Foo.md#section)` -> `Foo.md`). Strips
+ * `#section`, `^block`, and `|alias` suffixes. Returns `null` if no
+ * recognizable linkpath can be parsed.
+ */
+function extractLinkpath(original: string): string | null {
+  const wiki = /^!?\[\[([^\]]+)\]\]/.exec(original.trim());
+  if (wiki) {
+    const inner = wiki[1];
+    const stripped = inner.split("|")[0].split("#")[0].split("^")[0].trim();
+    return stripped.length > 0 ? stripped : null;
+  }
+  const md = /^!?\[[^\]]*\]\(([^)]+)\)/.exec(original.trim());
+  if (md) {
+    const inner = md[1];
+    const stripped = inner.split("#")[0].split("^")[0].trim();
+    // Strip wrapping <> per CommonMark.
+    const unwrapped = stripped.replace(/^<|>$/g, "").trim();
+    return unwrapped.length > 0 ? unwrapped : null;
+  }
+  return null;
 }
 
 /** Max files the fallback path will read (avoids unbounded vault walks). */

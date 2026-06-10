@@ -261,11 +261,12 @@ export async function insertIntoActiveNoteImpl(
   deps: WriteNoteToolsDeps,
 ): Promise<NoteWriteResult> {
   // NOTE: FR-012 originally specified a read-only/preview-mode guard
-  // here, but manual testing in Phase 4 showed Obsidian's own editor
-  // surface accepts inserts in reading view without issue, so we
-  // dropped the guard rather than block a working operation. The
-  // `ObsidianApi.isActiveFileReadOnly()` helper is kept for future
-  // tools that may need it.
+  // here. Phase 4 manual testing showed Obsidian's own editor surface
+  // accepts inserts in reading view without issue, and the user opted
+  // to keep the operation working in that case. The spec was amended
+  // in final review to drop the guard (see Spec.md FR-012 amendment).
+  // The `ObsidianApi.isActiveFileReadOnly()` helper is retained for
+  // future tools that may need read-only detection.
 
   // Resolve the active note's path through the same single source of
   // truth that `main.ts`'s safety extractor uses, so the gate's
@@ -355,6 +356,26 @@ export async function createDailyNoteImpl(
     };
   }
 
+  // Ensure the parent folder exists (F8). Obsidian's `vault.create`
+  // raises if any intermediate folder is missing, which is easy to
+  // hit when the user's Daily Notes config points at a folder they
+  // haven't created yet (fresh vault, new sub-folder, etc.). Failure
+  // here is non-fatal — `createFileImpl` will surface a clearer
+  // error if it ultimately can't write.
+  const slashIdx = resolved.path.lastIndexOf("/");
+  if (slashIdx > 0) {
+    const folder = resolved.path.slice(0, slashIdx);
+    if (lookupTFile(folder, deps.vault) === null && deps.vault.createFolder) {
+      try {
+        await deps.vault.createFolder(folder);
+      } catch {
+        // Already-exists / race conditions are tolerable — the create
+        // call below will fail with a descriptive error if the folder
+        // really isn't usable.
+      }
+    }
+  }
+
   // Pre-read the configured template (if any) so the new note has
   // sensible initial content. Failures are non-fatal — we just create
   // an empty note and report `templateApplied: false`.
@@ -392,8 +413,6 @@ export interface CreateTaskResult {
   formatSource?: TaskFormatSource;
   /** True when the resolved target file did not exist and we created it. */
   existingTargetCreated?: boolean;
-  /** True if the inner create-or-edit took the lower-level vault adapter fallback. */
-  usedFallback?: boolean;
   /**
    * Undo handle for the operation. When we had to create the target
    * file, this is the create-entry id so reverting deletes the whole
@@ -540,7 +559,6 @@ export async function createTaskImpl(
   // (no re-entry into the gated SDK tool surface). See Phase 5 plan
   // line 281.
   let existingTargetCreated = false;
-  let usedFallback = false;
   // Capture the create-entry undoId when we made the target; this is
   // what we surface so a single undo deletes the whole file (the user
   // had no task target before this call). When the target already
@@ -548,6 +566,21 @@ export async function createTaskImpl(
   let createUndoId: string | undefined;
   const existing = lookupTFile(targetPath, deps.vault);
   if (existing === null) {
+    // Same folder-ensure logic as create_daily_note (F8) — task targets
+    // can sit in a daily-notes folder or a custom sub-folder the user
+    // hasn't materialized yet.
+    const slashIdx = targetPath.lastIndexOf("/");
+    if (slashIdx > 0) {
+      const folder = targetPath.slice(0, slashIdx);
+      if (lookupTFile(folder, deps.vault) === null && deps.vault.createFolder) {
+        try {
+          await deps.vault.createFolder(folder);
+        } catch {
+          // Tolerate races / already-exists; createFileImpl will report
+          // any genuine write failure below.
+        }
+      }
+    }
     // Seed with daily-notes template content for daily-note targets.
     const seed = isDailyNoteTarget
       ? (await readDailyNoteTemplateForTask(deps)) ?? ""
@@ -616,22 +649,14 @@ export async function createTaskImpl(
 
   const edited = await editFileImpl(targetPath, nextContent, deps);
   if (!edited.ok) {
-    // editFileImpl bypasses the richer surface, so this IS the fallback
-    // path. Surface the failure for the caller.
     return {
       ok: false,
       targetPath,
       formatSource,
       existingTargetCreated,
-      usedFallback: true,
       error: edited.error,
     };
   }
-  // editFileImpl is our "lower-level" path — flag usedFallback whenever
-  // we ended up there (always, in the current Phase-5 wiring, since we
-  // intentionally do not re-enter the richer api.modifyNote surface
-  // mid-approval).
-  usedFallback = true;
 
   // Prefer the create-entry undoId when we made the file (one click
   // reverts the entire operation). Otherwise surface the append's
@@ -643,7 +668,6 @@ export async function createTaskImpl(
     targetPath,
     formatSource,
     existingTargetCreated,
-    usedFallback,
     undoId,
     undoSurface: "journal",
   };
