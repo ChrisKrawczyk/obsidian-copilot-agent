@@ -152,6 +152,43 @@ describe("findTasksImpl", () => {
     if (r.ok) expect(r.results).toEqual([]);
   });
 
+  test("truncates results to 500-hit cap", async () => {
+    // Generate one file with 600 tasks.
+    const lines: string[] = [];
+    for (let i = 0; i < 600; i++) lines.push(`- [ ] task ${i}`);
+    const { api, vault } = makeWorld([
+      { path: "big.md", content: lines.join("\n") },
+    ]);
+    const r = await findTasksImpl({}, { api, vault });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.results).toHaveLength(500);
+    expect(r.truncated).toBe(true);
+  });
+
+  test("parses both tasks-plugin and gfm flavors in the same vault", async () => {
+    const { api, vault } = makeWorld([
+      {
+        path: "emoji.md",
+        content: "- [ ] write report 📅 2026-06-12 #work",
+      },
+      {
+        path: "gfm.md",
+        content: "- [ ] write report (due: 2026-06-12) #work",
+      },
+    ]);
+    const r = await findTasksImpl({ tag: "work" }, { api, vault });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.results).toHaveLength(2);
+    const byPath = new Map(r.results.map((h) => [h.path, h]));
+    expect(byPath.get("emoji.md")?.parsed.dueDate).toBe("2026-06-12");
+    expect(byPath.get("gfm.md")?.parsed.dueDate).toBe("2026-06-12");
+    // Source flavor preserved on parse so update_task can re-emit faithfully.
+    expect(byPath.get("emoji.md")?.parsed.source).toBe("tasks-plugin");
+    expect(byPath.get("gfm.md")?.parsed.source).toBe("gfm");
+  });
+
   test("non-task list items (plain bullets) are ignored", async () => {
     const { api, vault } = makeWorld([
       { path: "a.md", content: "- plain bullet\n- [ ] actual task" },

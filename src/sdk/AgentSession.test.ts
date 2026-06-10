@@ -851,6 +851,7 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       "insert_into_active_note",
       "create_daily_note",
       "create_task",
+      "update_task",
     ]) {
       const result = await h.permissionHandler!({
         toolCallId: `tc-vw-${toolName}`,

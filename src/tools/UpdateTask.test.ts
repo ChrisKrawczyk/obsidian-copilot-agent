@@ -119,6 +119,14 @@ describe("updateTaskImpl — patch application", () => {
     const world = makeWorld();
     seedFile(world, "tasks.md", "- [x] write tests ✅ 2026-06-01");
     const deps = makeDeps(world);
+    // Wrap modify to count writes (asserting no-op writes nothing).
+    const origModify = deps.vault.modify.bind(deps.vault);
+    let modifyCalls = 0;
+    deps.vault.modify = async (...args: Parameters<typeof origModify>) => {
+      modifyCalls++;
+      return origModify(...args);
+    };
+    const journalSizeBefore = (deps.undoJournal as unknown as { entries: Map<string, unknown> }).entries.size;
     const r = await updateTaskImpl(
       { path: "tasks.md", line: 1, patch: { setStatus: "done" } },
       deps,
@@ -127,7 +135,31 @@ describe("updateTaskImpl — patch application", () => {
     if (!r.ok) return;
     expect(r.changed).toBe(false);
     expect(r.changedFields).toEqual([]);
+    expect(r.undoId).toBeUndefined();
+    expect(modifyCalls).toBe(0);
+    expect(
+      (deps.undoJournal as unknown as { entries: Map<string, unknown> }).entries.size,
+    ).toBe(journalSizeBefore);
     expect(world.files.get("tasks.md")?.content).toBe("- [x] write tests ✅ 2026-06-01");
+  });
+
+  test("partial change reports only affected changedFields", async () => {
+    const world = makeWorld();
+    seedFile(world, "t.md", "- [ ] task 📅 2026-06-12 #keep");
+    const deps = makeDeps(world);
+    const r = await updateTaskImpl(
+      { path: "t.md", line: 1, patch: { addTags: ["added"] } },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.changed).toBe(true);
+    // Only tags changed; status/dates/description untouched.
+    expect(r.changedFields).toEqual(["tags"]);
+    expect(r.after).toContain("#keep");
+    expect(r.after).toContain("#added");
+    expect(r.after).toContain("📅 2026-06-12");
+    expect(r.after.startsWith("- [ ]")).toBe(true);
   });
 
   test("setStatus cancelled auto-stamps cancelledDate and clears completedDate", async () => {
