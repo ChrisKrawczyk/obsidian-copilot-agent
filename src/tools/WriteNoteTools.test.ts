@@ -8,9 +8,14 @@ import {
   openNoteImpl,
   insertIntoActiveNoteImpl,
   createDailyNoteImpl,
+  createTaskImpl,
   createWriteNoteTools,
   type WriteNoteToolsDeps,
 } from "./WriteNoteTools";
+import {
+  DEFAULT_VAULT_AWARENESS_SETTINGS,
+  type VaultAwarenessSettings,
+} from "../settings/VaultAwarenessSettings";
 import { ObsidianApi, type AppLike } from "./ObsidianApi";
 import type { TFileLike } from "./ReadTools";
 import { UndoJournal } from "../domain/UndoJournal";
@@ -41,6 +46,10 @@ interface FakeWorld {
   openCalls: string[];
   /** Optional Daily Notes plugin config (folder/format/template). */
   dailyNotesConfig?: { folder?: string; format?: string; template?: string };
+  /** Whether the Obsidian Tasks community plugin is enabled. */
+  tasksPluginEnabled?: boolean;
+  /** Vault-awareness settings exposed to createTaskImpl via deps.vaultAwareness(). */
+  vaultAwareness?: VaultAwarenessSettings;
 }
 
 function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
@@ -115,7 +124,9 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
           },
         }
       : { plugins: {} },
-    plugins: { plugins: {} },
+    plugins: {
+      plugins: world.tasksPluginEnabled ? { "obsidian-tasks-plugin": {} } : {},
+    },
   };
   const api = new ObsidianApi(app);
   const undoJournal = new UndoJournal(
@@ -127,6 +138,8 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
     workspace: app.workspace as unknown as WriteNoteToolsDeps["workspace"],
     undoJournal,
     now: () => new Date(2026, 5, 9, 12, 0, 0),
+    vaultAwareness: () =>
+      world.vaultAwareness ?? { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
   };
 }
 
@@ -472,7 +485,7 @@ describe("insert_into_active_note path equivalence (gate ↔ handler)", () => {
 });
 
 describe("createWriteNoteTools factory", () => {
-  test("registers exactly create_note, edit_note, open_note, insert_into_active_note, create_daily_note", () => {
+  test("registers exactly create_note, edit_note, open_note, insert_into_active_note, create_daily_note, create_task", () => {
     const world = makeWorld();
     const deps = makeDeps(world);
     const tools = createWriteNoteTools(deps);
@@ -483,6 +496,7 @@ describe("createWriteNoteTools factory", () => {
       "open_note",
       "insert_into_active_note",
       "create_daily_note",
+      "create_task",
     ]);
   });
 
@@ -493,7 +507,7 @@ describe("createWriteNoteTools factory", () => {
     const skipFlags = tools.map(
       (t) => (t as unknown as { skipPermission?: boolean }).skipPermission ?? false,
     );
-    expect(skipFlags).toEqual([false, false, true, false, false]);
+    expect(skipFlags).toEqual([false, false, true, false, false, false]);
   });
 });
 
@@ -515,5 +529,182 @@ describe("create_daily_note path equivalence (gate ↔ handler)", () => {
       expect(r.ok).toBe(true);
       if (r.ok) expect(r.path).toBe(gatePath);
     }
+  });
+});
+
+
+describe("createTaskImpl", () => {
+  test("Tasks plugin present → emits emoji syntax and appends to existing daily note", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: true,
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "Email Bob", dueDate: "2026-06-12", priority: "high" },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.formatSource).toBe("tasks-plugin");
+    expect(r.targetPath).toBe("2026-06-09.md");
+    expect(r.existingTargetCreated).toBe(false);
+    expect(r.usedFallback).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    expect(written).toBe("- [ ] Email Bob ⏫ 📅 2026-06-12\n");
+  });
+
+  test("Tasks plugin absent → emits GFM inline metadata", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "Hello" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: false,
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "Write notes", scheduledDate: "2026-06-15" },
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.formatSource).toBe("gfm");
+    const written = world.files.get("2026-06-09.md")!.content!;
+    // Separator newline inserted before task because existing content didn't end with \n.
+    expect(written).toBe("Hello\n- [ ] Write notes (scheduled: 2026-06-15)\n");
+  });
+
+  test("target daily note doesn't exist → creates it and reports existingTargetCreated: true", async () => {
+    const world = makeWorld({ tasksPluginEnabled: false });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "Buy milk" }, deps);
+    expect(r.ok).toBe(true);
+    expect(r.existingTargetCreated).toBe(true);
+    expect(r.targetPath).toBe("2026-06-09.md");
+    expect(world.files.get("2026-06-09.md")?.content).toBe("- [ ] Buy milk\n");
+  });
+
+  test("daily-note target seeded from Daily Notes template when freshly created", async () => {
+    const tpl: FakeFile = {
+      path: "Templates/Daily.md",
+      content: "# {{date}}\n\n## Tasks\n",
+    };
+    const world = makeWorld({
+      files: new Map([[tpl.path, tpl]]),
+      dailyNotesConfig: { template: "Templates/Daily.md" },
+      tasksPluginEnabled: false,
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "Stretch" }, deps);
+    expect(r.ok).toBe(true);
+    expect(r.existingTargetCreated).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    expect(written).toBe("# {{date}}\n\n## Tasks\n- [ ] Stretch\n");
+  });
+
+  test("custom-path mode appends to configured file and never touches the daily note", async () => {
+    const inbox: FakeFile = { path: "Inbox.md", content: "Existing\n" };
+    const world = makeWorld({
+      files: new Map([[inbox.path, inbox]]),
+      tasksPluginEnabled: false,
+      vaultAwareness: {
+        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+        taskTargetMode: "custom-path",
+        customTaskTargetPath: "Inbox.md",
+      },
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "Triage" }, deps);
+    expect(r.ok).toBe(true);
+    expect(r.targetPath).toBe("Inbox.md");
+    expect(r.existingTargetCreated).toBe(false);
+    expect(world.files.get("Inbox.md")?.content).toBe(
+      "Existing\n- [ ] Triage\n",
+    );
+    // Daily note must NOT be created in custom-path mode.
+    expect(world.files.get("2026-06-09.md")).toBeUndefined();
+  });
+
+  test("custom-path mode whitespace-only target falls back to daily-note mode", async () => {
+    const world = makeWorld({
+      tasksPluginEnabled: false,
+      vaultAwareness: {
+        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+        taskTargetMode: "custom-path",
+        customTaskTargetPath: "   ",
+      },
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "Plan" }, deps);
+    expect(r.ok).toBe(true);
+    expect(r.targetPath).toBe("2026-06-09.md");
+  });
+
+  test("rejects non-strict due dates without mutating the vault", async () => {
+    const world = makeWorld({ tasksPluginEnabled: false });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "Reply", dueDate: "Friday" },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_date_format");
+    expect(r.field).toBe("dueDate");
+    expect(world.files.size).toBe(0);
+  });
+
+  test("rejects non-strict scheduled dates without mutating the vault", async () => {
+    const world = makeWorld({ tasksPluginEnabled: false });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl(
+      { description: "Sync", scheduledDate: "2026/06/15" },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("invalid_date_format");
+    expect(r.field).toBe("scheduledDate");
+    expect(world.files.size).toBe(0);
+  });
+
+  test("rejects empty description without mutating the vault", async () => {
+    const world = makeWorld({ tasksPluginEnabled: false });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "   " }, deps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("missing_description");
+    expect(world.files.size).toBe(0);
+  });
+
+  test("usedFallback is always true in current Phase-5 wiring (editFileImpl path)", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: false,
+    });
+    const deps = makeDeps(world);
+    const r = await createTaskImpl({ description: "Anything" }, deps);
+    expect(r.ok).toBe(true);
+    expect(r.usedFallback).toBe(true);
+  });
+
+  test("refuses to append when the target has unsaved editor changes", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "On disk" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: false,
+    });
+    const deps = makeDeps(world);
+    // Wire a dirty leaf for the daily-note path so hasUnsavedEditorChanges trips.
+    const dirtyView = {
+      file: { path: "2026-06-09.md" },
+      getViewData: () => "In editor (dirty)",
+    };
+    (deps.workspace as unknown as {
+      getLeavesOfType: (t: string) => Array<{ view: unknown }>;
+    }).getLeavesOfType = (t: string) =>
+      t === "markdown" ? [{ view: dirtyView }] : [];
+    const r = await createTaskImpl({ description: "Skip me" }, deps);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/unsaved changes/);
+    // Disk content untouched.
+    expect(world.files.get("2026-06-09.md")?.content).toBe("On disk");
   });
 });

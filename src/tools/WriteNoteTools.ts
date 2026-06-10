@@ -9,18 +9,29 @@ import { lookupTFile, toVaultRelative, resolveVaultPath, VaultPathError } from "
 import { ObsidianApi } from "./ObsidianApi";
 import type { TFileLike } from "./ReadTools";
 import { resolveDailyNotePath } from "./DailyNotePath";
+import {
+  formatTaskLine,
+  STRICT_DATE_REGEX,
+  type TaskInput,
+  type TaskFormatSource,
+  type TaskPriority,
+} from "./TaskFormat";
+import type { VaultAwarenessSettings } from "../settings/VaultAwarenessSettings";
 
 /**
- * Per-call dependencies for the Phase-4 vault-write tools.
+ * Per-call dependencies for the Phase-4/5 vault-write tools.
  *
  * Reuses `WriteToolsDeps` (vault, workspace, undoJournal) and adds the
  * `ObsidianApi` instance for richer-surface calls (createNote / modifyNote /
  * applyEditorTransform / openFile / isActiveFileReadOnly / getActiveFile),
- * plus a deterministic clock for `create_daily_note` so tests can pin time.
+ * plus a deterministic clock for `create_daily_note` so tests can pin time,
+ * plus a vault-awareness reader so `create_task` can resolve its target.
  */
 export interface WriteNoteToolsDeps extends WriteToolsDeps {
   api: ObsidianApi;
   now: () => Date;
+  /** Reads the latest settings so changes to taskTargetMode etc. apply live. */
+  vaultAwareness: () => VaultAwarenessSettings;
 }
 
 interface SuccessShape {
@@ -368,7 +379,230 @@ export async function createDailyNoteImpl(
   };
 }
 
-// ---------------- factory ----------------
+// ---------------- create_task ----------------
+
+export interface CreateTaskResult {
+  ok: boolean;
+  targetPath?: string;
+  formatSource?: TaskFormatSource;
+  /** True when the resolved target file did not exist and we created it. */
+  existingTargetCreated?: boolean;
+  /** True if the inner create-or-edit took the lower-level vault adapter fallback. */
+  usedFallback?: boolean;
+  /** Set when `dueDate` or `scheduledDate` is not strict YYYY-MM-DD. */
+  reason?: "invalid_date_format" | "invalid_priority" | "missing_description";
+  field?: "dueDate" | "scheduledDate";
+  /** Free-form error message for callers / users. */
+  error?: string;
+}
+
+function validateTaskInput(input: TaskInput): CreateTaskResult | null {
+  if (!input.description || input.description.trim().length === 0) {
+    return {
+      ok: false,
+      reason: "missing_description",
+      error: "create_task requires a non-empty `description`.",
+    };
+  }
+  if (input.dueDate !== undefined && !STRICT_DATE_REGEX.test(input.dueDate)) {
+    return {
+      ok: false,
+      reason: "invalid_date_format",
+      field: "dueDate",
+      error:
+        `create_task rejected dueDate "${input.dueDate}": expected strict YYYY-MM-DD. ` +
+        "Resolve relative dates (\"tomorrow\", \"Friday\") against the user's timezone " +
+        "(provided in the preamble) before calling this tool.",
+    };
+  }
+  if (
+    input.scheduledDate !== undefined &&
+    !STRICT_DATE_REGEX.test(input.scheduledDate)
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_date_format",
+      field: "scheduledDate",
+      error:
+        `create_task rejected scheduledDate "${input.scheduledDate}": expected strict YYYY-MM-DD.`,
+    };
+  }
+  if (
+    input.priority !== undefined &&
+    input.priority !== "high" &&
+    input.priority !== "medium" &&
+    input.priority !== "low"
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_priority",
+      error: `create_task rejected priority "${input.priority}": expected one of high|medium|low.`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Read the configured Daily Notes template (if any) and return its
+ * content so we can seed a freshly-created daily-note target with the
+ * user's template. Mirrors the Phase-4 `readDailyNoteTemplate` helper,
+ * duplicated here intentionally to keep the create_task pipeline from
+ * re-entering the gated daily-note SDK tool.
+ */
+async function readDailyNoteTemplateForTask(
+  deps: WriteNoteToolsDeps,
+): Promise<string | null> {
+  const cfg = deps.api.getDailyNotesConfig();
+  if (!cfg.ok) return null;
+  const tplPath = cfg.value.template;
+  if (typeof tplPath !== "string" || tplPath.trim().length === 0) return null;
+  const normalized = tplPath.endsWith(".md") ? tplPath : `${tplPath}.md`;
+  const tplFile = lookupTFile(normalized, deps.vault);
+  if (tplFile === null) return null;
+  try {
+    if (deps.vault.read) return await deps.vault.read(tplFile as TFileLike);
+    if (deps.vault.cachedRead)
+      return await deps.vault.cachedRead(tplFile as TFileLike);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export async function createTaskImpl(
+  input: TaskInput,
+  deps: WriteNoteToolsDeps,
+): Promise<CreateTaskResult> {
+  const validation = validateTaskInput(input);
+  if (validation) return validation;
+
+  // Determine target path from settings. Custom-path mode wins; otherwise
+  // resolve today's daily-note path via the same helper as the gate so
+  // create_target inside our single-approval flow is consistent.
+  const settings = deps.vaultAwareness();
+  let targetPath: string;
+  let isDailyNoteTarget = false;
+  if (
+    settings.taskTargetMode === "custom-path" &&
+    settings.customTaskTargetPath.trim().length > 0
+  ) {
+    targetPath = settings.customTaskTargetPath.trim();
+  } else {
+    targetPath = resolveDailyNotePath(deps.api, deps.now()).path;
+    isDailyNoteTarget = true;
+  }
+
+  // Detect Tasks plugin so we pick the right line format.
+  const formatSource: TaskFormatSource = deps.api.isCommunityPluginEnabled(
+    "obsidian-tasks-plugin",
+  )
+    ? "tasks-plugin"
+    : "gfm";
+  const taskLine = formatTaskLine(input, formatSource);
+
+  // Create-or-read target. We call createFileImpl / editFileImpl
+  // DIRECTLY rather than create_note / edit_note so the entire create-
+  // target + append sequence runs under create_task's single approval
+  // (no re-entry into the gated SDK tool surface). See Phase 5 plan
+  // line 281.
+  let existingTargetCreated = false;
+  let usedFallback = false;
+  const existing = lookupTFile(targetPath, deps.vault);
+  if (existing === null) {
+    // Seed with daily-notes template content for daily-note targets.
+    const seed = isDailyNoteTarget
+      ? (await readDailyNoteTemplateForTask(deps)) ?? ""
+      : "";
+    const created = await createFileImpl(targetPath, seed, deps);
+    if (!created.ok) {
+      return {
+        ok: false,
+        targetPath,
+        formatSource,
+        error: `Failed to create task target "${targetPath}": ${created.error}`,
+      };
+    }
+    existingTargetCreated = true;
+  }
+
+  // Read current content so we can append the task line. The target
+  // was either pre-existing or just created above.
+  const targetFile = lookupTFile(targetPath, deps.vault);
+  if (targetFile === null) {
+    return {
+      ok: false,
+      targetPath,
+      formatSource,
+      error: `Task target "${targetPath}" disappeared after creation.`,
+    };
+  }
+  let current = "";
+  try {
+    if (deps.vault.read) {
+      current = await deps.vault.read(targetFile as TFileLike);
+    } else if (deps.vault.cachedRead) {
+      current = await deps.vault.cachedRead(targetFile as TFileLike);
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      targetPath,
+      formatSource,
+      error: `Failed to read task target before append: ${(err as Error).message || String(err)}`,
+    };
+  }
+
+  // Respect the unsaved-editor-conflict guard from edit_note: refuse
+  // to overwrite when a dirty editor for this path exists.
+  const conflict = await hasUnsavedEditorChanges(
+    targetPath,
+    current,
+    deps.workspace,
+  );
+  if (conflict) {
+    return {
+      ok: false,
+      targetPath,
+      formatSource,
+      error: `Task target "${targetPath}" has unsaved changes in an open editor. Save or discard them, then try again.`,
+    };
+  }
+
+  // Ensure the inserted line stands on its own line. If the existing
+  // content is non-empty and doesn't already end with `\n`, we insert
+  // one before the task line.
+  const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
+  const nextContent = `${current}${separator}${taskLine}\n`;
+
+  const edited = await editFileImpl(targetPath, nextContent, deps);
+  if (!edited.ok) {
+    // editFileImpl bypasses the richer surface, so this IS the fallback
+    // path. Surface the failure for the caller.
+    return {
+      ok: false,
+      targetPath,
+      formatSource,
+      existingTargetCreated,
+      usedFallback: true,
+      error: edited.error,
+    };
+  }
+  // editFileImpl is our "lower-level" path — flag usedFallback whenever
+  // we ended up there (always, in the current Phase-5 wiring, since we
+  // intentionally do not re-enter the richer api.modifyNote surface
+  // mid-approval).
+  usedFallback = true;
+
+  return {
+    ok: true,
+    targetPath,
+    formatSource,
+    existingTargetCreated,
+    usedFallback,
+  };
+}
+
+
 
 /**
  * Build the four Phase-4 vault-write note tools (create_task is Phase 5):
@@ -486,6 +720,70 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
       },
       handler: async () => {
         return await createDailyNoteImpl(deps);
+      },
+    }),
+    defineTool("create_task", {
+      description:
+        "Append a task line to the configured task target (today's " +
+        "daily note by default, or a custom path set in Settings). " +
+        "Detects the Obsidian Tasks community plugin and emits its " +
+        "emoji syntax (📅 due, ⏳ scheduled, ⏫/🔼/🔽 priority); " +
+        "otherwise emits GFM `- [ ]` with inline-text date metadata. " +
+        "Dates MUST be strict YYYY-MM-DD — resolve relative dates " +
+        "(\"tomorrow\", \"Friday\") against the user's timezone " +
+        "(provided in the preamble) before invoking this tool. " +
+        "Creates the target file if it doesn't exist, all under a " +
+        "single approval.",
+      parameters: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: "The task body text." },
+          dueDate: {
+            type: "string",
+            description: "Optional strict YYYY-MM-DD due date.",
+          },
+          scheduledDate: {
+            type: "string",
+            description: "Optional strict YYYY-MM-DD scheduled date.",
+          },
+          priority: {
+            type: "string",
+            enum: ["high", "medium", "low"],
+            description: "Optional task priority.",
+          },
+          tags: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional list of tag names (without leading #).",
+          },
+        },
+        required: ["description"],
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as {
+          description?: unknown;
+          dueDate?: unknown;
+          scheduledDate?: unknown;
+          priority?: unknown;
+          tags?: unknown;
+        };
+        const input: TaskInput = {
+          description: typeof a.description === "string" ? a.description : "",
+          dueDate: typeof a.dueDate === "string" ? a.dueDate : undefined,
+          scheduledDate:
+            typeof a.scheduledDate === "string" ? a.scheduledDate : undefined,
+          priority:
+            a.priority === "high" || a.priority === "medium" || a.priority === "low"
+              ? (a.priority as TaskPriority)
+              : (typeof a.priority === "string"
+                  ? (a.priority as TaskPriority)
+                  : undefined),
+          tags: Array.isArray(a.tags)
+            ? a.tags.filter((t): t is string => typeof t === "string")
+            : undefined,
+        };
+        return await createTaskImpl(input, deps);
       },
     }),
   ];

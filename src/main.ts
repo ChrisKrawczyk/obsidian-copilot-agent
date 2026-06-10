@@ -160,6 +160,7 @@ export default class CopilotAgentPlugin extends Plugin {
       undoJournal,
       api: obsidianApi,
       now,
+      vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
     });
 
     const agent = new CopilotAgentSession({
