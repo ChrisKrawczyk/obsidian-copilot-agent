@@ -13,7 +13,7 @@
  *   - Enter with whitespace-only input is a no-op (and we preventDefault so the
  *     textarea doesn't visibly grow).
  *   - Enter while a stream is in flight does NOT submit AND does NOT stop —
- *     Stop is only the Stop button (per spec FR-009 / FR-010).
+ *     Stop is only the Stop button (per spec FR-004).
  *
  * Ctrl/Cmd+Enter is deliberately NOT a special key in v0.2: the v0.1 binding
  * (which mapped Ctrl/Cmd+Enter to handleSendOrStop, doubling as a "stop"

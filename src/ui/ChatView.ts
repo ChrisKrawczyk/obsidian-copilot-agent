@@ -179,7 +179,7 @@ export class ChatView extends ItemView {
         case "noop-prevent":
           // Suppress newline-then-no-send to avoid surprising the user, but
           // do NOT route into the Stop handler — only the Stop button
-          // aborts a stream (spec FR-009 / FR-010).
+          // aborts a stream (spec FR-004).
           e.preventDefault();
           break;
         case "newline":
