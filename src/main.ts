@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { MarkdownView, Notice, Plugin } from "obsidian";
 import {
   CopilotAgentSession,
   type AgentSession,
@@ -15,6 +15,8 @@ import { TokenStore } from "./auth/TokenStore";
 import { AuthController, type AgentTokenSink } from "./auth/AuthController";
 import { createReadTools } from "./tools/ReadTools";
 import { createWriteTools } from "./tools/WriteTools";
+import { ObsidianApi } from "./tools/ObsidianApi";
+import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { UndoJournal } from "./domain/UndoJournal";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
@@ -83,6 +85,64 @@ export default class CopilotAgentPlugin extends Plugin {
       >[0]["workspace"],
       undoJournal,
     });
+    // Phase 3 (Chat UX + Vault Tools): construct ObsidianApi once and
+    // share with the read-note tool factory. Phase 4 will reuse the
+    // same instance for write-note tools.
+    const ws = this.app.workspace as unknown as {
+      getActiveFile: () => unknown;
+      getActiveViewOfType: (k: unknown) => unknown;
+      getLeaf: (n?: boolean) => unknown;
+    };
+    const obsidianApi = new ObsidianApi({
+      vault: this.app.vault as unknown as Parameters<
+        typeof createReadTools
+      >[0],
+      workspace: {
+        // Bind methods so Obsidian's `this`-sensitive APIs work.
+        getActiveFile: () =>
+          ws.getActiveFile() as ReturnType<
+            NonNullable<
+              NonNullable<
+                ConstructorParameters<typeof ObsidianApi>[0]["workspace"]
+              >["getActiveFile"]
+            >
+          >,
+        getActiveViewOfType: (kind: unknown) =>
+          ws.getActiveViewOfType(kind) as ReturnType<
+            NonNullable<
+              NonNullable<
+                ConstructorParameters<typeof ObsidianApi>[0]["workspace"]
+              >["getActiveViewOfType"]
+            >
+          >,
+        getLeaf: (newLeaf?: boolean) =>
+          ws.getLeaf(newLeaf) as ReturnType<
+            NonNullable<
+              NonNullable<
+                ConstructorParameters<typeof ObsidianApi>[0]["workspace"]
+              >["getLeaf"]
+            >
+          >,
+        // Obsidian's runtime MarkdownView class — required so
+        // getActiveViewOfType(MarkdownView) hits the markdown editor.
+        markdownViewSymbol: MarkdownView,
+      },
+      metadataCache: this.app.metadataCache as unknown as ConstructorParameters<
+        typeof ObsidianApi
+      >[0]["metadataCache"],
+      internalPlugins: (this.app as unknown as {
+        internalPlugins?: ConstructorParameters<
+          typeof ObsidianApi
+        >[0]["internalPlugins"];
+      }).internalPlugins,
+      plugins: (this.app as unknown as {
+        plugins?: ConstructorParameters<typeof ObsidianApi>[0]["plugins"];
+      }).plugins,
+    });
+    const readNoteTools = createReadNoteTools(
+      obsidianApi,
+      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+    );
 
     const agent = new CopilotAgentSession({
       cliPath,
@@ -98,6 +158,7 @@ export default class CopilotAgentPlugin extends Plugin {
       tools: [
         ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
       ],
       // Phase 6: route all permission requests through SafetyPolicy.
       // `config` is read on every decision so settings changes apply

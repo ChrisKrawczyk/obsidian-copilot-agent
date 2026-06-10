@@ -142,7 +142,11 @@ describe("CopilotAgentSession", () => {
     expect(h.startCalls).toBe(1);
     expect(h.pingCalls).toBe(1);
     expect(h.lastCreateSession.model).toBe("gpt-4.1");
-    expect(h.lastCreateSession.availableTools).toEqual(["builtin:*"]);
+    expect(h.lastCreateSession.availableTools).toEqual([
+      "builtin:*",
+      "custom:*",
+      "mcp:*",
+    ]);
     expect(h.permissionHandler).toBeTypeOf("function");
     expect(agent.getModel()).toBe("gpt-4.1");
 

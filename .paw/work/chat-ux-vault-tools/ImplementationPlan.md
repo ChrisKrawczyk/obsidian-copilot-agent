@@ -62,9 +62,9 @@ The plan is structured so each phase is independently reviewable and lands behin
 - No multi-conversation, no cross-restart Undo, no MCP, no extra-vault roots, no model picker — all deferred to workflow B.
 
 ## Phase Status
-- [ ] **Phase 1: Chat keybinding (Enter / Shift+Enter / IME)** — Make the chat input keyboard-first.
-- [ ] **Phase 2: Vault-aware preamble + Settings section** — Deterministic preamble assembler with three modes, authoring-conventions block, configurable task-target, and first-message prepender inside `CopilotAgentSession`.
-- [ ] **Phase 3: ObsidianApi helper + read-only tools** — Introduce `ObsidianApi` helper and ship `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata` (all `skipPermission: true` with the read-only checklist).
+- [x] **Phase 1: Chat keybinding (Enter / Shift+Enter / IME)** — Make the chat input keyboard-first.
+- [x] **Phase 2: Vault-aware preamble + Settings section** — Deterministic preamble assembler with three modes, authoring-conventions block, configurable task-target, and first-message prepender inside `CopilotAgentSession`.
+- [x] **Phase 3: ObsidianApi helper + read-only tools** — Introduce `ObsidianApi` helper and ship `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata` (all `skipPermission: true` with the read-only checklist).
 - [ ] **Phase 4: Vault-aware mutating tools + open_note** — Ship `create_note`, `edit_note`, `insert_into_active_note`, `create_daily_note` (all gated) and `open_note` (navigation-only, ungated per spec FR-016 / P7) on top of `ObsidianApi` and the v0.1 `WriteTools` factory.
 - [ ] **Phase 5: Tasks integration (`create_task`)** — Detect the Tasks plugin, format with emoji syntax or GFM fallback, default target to today's daily note (with Settings override).
 - [ ] **Phase 6: Documentation** — `Docs.md`, README updates, and explicit verification of SC-001..SC-010.

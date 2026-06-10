@@ -799,7 +799,7 @@ export class CopilotAgentSession implements AgentSession {
     }
     const fresh = await this.client.createSession({
       model: this.selectedModel,
-      availableTools: ["builtin:*"],
+      availableTools: ["builtin:*", "custom:*", "mcp:*"],
       streaming: true,
       tools: this.toolsList,
       onPermissionRequest: (request: SdkPermissionRequest) =>
@@ -952,7 +952,7 @@ export class CopilotAgentSession implements AgentSession {
 
       const session = await client.createSession({
         model,
-        availableTools: ["builtin:*"],
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
         tools: this.toolsList,
         onPermissionRequest: (request: SdkPermissionRequest) =>
@@ -1647,3 +1647,4 @@ export type SdkPermissionResult =
   | { kind: "approve-once" }
   | { kind: "approve-for-session" }
   | { kind: "reject"; feedback: string };
+
