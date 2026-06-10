@@ -65,12 +65,14 @@ The plan is structured so each phase is independently reviewable and lands behin
 - [x] **Phase 1: Chat keybinding (Enter / Shift+Enter / IME)** — Make the chat input keyboard-first.
 - [x] **Phase 2: Vault-aware preamble + Settings section** — Deterministic preamble assembler with three modes, authoring-conventions block, configurable task-target, and first-message prepender inside `CopilotAgentSession`.
 - [x] **Phase 3: ObsidianApi helper + read-only tools** — Introduce `ObsidianApi` helper and ship `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata` (all `skipPermission: true` with the read-only checklist).
-- [ ] **Phase 4: Vault-aware mutating tools + open_note** — Ship `create_note`, `edit_note`, `insert_into_active_note`, `create_daily_note` (all gated) and `open_note` (navigation-only, ungated per spec FR-016 / P7) on top of `ObsidianApi` and the v0.1 `WriteTools` factory.
-- [ ] **Phase 5: Tasks integration (`create_task`)** — Detect the Tasks plugin, format with emoji syntax or GFM fallback, default target to today's daily note (with Settings override).
-- [ ] **Phase 6: Documentation** — `Docs.md`, README updates, and explicit verification of SC-001..SC-010.
+- [x] **Phase 4: Vault-aware mutating tools + open_note** — Ship `create_note`, `edit_note`, `insert_into_active_note`, `create_daily_note` (all gated) and `open_note` (navigation-only, ungated per spec FR-016 / P7) on top of `ObsidianApi` and the v0.1 `WriteTools` factory.
+- [x] **Phase 5: Tasks integration (`create_task`)** — Detect the Tasks plugin, format with emoji syntax or GFM fallback, default target to today's daily note (with Settings override). Includes follow-up: default created date + Undo button.
+- [ ] **Phase 6: Task editing (`update_task` + `find_tasks`)** — Surgical line-level task edits with all 4 statuses (todo/in-progress/done/cancelled), auto-stamped completion/cancellation dates, line-diff approval, journal undo. Plus a read-only `find_tasks` for tag/status/date/regex filtering. Promoted mid-flight from candidates.
+- [ ] **Phase 7: Documentation** — `Docs.md`, README updates, and explicit verification of SC-001..SC-010.
 
 ## Phase Candidates
 <!-- Empty initially. Items added during planning if work surfaces. -->
+- [x] [promoted-to-phase-6] Task editing toolset: `update_task` (status + tags + priority + dates) and `find_tasks` (filter by tag/status/regex). Supports all four statuses (`todo`/`in-progress`/`done`/`cancelled`) with auto-stamped completion/cancellation dates. Surgical line-level edits with line-diff approval and journal undo. Promoted mid-flight after Phase 5 ship; full elaboration in Phase 6 below.
 - [ ] Re-prioritize / hide v0.1 raw-filesystem capabilities behind a setting after observing model preference in real use (risk mitigation from spec).
 - [ ] Per-vault Daily Notes target override (if the core plugin's config proves unreliable).
 - [ ] **Richer vault search capabilities** (deferred from cycle-2 design pivot):
@@ -299,17 +301,107 @@ The plan is structured so each phase is independently reviewable and lands behin
 
 ---
 
-## Phase 6: Documentation
+## Phase 6: Task editing (`update_task` + `find_tasks`)
+
+**Status**: promoted mid-flight from Phase Candidates after Phase 5 ship. The current `edit_note` is functionally sufficient but operationally poor for tasks: every edit requires a full-file replace with a scary diff, the model has to perfectly re-emit emoji/field ordering, and batch flows ("tag every communication task") become N approvals over N notes. Phase 6 adds two surgical, task-aware tools.
+
+### Changes Required:
+
+- **`src/tools/TaskFormat.ts`** (modify):
+  - Add `TaskStatus = "todo" | "in-progress" | "done" | "cancelled"` (4 statuses; `- [/]` is the canonical in-progress marker per Tasks plugin status collections — Minimal Theme + SlRvb's Alternate Checkboxes both map `/` → IN_PROGRESS — see CodeResearch.md Phase 6 §1).
+  - Add `completedDate?: string` and `cancelledDate?: string` to `TaskInput` (strict `YYYY-MM-DD`). Tasks plugin emits these as `✅ <date>` / `❌ <date>` on terminal transitions (Tasks docs `Getting Started/Dates.md`).
+  - Add `status?: TaskStatus` to `TaskInput`. `formatTaskLine` currently hard-codes `- [ ]`; change to emit the correct checkbox symbol (`[ ]`/`[/]`/`[x]`/`[-]`) based on `status` (default `"todo"`).
+  - Extend stable field ordering: `<checkbox> <desc> [priority] [📅 due] [⏳ scheduled] [➕ created] [✅ completed] [❌ cancelled] [#tag …]` for tasks-plugin source; mirror with `(completed: …)` / `(cancelled: …)` for gfm.
+  - Add `parseTaskLine(line: string): { ok: true; parsed: TaskInput & { status, completedDate?, cancelledDate?, leadingIndent: string, source: TaskFormatSource, rawStatusSymbol: string } } | { ok: false }`. Tolerant parser — handles both tasks-plugin emoji and our gfm `(field: value)` flavor, recognizes the 4 canonical status symbols, preserves leading indent. Unparseable / non-task lines return `{ ok: false }`. Round-trip invariant: `parseTaskLine(formatTaskLine(input, src)).parsed` equals `input` for all valid inputs (covered by a property-style test).
+  - Re-emission: when `update_task` writes back, it calls `formatTaskLine(patched, parsed.source)` so the same flavor is preserved (do not flip a tasks-plugin line into gfm).
+- **`src/tools/TaskFormat.test.ts`** (modify): add parse tests for all 4 statuses in both flavors, both date-stamp emoji, round-trip property tests, unparseable-line rejection, format tests for new status checkbox symbol, completedDate/cancelledDate ordering.
+
+- **`src/tools/ObsidianApi.ts`** (modify):
+  - Extend `FileCacheLike` to expose `listItems?: ReadonlyArray<{ position: { start: { line: number } }; task?: string }>` (currently exposes tags/headings/frontmatter/links only — see CodeResearch.md Phase 6 §3). This is a narrow surface for Tasks discovery.
+  - No new method needed; `find_tasks` calls `api.getFileCache(file)` and reads `listItems`.
+
+- **`src/tools/FindTasks.ts`** (new) + tests:
+  - `findTasksImpl(filter: FindTasksFilter, deps): Promise<FindTasksResult>` where filter accepts `{ tag?, status?, dueBefore?, dueAfter?, descriptionRegex?, path? }`. Enumerates via `vault.getMarkdownFiles()` (mirrors `search_vault` in `ReadTools.ts:275-359`); per-file: `api.getFileCache(file).listItems` filtered to `task !== undefined` gives candidate line numbers; read file content once and slice the matching lines; `parseTaskLine` each; apply filter; return `[{ path, line, raw, parsed }]` with **1-based** `line` numbers (matching existing search convention — note: Obsidian's cache is 0-based, we adjust).
+  - Optional `path` filter restricts to a single file (avoids enumerating the whole vault for "find tasks in today's daily note").
+  - Caps: 500 results per call (mirrors `search_vault`), 5 MB per-file size limit.
+  - Returns `{ ok: true, results, truncated, scanned }`.
+
+- **`src/tools/UpdateTask.ts`** (new) + tests:
+  - `updateTaskImpl(input: UpdateTaskInput, deps): Promise<UpdateTaskResult>` where input is:
+    - `path: string` — vault-relative
+    - `line: number` — 1-based line number from `find_tasks`
+    - `descriptionMatch?: string` — optional re-anchor; if the line at `line` doesn't parse as a task containing `descriptionMatch`, search nearby (±10 lines) for a matching task and use the first hit. If still no match, return `{ ok: false, reason: 'task_not_found' }`.
+    - `patch`: structured `{ addTags?: string[], removeTags?: string[], setPriority?: TaskPriority | null, setDueDate?: string | null, setScheduledDate?: string | null, setStatus?: TaskStatus, setDescription?: string }`. `null` clears the field; omitted = leave alone.
+  - Flow: read file → parse target line → apply patch (tag merge is set-union with sanitization, idempotent; status changes auto-stamp/strip ✅/❌ today via `deps.now()`) → re-format via `formatTaskLine(patched, parsed.source)` → preserve `parsed.leadingIndent` → write whole-file via `editFileImpl` (single journal undo entry).
+  - **Strict-date contract** (same as `create_task`): `setDueDate` / `setScheduledDate` accept strict `YYYY-MM-DD` or `null` only. Anything else → `{ ok: false, reason: 'invalid_date_format', field }` (vault not mutated). Model resolves relative dates against preamble timezone (FR-006).
+  - **Idempotency**: if the patch is a no-op (e.g., `addTags: ['x']` when `#x` already present and no other field changed), return `{ ok: true, changed: false, reason: 'no_change' }` without writing. No approval prompt for no-ops handled by SafetyPolicy gate inspecting an early return.
+  - **Status auto-stamping**:
+    - `setStatus: 'done'` → adds `completedDate = today` (only if not already set), clears `cancelledDate`
+    - `setStatus: 'cancelled'` → adds `cancelledDate = today` (only if not already set), clears `completedDate`
+    - `setStatus: 'todo'` or `'in-progress'` → clears both `completedDate` and `cancelledDate` (transitioning out of terminal state)
+  - **Approval prompt detail** (rendered as plain-text `<pre>` — CodeResearch.md Phase 6 §5):
+    ```
+    file: <path>:<line>
+    before: <raw line>
+    after:  <formatted line>
+    ```
+  - Returns `{ ok: true, path, line, changed, before, after, undoId, undoSurface: 'journal' }`. Undo restores the file's prior content (single modify entry from `editFileImpl`).
+
+- **`src/tools/WriteNoteTools.ts`** (modify): register `update_task` in the factory (gated like `create_task`); handler delegates to `updateTaskImpl`. No re-entry into other gated tools (calls `editFileImpl` directly).
+
+- **`src/tools/ReadNoteTools.ts`** (modify): register `find_tasks` in the factory with `skipPermission: true` (read-only, no vault mutation — mirrors `find_backlinks` / `vault_tree`). Handler delegates to `findTasksImpl`.
+
+- **`src/tools/WriteTools.ts`** (modify): add `update_task` to `VAULT_WRITE_TOOL_NAMES` (line 362-381) so SafetyPolicy classifies it as `source: "vault"`.
+
+- **`src/domain/vaultToolManifest.ts`** (modify): add entries for both new tools (`update_task` = write/non-read-only, `find_tasks` = read-only) so the preamble inventory stays accurate.
+
+- **`src/domain/PreambleAssembler.ts`** (modify): extend the authoring-conventions block with:
+  - One-sentence mention of `update_task` / `find_tasks` with the standard workflow ("call `find_tasks` first, then `update_task` per result with the returned `path` + `line`").
+  - Note the strict-date contract applies to `update_task` too.
+  - Status vocabulary: `todo` / `in-progress` / `done` / `cancelled`.
+  - Re-run Phase 2 deterministic-output tests after this tweak.
+
+- **`src/sdk/AgentSession.ts`** (modify): `buildSafetyInput`'s `extractVaultPath` (line 1241-1266) needs a case for `update_task` to extract `args.path` (already the default; verify no override needed since args already have `path`).
+
+- **`src/main.ts`** (modify): no factory wiring changes needed — both tools are registered through existing `createReadNoteTools` / `createWriteNoteTools` factories with the same deps.
+
+- **Tests**:
+  - `src/tools/FindTasks.test.ts` (new): single-file filter, tag filter, status filter (all 4), due-range filter, regex filter, 500-result truncation, 1-based line numbers, non-task lines ignored, both format flavors.
+  - `src/tools/UpdateTask.test.ts` (new): each patch field individually (addTags/removeTags/setPriority/setDueDate/setScheduledDate/setStatus×4/setDescription), idempotent no-op short-circuit, strict-date rejection for both date fields, descriptionMatch re-anchor (line moved up/down within ±10), task_not_found when re-anchor fails, status auto-stamp on done/cancelled, strip ✅/❌ when transitioning back to todo/in-progress, undoId surfaced, leadingIndent preserved, source flavor preserved (tasks-plugin stays tasks-plugin).
+  - `src/domain/PreambleAssembler.test.ts` (modify): update fixture for the conventions block.
+  - `src/domain/SafetyPolicy.test.ts` (modify): `update_task` classified as vault; `find_tasks` classified as read-only.
+
+### Success Criteria:
+
+#### Automated Verification:
+- [ ] `npm test` — all new tests pass; Phase 2 / 5 tests still green after authoring-conventions tweak; total test count grows by ~40.
+- [ ] `npm run typecheck` — clean.
+- [ ] `npm run build` — clean.
+
+#### Manual Verification:
+- [ ] In a vault with several tasks across multiple notes: ask "find all my tasks tagged #work that are due before next Friday" — single read-only call (no approval), structured candidate list returned in chat.
+- [ ] Pick one and ask "mark that done" — single approval showing `before:` / `after:` for ONE line; the task line gets `- [x] … ✅ <today>` (or `(completed: <today>)` for gfm); Undo button reverts cleanly.
+- [ ] Ask "tag all my communication tasks with #communication" — model uses `find_tasks` to enumerate candidates, then issues one `update_task` per result. Each approval shows a tiny per-line diff. Re-running is idempotent (no-op approvals reported, vault not mutated).
+- [ ] Mark a task in-progress (`setStatus: 'in-progress'`) — produces `- [/]`. Verify Tasks plugin Theme picks it up as IN_PROGRESS.
+- [ ] Mark a `done` task back to `todo` — `✅` date is stripped.
+- [ ] Edit a task in a file open in the editor with unsaved changes — refused with same error as `edit_note`'s dirty-buffer guard.
+
+---
+
+
+
+## Phase 7: Documentation
 
 ### Changes Required:
 
 - **`.paw/work/chat-ux-vault-tools/Docs.md`** (new): Technical reference (load `paw-docs-guidance` skill for templates):
   - Architecture diagram showing `ChatView` ↔ `CopilotAgentSession` (with first-send preamble prepender) ↔ `PreambleAssembler` and the `ObsidianApi` ↔ tool capabilities ↔ `decideSafety`/`UndoJournal` paths.
-  - Per-capability tool surface reference (signatures, error shapes, fallback semantics, format-source reporting).
+  - Per-capability tool surface reference (signatures, error shapes, fallback semantics, format-source reporting). Cover all v0.2 capabilities including Phase 6's `update_task` / `find_tasks`.
   - Vault Awareness Settings UX walk-through (modes, custom body placeholder syntax, preview).
+  - Task editing workflow: `find_tasks` → `update_task` pattern, all 4 statuses with their checkbox symbols, auto-stamped completion/cancellation dates, strict-date contract, line-number convention (1-based to match search).
   - Verification matrix mapping SC-001..SC-010 to specific manual steps and to test files.
-- **`README.md`** (modify): update "What's new in v0.2" or similar section. Document Enter-to-send, Shift+Enter, IME handling. Document new capabilities. Document Vault Awareness setting (with an explicit privacy note: top-level folder names are in the prompt by default; switch to None for sensitive vaults). Update "What is NOT in v0.1" → mark items now shipped in v0.2 and clearly note workflow B items remaining out of scope.
-- **`CHANGELOG.md`** (modify or create if absent following project convention): add a v0.2 section enumerating user-visible changes (keybinding, vault-aware preamble, eleven new capabilities, Tasks/Calendar integration via daily-note write target).
+- **`README.md`** (modify): update "What's new in v0.2" or similar section. Document Enter-to-send, Shift+Enter, IME handling. Document new capabilities including Phase 5 (`create_task`) and Phase 6 (`update_task` + `find_tasks`). Document Vault Awareness setting (with an explicit privacy note: top-level folder names are in the prompt by default; switch to None for sensitive vaults). Update "What is NOT in v0.1" → mark items now shipped in v0.2 and clearly note workflow B items remaining out of scope.
+- **`CHANGELOG.md`** (modify or create if absent following project convention): add a v0.2 section enumerating user-visible changes (keybinding, vault-aware preamble, eleven+ new capabilities, Tasks/Calendar integration via daily-note write target, full task editing toolset).
 - **Verify SC-001..SC-010 manually** and capture the results in `Docs.md`'s verification matrix.
 
 ### Success Criteria:
@@ -322,7 +414,7 @@ The plan is structured so each phase is independently reviewable and lands behin
 #### Manual Verification:
 - [ ] Docs.md verification matrix has a row per SC, each marked done, with the test file path or manual step recorded.
 - [ ] README's "What's new" reflects ship state; "What is NOT" items are accurate.
-- [ ] CHANGELOG entry mentions every user-visible change.
+- [ ] CHANGELOG entry mentions every user-visible change including task editing tools.
 
 ---
 
