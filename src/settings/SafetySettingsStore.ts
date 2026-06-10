@@ -11,6 +11,11 @@
  */
 
 import type { PluginDataIO } from "../auth/TokenStore";
+import {
+  DEFAULT_VAULT_AWARENESS_SETTINGS,
+  mergeVaultAwarenessSettings,
+  type VaultAwarenessSettings,
+} from "./VaultAwarenessSettings";
 
 /** Default safety mode applied to actions with no matching grant. */
 export type SafetyDefaultMode = "auto-apply-with-undo" | "require-approval";
@@ -43,12 +48,20 @@ export interface SafetySettings {
    * UI exposes them as individual switches.
    */
   autoApproveBuiltins: Record<string, boolean>;
+
+  /**
+   * Phase 2 (Chat UX + Vault Tools): vault-aware preamble + task target
+   * configuration. Persisted under the same store so Settings UI reads
+   * one snapshot. See `VaultAwarenessSettings.ts` for field semantics.
+   */
+  vaultAwareness: VaultAwarenessSettings;
 }
 
 export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
   defaultMode: "require-approval",
   allowlist: [],
   autoApproveBuiltins: {},
+  vaultAwareness: { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
 };
 
 /** SDK kinds we surface as built-in toggles in the settings UI. */
@@ -90,6 +103,7 @@ export class SafetySettingsStore {
       defaultMode: this.cached.defaultMode,
       allowlist: [...this.cached.allowlist],
       autoApproveBuiltins: { ...this.cached.autoApproveBuiltins },
+      vaultAwareness: { ...this.cached.vaultAwareness },
     };
   }
 
@@ -116,6 +130,16 @@ export class SafetySettingsStore {
         ...this.cached.autoApproveBuiltins,
         [kind]: enabled,
       },
+    };
+    await this.persist();
+  }
+
+  async setVaultAwareness(
+    update: Partial<VaultAwarenessSettings>,
+  ): Promise<void> {
+    this.cached = {
+      ...this.cached,
+      vaultAwareness: { ...this.cached.vaultAwareness, ...update },
     };
     await this.persist();
   }
@@ -179,5 +203,6 @@ function mergeWithDefaults(
             ),
           )
         : {},
+    vaultAwareness: mergeVaultAwarenessSettings(partial.vaultAwareness),
   };
 }

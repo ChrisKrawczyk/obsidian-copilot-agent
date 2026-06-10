@@ -31,3 +31,6 @@ yarn-error.log*
 # Obsidian plugin dev: hot-reload symlinks, local test vaults
 test-vault/
 .hot-reload
+
+# Local deploy target (per-developer absolute path to vault plugin folder)
+.deploy-target

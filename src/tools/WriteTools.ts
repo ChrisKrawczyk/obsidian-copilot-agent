@@ -18,6 +18,13 @@ import type { ReadToolsVault, TFileLike } from "./ReadTools";
  */
 export interface WriteToolsVault extends ReadToolsVault {
   create?: (path: string, content: string) => Promise<unknown>;
+  /**
+   * Create a folder (and any missing intermediates). Obsidian's vault
+   * adapter accepts `/`-separated paths. Optional because not every
+   * fake vault in tests bothers to implement it; callers must
+   * defensively check before invoking.
+   */
+  createFolder?: (path: string) => Promise<unknown>;
   modify?: (file: TFileLike, content: string) => Promise<unknown>;
   delete?: (file: TFileLike, system?: boolean) => Promise<void>;
   trash?: (file: TFileLike, system?: boolean) => Promise<void>;
@@ -357,4 +364,27 @@ export const WRITE_TOOL_NAMES = ["create_file", "edit_file", "delete_file"] as c
 export type WriteToolName = (typeof WRITE_TOOL_NAMES)[number];
 export function isWriteToolName(name: string): name is WriteToolName {
   return (WRITE_TOOL_NAMES as readonly string[]).includes(name);
+}
+
+/**
+ * Names of every mutating tool that targets the **vault** (file paths,
+ * editor buffer, etc.) — superset of `WRITE_TOOL_NAMES` plus the
+ * Phase 4/5 note-write tools. `AgentSession.buildSafetyInput` uses this
+ * to classify a tool call as `source: 'vault'` for the SafetyPolicy.
+ *
+ * `open_note` is NOT included even though it changes the workspace —
+ * it's read-equivalent navigation and skips the permission gate.
+ */
+export const VAULT_WRITE_TOOL_NAMES = [
+  ...WRITE_TOOL_NAMES,
+  "create_note",
+  "edit_note",
+  "insert_into_active_note",
+  "create_daily_note",
+  "create_task",
+  "update_task",
+] as const;
+export type VaultWriteToolName = (typeof VAULT_WRITE_TOOL_NAMES)[number];
+export function isVaultWriteToolName(name: string): name is VaultWriteToolName {
+  return (VAULT_WRITE_TOOL_NAMES as readonly string[]).includes(name);
 }

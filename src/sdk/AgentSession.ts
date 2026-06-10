@@ -8,7 +8,7 @@ import {
   type SafetyPolicyInput,
   type SafetyState,
 } from "../domain/SafetyPolicy";
-import { isWriteToolName } from "../tools/WriteTools";
+import { isVaultWriteToolName } from "../tools/WriteTools";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -101,6 +101,16 @@ export interface AgentSessionOptions {
    * no custom tools (legacy Phase 1–4 behaviour).
    */
   tools?: SdkTool[];
+  /**
+   * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
+   * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
+   * init() and on each `resetConversation()`). Its return value is
+   * prepended to the user's text with a documented marker so the model
+   * receives vault context before responding. Lazy so settings changes
+   * apply on the next reset without restarting the runtime. Return
+   * null/empty to skip prepending.
+   */
+  preamble?: () => string | null;
 }
 
 /**
@@ -319,6 +329,25 @@ export class CopilotAgentSession implements AgentSession {
    */
   private readonly resolvedApprovals = new Map<string, ApprovalChoice>();
 
+  /**
+   * Phase 2 (Chat UX + Vault Tools): true until the first
+   * `sendMessage`/`sendMessageStreaming` of the current SDK session has
+   * been issued. Reset to true on every `createSession` (init + reset).
+   * When true, `wrapWithPreamble` prepends the vault-aware preamble to
+   * the outgoing text. Flipped to false after the prepended text has
+   * been handed to `session.sendAndWait`.
+   */
+  private firstSendOfSession = true;
+  /**
+   * Diagnostics hook: records the text actually sent to the SDK on the
+   * most recent first-send and on the most recent subsequent send. Used
+   * by unit tests to verify (a) preamble was prepended on first send,
+   * (b) second send is untouched. Not part of the public AgentSession
+   * surface — read via `preambleProbe()`.
+   */
+  private lastFirstSendText: string | null = null;
+  private lastFollowupSendText: string | null = null;
+
   constructor(
     private readonly opts: AgentSessionOptions,
     sdkLoader?: () => Promise<SdkModule>,
@@ -385,7 +414,8 @@ export class CopilotAgentSession implements AgentSession {
       }
     }, SDK_TIMEOUT_MS);
     try {
-      const resp = await this.session.sendAndWait(text);
+      const outgoing = this.wrapWithPreamble(text);
+      const resp = await this.session.sendAndWait(outgoing);
       if (timedOut) {
         throw new Error(
           `Model did not respond within ${SDK_TIMEOUT_MS / 1000}s`,
@@ -589,8 +619,9 @@ export class CopilotAgentSession implements AgentSession {
 
     // Kick off the turn but DON'T await — we need to interleave with
     // the queue draining loop below.
+    const outgoing = this.wrapWithPreamble(text);
     session
-      .sendAndWait(text)
+      .sendAndWait(outgoing)
       .then(
         (resp) => {
           settled = true;
@@ -693,6 +724,62 @@ export class CopilotAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Phase 2: prepend the vault-aware preamble to the FIRST send of the
+   * current SDK session. Subsequent sends pass through unchanged. If no
+   * preamble callback is configured or it returns null/empty, the text
+   * is returned untouched.
+   *
+   * The marker line distinguishes the preamble block from the user's
+   * actual prompt so future log analysis / tests can detect it.
+   */
+  private wrapWithPreamble(text: string): string {
+    if (!this.firstSendOfSession) {
+      this.lastFollowupSendText = text;
+      return text;
+    }
+    this.firstSendOfSession = false;
+    const preambleFn = this.opts.preamble;
+    if (!preambleFn) {
+      this.lastFirstSendText = text;
+      return text;
+    }
+    let preamble: string | null;
+    try {
+      preamble = preambleFn();
+    } catch (e) {
+      console.warn("[AgentSession] preamble callback threw", e);
+      this.lastFirstSendText = text;
+      return text;
+    }
+    if (!preamble) {
+      this.lastFirstSendText = text;
+      return text;
+    }
+    const combined =
+      preamble + "\n\n---\n\n## User request\n\n" + text;
+    this.lastFirstSendText = combined;
+    return combined;
+  }
+
+  /**
+   * Test probe — returns the text most recently handed to
+   * `session.sendAndWait` for the first send and the most recent
+   * follow-up send. Lets unit tests assert preamble injection without
+   * reaching into the SDK fake.
+   */
+  preambleProbe(): {
+    firstSend: string | null;
+    followupSend: string | null;
+    firstSendArmed: boolean;
+  } {
+    return {
+      firstSend: this.lastFirstSendText,
+      followupSend: this.lastFollowupSendText,
+      firstSendArmed: this.firstSendOfSession,
+    };
+  }
+
   async resetConversation(): Promise<void> {
     this.cancelAllPendingApprovals("Conversation was reset.");
     if (!this.client) {
@@ -712,13 +799,14 @@ export class CopilotAgentSession implements AgentSession {
     }
     const fresh = await this.client.createSession({
       model: this.selectedModel,
-      availableTools: ["builtin:*"],
+      availableTools: ["builtin:*", "custom:*", "mcp:*"],
       streaming: true,
       tools: this.toolsList,
       onPermissionRequest: (request: SdkPermissionRequest) =>
         this.handlePermission(request),
     });
     this.session = fresh;
+    this.firstSendOfSession = true;
   }
 
   async dispose(): Promise<void> {
@@ -864,7 +952,7 @@ export class CopilotAgentSession implements AgentSession {
 
       const session = await client.createSession({
         model,
-        availableTools: ["builtin:*"],
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
         tools: this.toolsList,
         onPermissionRequest: (request: SdkPermissionRequest) =>
@@ -885,6 +973,7 @@ export class CopilotAgentSession implements AgentSession {
         );
       }
       this.session = session;
+      this.firstSendOfSession = true;
     } catch (err) {
       // On any failure after the client was constructed, make sure we
       // don't leak the runtime process.
@@ -1163,7 +1252,7 @@ export class CopilotAgentSession implements AgentSession {
     const kind = request.kind ?? "";
     const toolName = request.toolName;
 
-    if (kind === "custom-tool" && toolName && isWriteToolName(toolName)) {
+    if (kind === "custom-tool" && toolName && isVaultWriteToolName(toolName)) {
       const vaultPath =
         safety.extractVaultPath?.(request) ??
         (typeof request.args?.path === "string"
@@ -1558,3 +1647,4 @@ export type SdkPermissionResult =
   | { kind: "approve-once" }
   | { kind: "approve-for-session" }
   | { kind: "reject"; feedback: string };
+
