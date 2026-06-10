@@ -2,7 +2,18 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.1 private spike — Phases 1–6 complete. Working end-to-end on Windows desktop for a single-user, single-vault workflow. Not yet packaged for distribution.
+> **Status:** v0.2 — Phase 1–7 complete. Working end-to-end on Windows desktop. Adds keyboard-first chat, vault-aware preamble, and Obsidian-API-backed note + task tools on top of the v0.1 spike. Not yet packaged for distribution.
+
+## What's new in v0.2
+
+- **Keyboard-first chat input** — Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty input is rejected. While a response is streaming Enter is inert (Stop is the only cancel path).
+- **Vault-aware preamble** — a deterministic system block prepended to the first send of each session: vault root path, timezone, today, and an inventory of the vault-aware tools (so the model picks them instead of `shell` for discovery). Includes an authoring-conventions block covering wikilinks, hash-prefixed tags, and Tasks-plugin checkbox syntax. Configurable via Settings → Copilot Agent → Vault Awareness (Default / Custom / None).
+- **Eleven Obsidian-API-backed capabilities** registered alongside the v0.1 tools:
+  - Read-only (auto-approved): `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`, `find_tasks`.
+  - Mutating (one approval each, undoable): `create_note`, `edit_note`, `open_note`, `insert_into_active_note`, `create_daily_note`, `create_task`, `update_task`.
+- **Task editing** — `find_tasks` enumerates checkbox tasks across the vault with filters (status, tag, due range, regex, single-file); `update_task` applies a structured patch (status, dates, priority, tags, description) to a single line with two-tier re-anchor (byte-exact `expectedRawLine` then `descriptionMatch`), idempotent status auto-stamping (✅/❌ today), and recurrence preservation.
+- **Daily Notes + Tasks integration** — `create_daily_note` honors the Daily Notes core plugin's folder/format/template (falls back to `<vault-root>/YYYY-MM-DD.md` when disabled). `create_task` auto-detects Tasks-plugin presence and emits the matching flavor (📅/✅ vs `(due: …)`/`(completed: …)`).
+- **Privacy default**: the preamble sends NO note contents, NO recent-activity metadata, NO per-file timestamps — only vault root path + timezone + today + tool inventory + conventions. Top-level folder names ARE included by default to anchor the model; switch Vault Awareness to **None** in Settings for sensitive vaults.
 
 ## What works in v0.1
 
@@ -13,9 +24,9 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 - **Undo** for any applied vault write within the active session.
 - **Safety policy** with three modes (require-approval / auto-apply-with-undo / allowlist) plus persistent trust scopes (path allowlist, per-built-in toggles).
 
-## What is intentionally NOT in v0.1
+## What is intentionally NOT in v0.2
 
-Tracked as `[deferred]` candidates in `.paw/work/copilot-sdk-spike/ImplementationPlan.md`: dedicated OAuth App + Electron `safeStorage` for tokens, embeddings-based retrieval, multi-conversation support, cross-restart Undo, MCP server credential UI, custom user-authored tools, extra-vault roots, cross-restart `resumeSession`, headless integration tests.
+Workflow B (tracked as deferred candidates in `.paw/work/copilot-sdk-spike/ImplementationPlan.md`): extra-vault filesystem roots, MCP integration, model selection / cross-restart resume, secure-storage upgrade for tokens (Electron `safeStorage`), multi-conversation support, cross-restart Undo, no-tools chat-only mode, MCP credential UI, user-authored custom tools, headless integration tests, Periodic Notes plugin integration, recurring-task auto-rolling on completion.
 
 ## Local development setup
 
@@ -85,7 +96,7 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 tests across domain (SafetyPolicy, UndoJournal, VaultPath, ChatState), tools (ReadTools, WriteTools, ScopeRegistry indirect), and the SDK adapter (AgentSession).
+166 v0.1 tests retained and unchanged; v0.2 brings the total to **401** across domain (SafetyPolicy, UndoJournal, VaultPath, ChatState, PreambleAssembler), tools (ReadTools, WriteTools, ReadNoteTools, WriteNoteTools, ObsidianApi, TaskFormat, FindTasks, UpdateTask, DailyNotePath), UI (chatKeydown), auth, and the SDK adapter (AgentSession).
 
 ## Reference
 

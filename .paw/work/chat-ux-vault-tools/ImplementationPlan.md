@@ -67,8 +67,8 @@ The plan is structured so each phase is independently reviewable and lands behin
 - [x] **Phase 3: ObsidianApi helper + read-only tools** — Introduce `ObsidianApi` helper and ship `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata` (all `skipPermission: true` with the read-only checklist).
 - [x] **Phase 4: Vault-aware mutating tools + open_note** — Ship `create_note`, `edit_note`, `insert_into_active_note`, `create_daily_note` (all gated) and `open_note` (navigation-only, ungated per spec FR-016 / P7) on top of `ObsidianApi` and the v0.1 `WriteTools` factory.
 - [x] **Phase 5: Tasks integration (`create_task`)** — Detect the Tasks plugin, format with emoji syntax or GFM fallback, default target to today's daily note (with Settings override). Includes follow-up: default created date + Undo button.
-- [ ] **Phase 6: Task editing (`update_task` + `find_tasks`)** — Surgical line-level task edits with all 4 statuses (todo/in-progress/done/cancelled), auto-stamped completion/cancellation dates, line-diff approval, journal undo. Plus a read-only `find_tasks` for tag/status/date/regex filtering. Promoted mid-flight from candidates.
-- [ ] **Phase 7: Documentation** — `Docs.md`, README updates, and explicit verification of SC-001..SC-010.
+- [x] **Phase 6: Task editing (`update_task` + `find_tasks`)** — Surgical line-level task edits with all 4 statuses (todo/in-progress/done/cancelled), auto-stamped completion/cancellation dates, line-diff approval, journal undo. Plus a read-only `find_tasks` for tag/status/date/regex filtering. Promoted mid-flight from candidates.
+- [x] **Phase 7: Documentation** — `Docs.md`, README updates, and explicit verification of SC-001..SC-010.
 
 ## Phase Candidates
 <!-- Empty initially. Items added during planning if work surfaces. -->
