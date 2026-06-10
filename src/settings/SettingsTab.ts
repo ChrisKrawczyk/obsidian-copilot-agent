@@ -6,6 +6,15 @@ import {
   KNOWN_BUILTIN_KINDS,
   type SafetySettingsStore,
 } from "./SafetySettingsStore";
+import {
+  assemblePreamble,
+  PREAMBLE_PLACEHOLDERS,
+} from "../domain/PreambleAssembler";
+import { formatTodayInTimezone } from "../domain/formatToday";
+import type {
+  TaskTargetMode,
+  VaultAwarenessMode,
+} from "./VaultAwarenessSettings";
 
 /**
  * Phase 3 settings. Surfaces the auth state machine + persistence toggle.
@@ -150,11 +159,142 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           "README → 'Installing the Copilot CLI binary'.",
       );
 
+    // ---- Phase 2 (Chat UX + Vault Tools): Vault awareness ----
+    if (this.safetyStore) {
+      this.renderVaultAwarenessSection(containerEl);
+    }
+
     // Subscribe AFTER all DOM is built so the first render lands correctly.
     this.unsubscribe?.();
     this.unsubscribe = this.authController.subscribe((state) =>
       this.renderConnection(state),
     );
+  }
+
+  private renderVaultAwarenessSection(containerEl: HTMLElement): void {
+    if (!this.safetyStore) return;
+    const store = this.safetyStore;
+    const snap = store.snapshot().vaultAwareness;
+
+    containerEl.createEl("h3", { text: "Vault awareness" });
+    containerEl.createEl("p", {
+      cls: "setting-item-description",
+      text:
+        "Controls the vault-aware preamble prepended to the first user " +
+        "message of each chat session. The preamble tells the model your " +
+        "vault root, timezone, today's date, and the names of the read-only " +
+        "vault tools it should prefer (so it doesn't fall back to generic " +
+        "shell discovery). The default preamble does NOT enumerate your " +
+        "vault folders or files.",
+    });
+
+    let customRow: Setting | undefined;
+    let previewEl: HTMLPreElement | undefined;
+
+    const renderPreview = (): void => {
+      if (!previewEl) return;
+      const current = store.snapshot().vaultAwareness;
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const sample = assemblePreamble({
+        mode: current.mode,
+        vaultRootAbsPath:
+          (this.app.vault.adapter as { getBasePath?: () => string })
+            .getBasePath?.() ?? "<vault root>",
+        timezone,
+        todayInTimezone: formatTodayInTimezone(new Date(), timezone),
+        customBody: current.customBody,
+      });
+      previewEl.setText(sample || "(empty — no preamble will be sent)");
+    };
+
+    new Setting(containerEl)
+      .setName("Preamble mode")
+      .setDesc(
+        "None: no preamble. Default: the built-in vault-aware block. " +
+          "Custom: your own template (supports the placeholders documented below).",
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("none", "None")
+          .addOption("default", "Default (recommended)")
+          .addOption("custom", "Custom template")
+          .setValue(snap.mode)
+          .onChange(async (value) => {
+            const mode = value as VaultAwarenessMode;
+            await store.setVaultAwareness({ mode });
+            if (customRow) {
+              customRow.settingEl.style.display =
+                mode === "custom" ? "" : "none";
+            }
+            renderPreview();
+          }),
+      );
+
+    customRow = new Setting(containerEl)
+      .setName("Custom preamble body")
+      .setDesc(
+        `Supported placeholders: ${PREAMBLE_PLACEHOLDERS.VAULT_ROOT}, ` +
+          `${PREAMBLE_PLACEHOLDERS.VAULT_TIMEZONE}, ` +
+          `${PREAMBLE_PLACEHOLDERS.VAULT_TODAY}, ` +
+          `${PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY}, ` +
+          `${PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS}. ` +
+          "Placeholders are substituted only when present in the body.",
+      )
+      .addTextArea((ta) => {
+        ta.inputEl.rows = 6;
+        ta.inputEl.style.width = "100%";
+        ta.setValue(snap.customBody).onChange(async (value) => {
+          await store.setVaultAwareness({ customBody: value });
+          renderPreview();
+        });
+      });
+    customRow.settingEl.style.display = snap.mode === "custom" ? "" : "none";
+
+    new Setting(containerEl)
+      .setName("Default task target")
+      .setDesc(
+        "Where Phase 5's `create_task` tool appends new tasks. Today's " +
+          "Daily Note resolves at task-creation time. Custom path lets you " +
+          "point at a fixed note (e.g. `Inbox/tasks.md`).",
+      )
+      .addDropdown((dd) =>
+        dd
+          .addOption("today-daily-note", "Today's Daily Note")
+          .addOption("custom-path", "Custom path")
+          .setValue(snap.taskTargetMode)
+          .onChange(async (value) => {
+            await store.setVaultAwareness({
+              taskTargetMode: value as TaskTargetMode,
+            });
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Custom task target path")
+      .setDesc(
+        "Vault-relative path used when `taskTargetMode` is 'Custom path'. " +
+          "Ignored otherwise.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("Inbox/tasks.md")
+          .setValue(snap.customTaskTargetPath)
+          .onChange(async (value) => {
+            await store.setVaultAwareness({ customTaskTargetPath: value });
+          }),
+      );
+
+    const previewWrapper = containerEl.createEl("details");
+    previewWrapper.createEl("summary", { text: "Preview assembled preamble" });
+    previewEl = previewWrapper.createEl("pre", {
+      cls: "copilot-agent-preamble-preview",
+    });
+    previewEl.style.whiteSpace = "pre-wrap";
+    previewEl.style.maxHeight = "320px";
+    previewEl.style.overflow = "auto";
+    previewEl.style.padding = "0.5rem";
+    previewEl.style.border = "1px solid var(--background-modifier-border)";
+    renderPreview();
   }
 
   hide(): void {

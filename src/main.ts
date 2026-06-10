@@ -18,6 +18,8 @@ import { createWriteTools } from "./tools/WriteTools";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { UndoJournal } from "./domain/UndoJournal";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
+import { assemblePreamble } from "./domain/PreambleAssembler";
+import { formatTodayInTimezone } from "./domain/formatToday";
 
 /**
  * Phase 3 wiring:
@@ -116,6 +118,27 @@ export default class CopilotAgentPlugin extends Plugin {
           return typeof args?.path === "string" ? args.path : undefined;
         },
       },
+      // Phase 2 (Chat UX + Vault Tools): vault-aware preamble. Read on
+      // every first send so settings updates apply on the next session
+      // reset without restarting the runtime.
+      preamble: () => {
+        const va = safetySettingsStore.snapshot().vaultAwareness;
+        if (va.mode === "none") return null;
+        const vaultRoot =
+          (
+            this.app.vault.adapter as { getBasePath?: () => string }
+          ).getBasePath?.() ?? baseDirectory;
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const todayInTimezone = formatTodayInTimezone(new Date(), timezone);
+        const text = assemblePreamble({
+          mode: va.mode,
+          vaultRootAbsPath: vaultRoot,
+          timezone,
+          todayInTimezone,
+          customBody: va.customBody,
+        });
+        return text || null;
+      },
     });
     this.agent = agent;
 
@@ -198,3 +221,12 @@ export default class CopilotAgentPlugin extends Plugin {
     }
   }
 }
+
+/**
+ * Format `now` as YYYY-MM-DD in the supplied IANA timezone. Used by the
+ * preamble callback so the model receives an unambiguous local date even
+ * when the Obsidian renderer is running in a different host TZ.
+ *
+ * Moved to ./domain/formatToday so SettingsTab can render the preview
+ * with the same date — see commit fixing the impl-review finding.
+ */

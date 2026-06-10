@@ -116,13 +116,18 @@ function makeFakeSdk(): FakeHandles {
   return handles;
 }
 
-function makeAgent(handles: FakeHandles, decider = denyAll) {
+function makeAgent(
+  handles: FakeHandles,
+  decider = denyAll,
+  extraOpts: { preamble?: () => string | null } = {},
+) {
   return new CopilotAgentSession(
     {
       cliPath: "/fake/copilot.exe",
       gitHubToken: "fake-token",
       baseDirectory: "/fake/plugin",
       decider,
+      preamble: extraOpts.preamble,
     },
     async () => handles.sdk,
   );
@@ -867,5 +872,96 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     expect(result.kind).toBe("reject");
     await collector.catch(() => {});
     await agent.dispose();
+  });
+
+  describe("Phase 2 — preamble injection", () => {
+    test("prepends preamble to the FIRST send and leaves subsequent sends untouched", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h, denyAll, {
+        preamble: () => "PREAMBLE-X",
+      });
+      await agent.sendMessage("hello");
+      await agent.sendMessage("world");
+      expect(h.sendCalls.length).toBe(2);
+      expect(h.sendCalls[0]).toContain("PREAMBLE-X");
+      expect(h.sendCalls[0]).toContain("hello");
+      expect(h.sendCalls[1]).toBe("world");
+      const probe = agent.preambleProbe();
+      expect(probe.firstSend).toContain("PREAMBLE-X");
+      expect(probe.followupSend).toBe("world");
+      expect(probe.firstSendArmed).toBe(false);
+      await agent.dispose();
+    });
+
+    test("preamble: () => null short-circuits — first send is untouched", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h, denyAll, { preamble: () => null });
+      await agent.sendMessage("hi");
+      expect(h.sendCalls).toEqual(["hi"]);
+      await agent.dispose();
+    });
+
+    test("preamble: () => '' (empty) short-circuits — first send is untouched", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h, denyAll, { preamble: () => "" });
+      await agent.sendMessage("hi");
+      expect(h.sendCalls).toEqual(["hi"]);
+      await agent.dispose();
+    });
+
+    test("preamble callback throwing does NOT block the send", async () => {
+      const h = makeFakeSdk();
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const agent = makeAgent(h, denyAll, {
+        preamble: () => {
+          throw new Error("boom");
+        },
+      });
+      await agent.sendMessage("hi");
+      expect(h.sendCalls).toEqual(["hi"]);
+      warnSpy.mockRestore();
+      await agent.dispose();
+    });
+
+    test("resetConversation re-arms the preamble (next send is treated as a first send again)", async () => {
+      const h = makeFakeSdk();
+      let counter = 0;
+      const agent = makeAgent(h, denyAll, {
+        preamble: () => `PREAMBLE-${++counter}`,
+      });
+      await agent.sendMessage("a");
+      await agent.sendMessage("b");
+      await agent.resetConversation();
+      await agent.sendMessage("c");
+      expect(h.sendCalls.length).toBe(3);
+      expect(h.sendCalls[0]).toContain("PREAMBLE-1");
+      expect(h.sendCalls[1]).toBe("b");
+      expect(h.sendCalls[2]).toContain("PREAMBLE-2");
+      await agent.dispose();
+    });
+
+    test("with no preamble option configured, sends are pass-through (legacy behaviour)", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.sendMessage("a");
+      await agent.sendMessage("b");
+      expect(h.sendCalls).toEqual(["a", "b"]);
+      await agent.dispose();
+    });
+
+    test("preamble is also injected on the streaming send path", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h, denyAll, {
+        preamble: () => "STREAM-PREAMBLE",
+      });
+      // Drain the iterator to drive the streaming send path to completion.
+      for await (const _ of agent.sendMessageStreaming("hello-stream")) {
+        // no-op
+      }
+      expect(h.sendCalls.length).toBe(1);
+      expect(h.sendCalls[0]).toContain("STREAM-PREAMBLE");
+      expect(h.sendCalls[0]).toContain("hello-stream");
+      await agent.dispose();
+    });
   });
 });
