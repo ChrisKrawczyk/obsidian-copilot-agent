@@ -6,7 +6,7 @@ v0.2 extends the v0.1 Copilot agent plugin so it feels native to Obsidian. Three
 
 1. **Keyboard-first chat input** — Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty input is rejected. Streaming-state keys never trigger Stop.
 2. **Vault-aware preamble** — a deterministic system block prepended on the first send of every session that names the available vault tools (so the model uses them instead of `shell` for discovery), exposes vault root path + timezone + today, and encodes Obsidian authoring conventions (wikilinks, hash-prefixed tags, Tasks-plugin checkbox syntax).
-3. **Eleven Obsidian-API-backed capabilities** — six writers (`create_note`, `edit_note`, `open_note`, `insert_into_active_note`, `create_daily_note`, `create_task`), five auto-approved readers (`get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`), plus a task-editing pair (`find_tasks` read-only + `update_task` writer) that supersede ad-hoc edits to checkbox lines.
+3. **Thirteen Obsidian-API-backed capabilities** — six writers (`create_note`, `edit_note`, `open_note`, `insert_into_active_note`, `create_daily_note`, `create_task`), five auto-approved readers (`get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`), plus a task-editing pair (`find_tasks` read-only + `update_task` writer) that supersede ad-hoc edits to checkbox lines.
 
 The v0.1 tools (`view`, `read_file`, `search_content`, `create_file`, `edit_file`, `delete_file`) remain registered as defensive fallbacks (FR-020). The universal permission gate (`decideSafety`) is unchanged and remains the only path to vault mutation.
 
@@ -45,7 +45,7 @@ The v0.1 tools (`view`, `read_file`, `search_content`, `create_file`, `edit_file
 
 - **No SDK system-prompt option.** The SDK's `createSession` accepts no preamble field, so v0.2 prepends the assembled preamble to the user's first message inside `sendAndWait`. Subsequent sends are untouched.
 - **Augment, not replace.** v0.1 tools stay registered so any regression in a richer surface still has a working fallback. Each new capability reports `usedFallback: boolean` in its result so the model and tests can see which path ran.
-- **Deterministic preamble.** The default body is built from vault root path, top-level folder names (cap 50, alphabetical, `(N more)` suffix; falls back to top-level files when no folders exist), the tool inventory derived from `vaultToolManifest.ts`, the timezone, today's date, and a fixed authoring-conventions block. No note bodies, no per-file timestamps, no recent-activity metadata (privacy default, SC-005).
+- **Deterministic preamble.** The default body is built from vault root path, the tool inventory derived from `vaultToolManifest.ts`, the timezone, today's date, and a fixed authoring-conventions block. **No folder or file enumeration, no note bodies, no per-file timestamps, no recent-activity metadata** — folder/file structure is fetched on demand via the auto-approved read-only `vault_tree` / `vault_metadata` tools (privacy default, SC-005).
 - **Single permission gate.** Every mutating capability is registered without `skipPermission`, so each call traverses `CopilotAgentSession.handlePermission → decideSafety` exactly like v0.1's writes. Read-only capabilities and the navigation-only `open_note` set `skipPermission: true` and carry the read-only-checklist JSDoc.
 - **Strict-date contract.** Every date input (`dueDate`, `scheduledDate`, `createdDate`, `setDueDate`, `setScheduledDate`) rejects anything other than `YYYY-MM-DD` with a structured `invalid_date_format` error before any vault mutation happens. The model is expected to resolve natural-language phrases ("tomorrow", "next Friday") to strict dates before calling the tool.
 - **Format-source preservation.** When the Tasks plugin is detected, new and edited task lines are emitted in tasks-plugin emoji flavor (`📅 2026-06-12 ✅ 2026-06-09`). When absent, GFM flavor (`(due: 2026-06-12) (completed: 2026-06-09)`). `update_task` re-emits using the line's original detected flavor — editing a GFM task does not convert it to emoji.
@@ -140,7 +140,7 @@ Auto-stamp behavior on `setStatus`:
 Settings → Copilot Agent → **Vault Awareness**:
 
 - **Mode**: Default | Custom | None
-- **Custom body** (textarea, shown when mode = Custom). Placeholders: `{{vaultRoot}}`, `{{today}}`, `{{timezone}}`.
+- **Custom body** (textarea, shown when mode = Custom). Placeholders: `{{VAULT_ROOT}}`, `{{VAULT_TIMEZONE}}`, `{{VAULT_TODAY}}`, `{{VAULT_TOOL_INVENTORY}}`, `{{AUTHORING_CONVENTIONS}}`.
 - **Default task target**: Today's daily note | Custom path
 - **Custom task target path** (shown when target = Custom path).
 

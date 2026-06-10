@@ -9,7 +9,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Keyboard-first chat input: Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty/whitespace input is rejected. Enter is inert while a response is streaming (Stop is the only cancel path).
 - Vault-aware preamble assembled on the first send of each session: vault root path, timezone, today, inventory of available vault tools, and an authoring-conventions block (wikilinks, hash-prefixed tags, Tasks-plugin checkbox syntax). Configurable via Settings → Copilot Agent → Vault Awareness (Default / Custom / None).
-- Vault Awareness settings: mode toggle, custom-body textarea with `{{vaultRoot}}` / `{{today}}` / `{{timezone}}` placeholders, default task target (today's daily note or custom path).
+- Vault Awareness settings: mode toggle, custom-body textarea with `{{VAULT_ROOT}}` / `{{VAULT_TIMEZONE}}` / `{{VAULT_TODAY}}` / `{{VAULT_TOOL_INVENTORY}}` / `{{AUTHORING_CONVENTIONS}}` placeholders, default task target (today's daily note or custom path).
 - Read-only vault-aware tools (auto-approved, no prompt): `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`, `find_tasks`.
 - Mutating vault-aware tools (one approval each, journal-undoable): `create_note`, `edit_note`, `open_note`, `insert_into_active_note`, `create_daily_note`, `create_task`, `update_task`.
 - Daily Notes core plugin integration: `create_daily_note` honors the configured folder/format/template, falls back to `<vault-root>/YYYY-MM-DD.md` when disabled.
@@ -23,7 +23,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Security / Privacy
 
-- The default preamble sends NO note contents, NO recent-activity metadata, and NO per-file timestamps. Top-level folder names ARE included by default to anchor the model; users with sensitive vaults can set Vault Awareness to **None** to suppress the preamble entirely.
+- The default preamble sends only vault root path + timezone + today + tool inventory + authoring conventions. **No folder or file enumeration, no note contents, no recent-activity metadata, no per-file timestamps.** Folder/file structure is available on demand via the auto-approved `vault_tree` / `vault_metadata` tools. Users with the most sensitive vaults can set Vault Awareness to **None** to suppress the preamble entirely.
 - The universal permission gate (`decideSafety`) is unchanged from v0.1. Every mutating capability — including `update_task` — registers without `skipPermission`, so all writes route through the same gate as v0.1's `create_file` / `edit_file` / `delete_file`.
 
 ## [0.1.0] – v0.1 private spike
