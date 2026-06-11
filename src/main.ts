@@ -94,6 +94,12 @@ export default class CopilotAgentPlugin extends Plugin {
         typeof ConversationsStore
       >[0]["adapter"],
       pluginDataDir,
+      // v0.3 Phase 6 (SC-011): one-shot 5 MB warning. Notice text is
+      // produced by the store; we only own the surface (so tests can
+      // stub it without dragging in Obsidian's Notice).
+      notify: (message) => {
+        new Notice(message, 8000);
+      },
     });
     void conversationsStore; // Phase 4 wires this into ConversationManager.
     this.conversationsStore = conversationsStore;
@@ -483,6 +489,8 @@ export default class CopilotAgentPlugin extends Plugin {
     registerChatView(this, {
       manager: conversationManager,
       auth: controller,
+      getExposeRawFsTools: () =>
+        safetySettingsStore.snapshot().exposeRawFsTools,
       openSettings: () => {
         const setting = (this.app as unknown as {
           setting?: {

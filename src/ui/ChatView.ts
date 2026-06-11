@@ -15,8 +15,19 @@ import { decideKeydownAction } from "./chatKeydown";
 import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
 import { buildPickerItems, wouldTriggerArchiveOnCreate } from "./conversationPickerLogic";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
+import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
+
+/**
+ * v0.3 Phase 6 (FR-016): precomputed Set of raw-FS tool names so the
+ * per-render Undo-suppression predicate stays O(1). Kept module-level
+ * (not per-instance) because the manifest is a static compile-time
+ * constant.
+ */
+const RAW_FS_TOOL_NAME_SET: ReadonlySet<string> = new Set(
+  V01_RAW_FS_TOOL_NAMES,
+);
 
 interface ChatViewDeps {
   /**
@@ -36,6 +47,14 @@ interface ChatViewDeps {
    * Obsidian's internal `setting.openTabById`.
    */
   openSettings: () => void;
+  /**
+   * v0.3 Phase 6 (FR-016): live snapshot of the user's
+   * `exposeRawFsTools` setting. We use a getter so a toggle in the
+   * settings tab takes effect on the next render without us having to
+   * subscribe to the safety store from inside the view. Used by the
+   * Undo-button suppression predicate handed to MessageRenderer.
+   */
+  getExposeRawFsTools: () => boolean;
 }
 
 export class ChatView extends ItemView {
@@ -53,6 +72,7 @@ export class ChatView extends ItemView {
   private boundConversationId: string | null = null;
   private auth: AuthController;
   private openSettings: () => void;
+  private getExposeRawFsTools: () => boolean;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
@@ -127,6 +147,7 @@ export class ChatView extends ItemView {
     this.manager = deps.manager;
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
+    this.getExposeRawFsTools = deps.getExposeRawFsTools;
     this.bindActiveRuntime();
   }
 
@@ -262,6 +283,17 @@ export class ChatView extends ItemView {
           reason: "Rejected by user.",
         }),
       onUndo: (id) => void this.handleUndoClick(id),
+      // v0.3 Phase 6 (FR-016): suppress the Undo affordance on
+      // historical raw-FS tool calls when the user has the
+      // `exposeRawFsTools` setting OFF. The call name + result still
+      // render so the user can read what happened — only the action
+      // button disappears. Read live via `getExposeRawFsTools()` so
+      // toggling the setting takes effect on the next re-render
+      // without forcing a view reload.
+      isUndoSuppressed: (toolName) => {
+        if (this.getExposeRawFsTools()) return false;
+        return RAW_FS_TOOL_NAME_SET.has(toolName);
+      },
       // v0.3 Phase 2 (FR-018, MF-3): clicking a search-result row opens
       // the matched note in the active leaf. We reuse Obsidian's
       // openLinkText so the user lands on the canonical resolved file
@@ -834,7 +866,32 @@ export class ChatView extends ItemView {
       new Notice("Cannot undo: no journal entry for this action.");
       return;
     }
-    const outcome = await this.undoJournal.undo(entry.id);
+    let outcome = await this.undoJournal.undo(entry.id);
+    // v0.3 Phase 6 (FR-012): divergence flow. When the file no longer
+    // matches the snapshot, the journal returns ok:false WITH a
+    // divergence code. Walk the user through a confirm overlay (reuses
+    // the picker's confirmDestructive) and retry with `{force:true}`
+    // if they accept. Any other ok:false (e.g. "no prior content")
+    // surfaces as a plain Notice — no force retry, those are bugs not
+    // user-overrideable conditions.
+    if (
+      !outcome.ok &&
+      outcome.divergence &&
+      outcome.divergence !== "ok"
+    ) {
+      const message = divergenceConfirmMessage(
+        outcome.divergence,
+        entry.path,
+      );
+      const accepted = await confirmDestructive(
+        this.app,
+        "Undo with divergence",
+        message,
+        "Revert anyway",
+      );
+      if (!accepted) return;
+      outcome = await this.undoJournal.undo(entry.id, { force: true });
+    }
     if (!outcome.ok) {
       new Notice(outcome.reason ?? "Undo failed.");
       return;
@@ -853,6 +910,25 @@ export class ChatView extends ItemView {
         break;
       }
     }
+  }
+}
+
+/**
+ * v0.3 Phase 6 (FR-012): user-facing copy for each divergence kind.
+ * Centralised here so the strings are easy to review/translate later
+ * and so tests can assert the prompt text without duplicating it.
+ */
+function divergenceConfirmMessage(
+  divergence: "modified" | "missing" | "existed",
+  path: string,
+): string {
+  switch (divergence) {
+    case "modified":
+      return `"${path}" has been modified outside the agent since this action ran. Revert to the recorded snapshot anyway?`;
+    case "missing":
+      return `"${path}" no longer exists. Recreate it from the recorded snapshot?`;
+    case "existed":
+      return `A file already exists at "${path}". Overwrite it with the recorded snapshot?`;
   }
 }
 

@@ -24,6 +24,17 @@ export interface ToolCallBlockHandlers {
    * Obsidian dependency) so the block stays unit-testable.
    */
   onOpenLink?: (linkText: string) => void;
+  /**
+   * v0.3 Phase 6 (FR-016): predicate the view supplies so the block
+   * can hide the Undo button for raw-FS tool calls when the user has
+   * the `exposeRawFsTools` safety setting OFF. The block still
+   * renders the call name + result so historical context survives
+   * setting toggles; only the action affordance is suppressed.
+   * Suppression does NOT affect the "reverted" pill on already-undone
+   * calls (those remain visible so the user knows what happened).
+   * Returning `false`/`undefined` keeps the default Undo affordance.
+   */
+  isUndoSuppressed?: (toolName: string) => boolean;
 }
 
 /**
@@ -89,11 +100,14 @@ export function renderToolCallBlock(
   summary.appendChild(statusPill);
 
   // Undo button (rendered for completed write calls with an undoId).
+  const undoSuppressed =
+    !!call.name && !!handlers.isUndoSuppressed?.(call.name);
   if (
     call.outcome === "completed" &&
     call.undoId &&
     !call.undone &&
-    handlers.onUndo
+    handlers.onUndo &&
+    !undoSuppressed
   ) {
     const undoBtn = document.createElement("button");
     undoBtn.type = "button";

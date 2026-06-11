@@ -60,6 +60,7 @@ function makeStore(opts: {
   adapter?: RecordingAdapter;
   debounceMs?: number;
   now?: () => number;
+  notify?: (msg: string) => void;
 } = {}) {
   const io = opts.io ?? makeIO();
   const adapter = opts.adapter ?? makeAdapter();
@@ -69,6 +70,7 @@ function makeStore(opts: {
     pluginDataDir: ".obsidian/plugins/copilot-agent",
     debounceMs: opts.debounceMs ?? 0,
     now: opts.now,
+    notify: opts.notify,
   });
   return { store, io, adapter };
 }
@@ -357,3 +359,70 @@ function undoEntry(id: string, recordedAt: number): PersistedUndoEntry {
     recordedAt,
   };
 }
+
+
+describe("ConversationsStore — markUndone immediate flush (FR-013)", () => {
+  it("flushes synchronously without waiting for debounce", async () => {
+    const io = makeIO();
+    const { store } = makeStore({ io, debounceMs: 500 });
+    await store.load();
+    store.upsertConversation(newConv("c1"));
+    store.recordUndo("c1", undoEntry("u1", 1000));
+    await store.flushNow();
+    io.saveData.mockClear();
+    store.markUndone("c1", "u1");
+    // Drain the tail (immediate flush is fire-and-forget through enqueue).
+    await new Promise((r) => setTimeout(r, 0));
+    await store.flushNow();
+    expect(io.saveData).toHaveBeenCalled();
+    const persistedConv = (io.blob as { conversations: PersistedConversation[] })
+      .conversations[0];
+    expect(persistedConv.undoEntries[0].undone).toBe(true);
+  });
+});
+
+describe("ConversationsStore — 5MB size warning (SC-011)", () => {
+  it("fires notify exactly once when payload crosses 5 MB", async () => {
+    const io = makeIO();
+    const notify = vi.fn();
+    const { store } = makeStore({ io, notify, debounceMs: 0 });
+    await store.load();
+    store.upsertConversation(newConv("c1"));
+    // Push the persisted blob over 5 MB by inserting one huge message.
+    const big = "x".repeat(5 * 1024 * 1024 + 100);
+    store.appendMessage("c1", {
+      id: "m1",
+      role: "user",
+      content: big,
+      createdAt: 1,
+    });
+    await store.flushNow();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][0]).toMatch(/5 MB/);
+    // Subsequent flushes do NOT re-fire.
+    store.appendMessage("c1", {
+      id: "m2",
+      role: "user",
+      content: "small",
+      createdAt: 2,
+    });
+    await store.flushNow();
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire when payload stays under 5 MB", async () => {
+    const io = makeIO();
+    const notify = vi.fn();
+    const { store } = makeStore({ io, notify });
+    await store.load();
+    store.upsertConversation(newConv("c1"));
+    store.appendMessage("c1", {
+      id: "m1",
+      role: "user",
+      content: "hello",
+      createdAt: 1,
+    });
+    await store.flushNow();
+    expect(notify).not.toHaveBeenCalled();
+  });
+});

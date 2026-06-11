@@ -109,6 +109,7 @@ export function hydrateChatState(messages?: PersistedMessage[]): ChatState {
 }
 
 import type { UndoJournalVault } from "./UndoJournal";
+import { UNDO_TTL_MS } from "../persistence/ConversationsStore";
 
 /** Helper: build an `UndoJournal` for a runtime, with persistence
  *  wired to the provided adapter and hydration from prior entries. */
@@ -123,5 +124,11 @@ export function makeRuntimeJournal(
     persist: persistAdapter
       ? (op, entry) => persistAdapter.onJournalOp(op, entry)
       : undefined,
+    // v0.3 Phase 6: defensive TTL backstop. `ConversationsStore.pruneOnLoad`
+    // is the authoritative 7-day pruner at plugin startup; this just
+    // ensures that if a stale entry slipped past (e.g. a never-opened
+    // conversation hydrating after a long sleep), the in-memory journal
+    // still drops it and fires an `evict` so the store stays in lockstep.
+    loadOptions: { ttlMs: UNDO_TTL_MS },
   });
 }

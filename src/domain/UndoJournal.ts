@@ -50,6 +50,34 @@ export interface UndoOutcome {
   ok: boolean;
   /** If `ok === false`, a human-readable reason. */
   reason?: string;
+  /**
+   * v0.3 Phase 6 (FR-012): divergence classification when the guard
+   * check fails. Lets the caller (chat view) decide between a one-shot
+   * confirmation prompt and a hard refusal.
+   *
+   *  - `"ok"`        — no divergence; this field is set on success too
+   *                    so callers can branch uniformly.
+   *  - `"modified"`  — file exists but its content differs from the
+   *                    recorded snapshot (`after` for create/modify,
+   *                    something-vs-absence for delete).
+   *  - `"missing"`   — the targeted file no longer exists (relevant
+   *                    when undoing a `create` or `modify` whose
+   *                    target was deleted externally).
+   *  - `"existed"`   — undoing a `delete` but the path is already
+   *                    occupied by a different file.
+   */
+  divergence?: "ok" | "modified" | "missing" | "existed";
+}
+
+/** Options accepted by `undo()`. */
+export interface UndoOptions {
+  /**
+   * v0.3 Phase 6 (FR-012): bypass the content-divergence guard and
+   * perform the revert anyway. The caller MUST have surfaced a
+   * confirmation UI to the user before passing `true` — the journal
+   * does not gate the force itself.
+   */
+  force?: boolean;
 }
 
 /**
@@ -92,6 +120,19 @@ export interface UndoJournalOptions {
   initialEntries?: PersistedUndoEntry[];
   /** SF-2 cap. Defaults to 50. */
   maxEntries?: number;
+  /**
+   * v0.3 Phase 6: defensive TTL backstop applied at hydrate time.
+   * Authoritative TTL pruning happens in
+   * `ConversationsStore.pruneOnLoad()` at plugin startup (it sees
+   * every conversation including never-opened ones); this guard just
+   * ensures that if a stale entry slipped through, the in-memory
+   * journal won't surface it. Entries older than `ttlMs` (relative
+   * to `now()`) are dropped during hydration and `persist("evict",
+   * ...)` is fired so the store stays in lockstep.
+   */
+  loadOptions?: { ttlMs: number };
+  /** Wall-clock shim for tests. */
+  now?: () => number;
 }
 
 const DEFAULT_MAX_ENTRIES = 50;
@@ -104,6 +145,8 @@ export class UndoJournal {
   private readonly vault: UndoJournalVault;
   private readonly persist?: (op: UndoJournalPersistOp, entry: UndoEntry) => void;
   private readonly maxEntries: number;
+  private readonly loadTtlMs?: number;
+  private readonly now: () => number;
 
   /**
    * Backward-compatible constructor: legacy callers passed a vault
@@ -115,16 +158,37 @@ export class UndoJournal {
       this.vault = arg.vault;
       this.persist = arg.persist;
       this.maxEntries = arg.maxEntries ?? DEFAULT_MAX_ENTRIES;
+      this.loadTtlMs = arg.loadOptions?.ttlMs;
+      this.now = arg.now ?? (() => Date.now());
       // Hydrate. We don't fire `persist("add", ...)` for hydrated
-      // entries — they're already in the store.
+      // entries — they're already in the store. We DO fire
+      // `persist("evict", ...)` for TTL-expired entries so the store
+      // mirrors the drop (Phase 6 backstop).
       if (arg.initialEntries) {
+        const cutoff =
+          this.loadTtlMs !== undefined ? this.now() - this.loadTtlMs : null;
         for (const e of arg.initialEntries) {
+          if (cutoff !== null && e.recordedAt < cutoff) {
+            const ghost: UndoEntry = {
+              id: e.id,
+              kind: e.kind,
+              scope: e.scope,
+              path: e.path,
+              before: e.before,
+              after: e.after,
+              recordedAt: e.recordedAt,
+              undone: e.undone,
+            };
+            this.safePersist("evict", ghost);
+            continue;
+          }
           this.hydrate(e);
         }
       }
     } else {
       this.vault = arg;
       this.maxEntries = DEFAULT_MAX_ENTRIES;
+      this.now = () => Date.now();
     }
   }
 
@@ -152,7 +216,7 @@ export class UndoJournal {
     const stored: UndoEntry = {
       ...entry,
       id,
-      recordedAt: Date.now(),
+      recordedAt: this.now(),
     };
     this.entries.set(id, stored);
     this.insertionOrder.push(id);
@@ -165,12 +229,21 @@ export class UndoJournal {
   }
 
   /**
-   * Attempt to revert the action with `id`. Returns `{ ok: true }` on
-   * success, or `{ ok: false, reason }` if the guard check (current
-   * file content equals `after`) fails or if the file system layer
-   * returns an error.
+   * Attempt to revert the action with `id`. Returns `{ ok: true,
+   * divergence: "ok" }` on success.
+   *
+   * v0.3 Phase 6 (FR-012): when the file has been modified outside
+   * the agent since this entry was recorded, the result is
+   * `{ ok: false, divergence: "modified" | "missing" | "existed",
+   * reason }`. The caller (chat view) can then prompt the user and
+   * re-call with `{ force: true }` to perform the revert anyway.
+   *
+   * Divergence is detected by **content comparison** (read current
+   * file, compare to `after` for create/modify, or check existence
+   * for delete). No filesystem metadata (mtime, size) is stored on
+   * entries — see SI-1.
    */
-  async undo(id: string): Promise<UndoOutcome> {
+  async undo(id: string, options: UndoOptions = {}): Promise<UndoOutcome> {
     const e = this.entries.get(id);
     if (!e) return { ok: false, reason: "Undo entry not found." };
     if (e.undone) {
@@ -188,36 +261,69 @@ export class UndoJournal {
         case "create": {
           const file = this.lookup(e.path);
           if (!file) {
-            return {
-              ok: false,
-              reason: `Cannot undo: "${e.path}" no longer exists.`,
-            };
+            if (!options.force) {
+              return {
+                ok: false,
+                divergence: "missing",
+                reason: `"${e.path}" no longer exists. Nothing to delete.`,
+              };
+            }
+            // Force-undoing a create whose target is already gone is
+            // a no-op success — the desired end state is reached.
+            e.undone = true;
+            this.safePersist("mark-undone", e);
+            return { ok: true, divergence: "ok" };
           }
           const current = await this.readVault(file);
-          if (e.after !== undefined && current !== e.after) {
+          if (
+            !options.force &&
+            e.after !== undefined &&
+            current !== e.after
+          ) {
             return {
               ok: false,
-              reason: `Cannot undo: "${e.path}" has changed since it was created.`,
+              divergence: "modified",
+              reason: `"${e.path}" has changed since it was created.`,
             };
           }
           await this.deleteVault(file);
           e.undone = true;
           this.safePersist("mark-undone", e);
-          return { ok: true };
+          return { ok: true, divergence: "ok" };
         }
         case "modify": {
           const file = this.lookup(e.path);
           if (!file) {
-            return {
-              ok: false,
-              reason: `Cannot undo: "${e.path}" no longer exists.`,
-            };
+            if (!options.force) {
+              return {
+                ok: false,
+                divergence: "missing",
+                reason: `"${e.path}" no longer exists. Recreate from snapshot?`,
+              };
+            }
+            // Force-undoing a modify whose target was deleted →
+            // recreate from the `before` snapshot.
+            if (e.before === undefined) {
+              return {
+                ok: false,
+                reason: "Cannot undo: no recorded prior content.",
+              };
+            }
+            await this.createVault(e.path, e.before);
+            e.undone = true;
+            this.safePersist("mark-undone", e);
+            return { ok: true, divergence: "ok" };
           }
           const current = await this.readVault(file);
-          if (e.after !== undefined && current !== e.after) {
+          if (
+            !options.force &&
+            e.after !== undefined &&
+            current !== e.after
+          ) {
             return {
               ok: false,
-              reason: `Cannot undo: "${e.path}" has changed since this edit.`,
+              divergence: "modified",
+              reason: `"${e.path}" has changed since this edit.`,
             };
           }
           if (e.before === undefined) {
@@ -229,15 +335,30 @@ export class UndoJournal {
           await this.modifyVault(file, e.before);
           e.undone = true;
           this.safePersist("mark-undone", e);
-          return { ok: true };
+          return { ok: true, divergence: "ok" };
         }
         case "delete": {
           const existing = this.lookup(e.path);
           if (existing) {
-            return {
-              ok: false,
-              reason: `Cannot undo: "${e.path}" already exists.`,
-            };
+            if (!options.force) {
+              return {
+                ok: false,
+                divergence: "existed",
+                reason: `"${e.path}" already exists. Overwrite with snapshot?`,
+              };
+            }
+            // Force-undoing a delete whose path is now occupied →
+            // overwrite the current content with our snapshot.
+            if (e.before === undefined) {
+              return {
+                ok: false,
+                reason: "Cannot undo: no recorded prior content.",
+              };
+            }
+            await this.modifyVault(existing, e.before);
+            e.undone = true;
+            this.safePersist("mark-undone", e);
+            return { ok: true, divergence: "ok" };
           }
           if (e.before === undefined) {
             return {
@@ -248,7 +369,7 @@ export class UndoJournal {
           await this.createVault(e.path, e.before);
           e.undone = true;
           this.safePersist("mark-undone", e);
-          return { ok: true };
+          return { ok: true, divergence: "ok" };
         }
         default: {
           const exhaustive: never = e.kind;

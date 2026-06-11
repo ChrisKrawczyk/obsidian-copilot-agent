@@ -96,7 +96,9 @@ describe("makeRuntimeJournal", () => {
         scope: "vault",
         path: "a.md",
         after: "x",
-        recordedAt: 1,
+        // v0.3 Phase 6: makeRuntimeJournal now applies a defensive TTL
+        // backstop (UNDO_TTL_MS). Use `now()` so the seed survives.
+        recordedAt: Date.now(),
       },
     ];
     const j = makeRuntimeJournal(vault, seed, { onJournalOp: persist });

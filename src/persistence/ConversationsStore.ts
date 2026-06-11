@@ -75,6 +75,13 @@ export interface ConversationsStoreOptions {
    * `Date.now`.
    */
   now?: () => number;
+  /**
+   * v0.3 Phase 6 (SC-011): hook fired the first time a write produces
+   * a JSON payload ≥ 5 MB. Used by `main.ts` to show a one-shot
+   * Notice prompting the user to prune old conversations. Optional so
+   * tests don't have to mock it.
+   */
+  notify?: (message: string) => void;
 }
 
 export interface LoadResult {
@@ -93,6 +100,10 @@ export const UNDO_MAX_ENTRIES = 50;
 
 /** Default debounce window per spec NFR. */
 export const DEFAULT_DEBOUNCE_MS = 500;
+
+/** v0.3 Phase 6 (SC-011): one-shot warning threshold for persisted
+ *  data size. Surfaced via `notify` callback exactly once per session. */
+export const SIZE_WARN_BYTES = 5 * 1024 * 1024;
 
 const RECOVERY_SIDECAR_NAME = "conversations_recovery.bak.json";
 
@@ -117,6 +128,8 @@ export class ConversationsStore {
   private debounceResolve: (() => void) | null = null;
   private readonly debounceMs: number;
   private readonly now: () => number;
+  /** v0.3 Phase 6: fires the SC-011 size warning exactly once. */
+  private sizeWarned = false;
 
   constructor(private readonly opts: ConversationsStoreOptions) {
     this.debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS;
@@ -305,6 +318,16 @@ export class ConversationsStore {
     next[eIdx] = { ...next[eIdx], undone: true };
     this.replaceConvAt(idx, { ...conv, undoEntries: next });
     this.markDirty();
+    // v0.3 Phase 6 (FR-013): undo success must survive a fast restart,
+    // so bypass the 500ms debounce and write through immediately.
+    // We fire-and-forget here — the write is queued onto `this.tail`
+    // so concurrent callers still see a consistent serial ordering.
+    void this.flushNow().catch((err) => {
+      console.warn(
+        "[ConversationsStore] markUndone immediate flush failed",
+        err,
+      );
+    });
   }
 
   /**
@@ -420,6 +443,25 @@ export class ConversationsStore {
         activeConversationId: this.cached.activeConversationId,
       };
       await this.opts.io.saveData(merged);
+      // SC-011: one-shot warning when persisted size crosses 5 MB.
+      // Approximated via JSON.stringify on the merged payload; cheap
+      // enough at flush cadence and avoids needing adapter byte
+      // counters. The flag prevents Notice spam — user can keep
+      // working without being nagged on every subsequent flush.
+      if (!this.sizeWarned && this.opts.notify) {
+        try {
+          const bytes = JSON.stringify(merged).length;
+          if (bytes >= SIZE_WARN_BYTES) {
+            this.sizeWarned = true;
+            this.opts.notify(
+              "Copilot Agent: conversation data exceeds 5 MB. " +
+                "Consider archiving or deleting old conversations.",
+            );
+          }
+        } catch {
+          // Serialization failure shouldn't break the flush.
+        }
+      }
     });
   }
 

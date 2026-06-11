@@ -10,6 +10,14 @@ interface ChatViewRegistrationDeps {
   manager: ConversationManager;
   auth: AuthController;
   openSettings: () => void;
+  /**
+   * v0.3 Phase 6 (FR-016): live read of `exposeRawFsTools`. We pass a
+   * getter (not the boolean) so toggling the setting after onload
+   * immediately updates the Undo button visibility on re-render, while
+   * still keeping the registration shape free of a hard dependency on
+   * `SafetySettingsStore`.
+   */
+  getExposeRawFsTools: () => boolean;
 }
 
 export function registerChatView(
