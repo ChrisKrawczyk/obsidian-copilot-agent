@@ -20,7 +20,6 @@
 
 import {
   CURRENT_SCHEMA_VERSION,
-  DEFAULT_CONVERSATIONS_STATE,
   type PersistedConversation,
   type PersistedConversationsState,
   type PersistedMessage,
@@ -212,5 +211,3 @@ function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {
     undone: e.undone === true ? true : undefined,
   };
 }
-
-void DEFAULT_CONVERSATIONS_STATE;
