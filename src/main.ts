@@ -28,6 +28,7 @@ import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
 import { ConversationManager } from "./domain/ConversationManager";
+import { flushThenDispose, makeQuitFlushHandler } from "./lifecycle";
 import {
   hydrateChatState,
   type ConversationRuntime,
@@ -497,13 +498,7 @@ export default class CopilotAgentPlugin extends Plugin {
       const ws = this.app.workspace as unknown as {
         on?: (name: string, cb: () => void | Promise<void>) => unknown;
       };
-      const ref = ws.on?.("quit", async () => {
-        try {
-          await this.conversationsStore?.flushNow();
-        } catch (err) {
-          console.warn("[copilot-agent] quit-flush threw", err);
-        }
-      });
+      const ref = ws.on?.("quit", makeQuitFlushHandler(() => this.conversationsStore));
       if (ref) this.register(() => (this.app.workspace as unknown as {
         offref?: (r: unknown) => void;
       }).offref?.(ref));
@@ -521,20 +516,7 @@ export default class CopilotAgentPlugin extends Plugin {
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.
-    if (store) {
-      try {
-        await store.flushNow();
-      } catch (err) {
-        console.warn("[copilot-agent] conversationsStore.flushNow threw", err);
-      }
-    }
-    if (manager) {
-      try {
-        await manager.disposeAll();
-      } catch (err) {
-        console.warn("[copilot-agent] manager.disposeAll threw", err);
-      }
-    }
+    await flushThenDispose(store, manager);
   }
 }
 

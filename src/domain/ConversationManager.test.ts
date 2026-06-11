@@ -208,7 +208,7 @@ describe("ConversationManager — hydration (FR-009)", () => {
     expect(m.list()).toHaveLength(1);
     expect(m.getActiveId()).toBe(activeId);
     expect(state.activeId).toBe(activeId);
-    expect(m.list()[0].name).toBe("New conversation");
+    expect(m.list()[0].name).toBe("Untitled");
     // Regression: the freshly-minted default must exist in the store
     // BEFORE setActiveId runs (real ConversationsStore.setActiveId
     // throws if the id is absent).
@@ -294,14 +294,14 @@ describe("ConversationManager — hydration (FR-009)", () => {
 });
 
 describe("ConversationManager — create + auto-naming (FR-005)", () => {
-  test("first new() yields 'New conversation'", () => {
+  test("first new() yields 'Untitled'", () => {
     const { factory } = makeFakeFactory();
     const { store } = makeFakeStore();
     const m = new ConversationManager({ runtimeFactory: factory, store });
     m.hydrate({ conversations: [], activeConversationId: null });
     // hydrate already created one default — clear by archiving and creating.
     const c = m.create();
-    expect(c.name).toBe("New conversation 2");
+    expect(c.name).toBe("Untitled 2");
   });
 
   test("collisions get numeric suffix '… 2', '… 3'", () => {
@@ -311,8 +311,8 @@ describe("ConversationManager — create + auto-naming (FR-005)", () => {
     m.hydrate({ conversations: [], activeConversationId: null });
     const c2 = m.create();
     const c3 = m.create();
-    expect(c2.name).toBe("New conversation 2");
-    expect(c3.name).toBe("New conversation 3");
+    expect(c2.name).toBe("Untitled 2");
+    expect(c3.name).toBe("Untitled 3");
   });
 
   test("explicit name preserved if unique", () => {

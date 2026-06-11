@@ -127,8 +127,8 @@ describe("suffixDisambiguatedName (FR-005)", () => {
     expect(suffixDisambiguatedName("Chat", existing, "a")).toBe("Chat");
   });
 
-  test("falls back to 'New conversation' when seed is empty/whitespace", () => {
-    expect(suffixDisambiguatedName("   ", [], null)).toBe("New conversation");
+  test("falls back to 'Untitled' when seed is empty/whitespace", () => {
+    expect(suffixDisambiguatedName("   ", [], null)).toBe("Untitled");
   });
 
   test("strips surrounding whitespace before comparing", () => {

@@ -87,7 +87,7 @@ export function suffixDisambiguatedName(
   existing: readonly Conversation[],
   excludeId: string | null,
 ): string {
-  const trimmed = seed.trim().length > 0 ? seed.trim() : "New conversation";
+  const trimmed = seed.trim().length > 0 ? seed.trim() : "Untitled";
   const taken = new Set<string>();
   for (const c of existing) {
     if (c.id !== excludeId) taken.add(c.name);

@@ -9,7 +9,7 @@
  *  - FR-002 soft cap at 20: when a 21st conversation is created, the
  *    least-recently-active non-archived one is auto-archived.
  *  - FR-005 auto-naming + suffix-disambiguation: new conversations
- *    default to "New conversation"; collisions get a numeric suffix.
+ *    default to "Untitled"; collisions get a numeric suffix.
  *  - FR-009 active-on-load resolution: hydrate uses persisted
  *    `activeConversationId` if it still exists, else falls back to
  *    most-recently-active non-archived, else creates a default.
@@ -40,7 +40,7 @@ import type {
 
 /** Spec FR-002 soft cap. */
 export const CONVERSATION_SOFT_CAP = 20;
-const DEFAULT_NAME = "New conversation";
+const DEFAULT_NAME = "Untitled";
 
 export interface ConversationManagerOptions {
   /** Factory that builds a runtime for a given conversation. */
@@ -197,7 +197,7 @@ export class ConversationManager {
 
   /**
    * Create a new conversation. If `name` is omitted (or empty), uses
-   * "New conversation" with FR-005 numeric-suffix disambiguation.
+   * "Untitled" with FR-005 numeric-suffix disambiguation.
    * Enforces the FR-002 soft cap by archiving the least-recently-
    * active non-archived conversation when the active count would
    * exceed `CONVERSATION_SOFT_CAP`.
