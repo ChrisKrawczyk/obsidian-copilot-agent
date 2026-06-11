@@ -13,6 +13,7 @@ import { CopilotAgentSettingTab } from "./settings/SettingsTab";
 import { obsidianHttpClient } from "./auth/HttpClient";
 import { TokenStore } from "./auth/TokenStore";
 import { AuthController, type AgentTokenSink } from "./auth/AuthController";
+import { ConversationsStore } from "./persistence/ConversationsStore";
 import { createReadTools } from "./tools/ReadTools";
 import { createWriteTools } from "./tools/WriteTools";
 import { ObsidianApi } from "./tools/ObsidianApi";
@@ -67,6 +68,24 @@ export default class CopilotAgentPlugin extends Plugin {
       loadData: () => this.loadData(),
       saveData: (data) => this.saveData(data),
     });
+
+    // v0.3 Phase 3: ConversationsStore. Owns its own top-level
+    // `conversations`/`activeConversationId`/`schemaVersion` keys but
+    // shares the same data.json blob via merge-and-write. Settings UI
+    // and chat layers don't touch it directly until Phase 4 wires the
+    // ConversationManager.
+    const pluginDataDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    const conversationsStore = new ConversationsStore({
+      io: {
+        loadData: () => this.loadData(),
+        saveData: (data) => this.saveData(data),
+      },
+      adapter: this.app.vault.adapter as unknown as ConstructorParameters<
+        typeof ConversationsStore
+      >[0]["adapter"],
+      pluginDataDir,
+    });
+    void conversationsStore; // Phase 4 wires this into ConversationManager.
     // v0.3 Phase 1 (FR-014/FR-015 + C2-A): load safety settings BEFORE
     // constructing the agent so the gated-tools decision uses the
     // persisted value, not defaults. The snapshot captured here is
@@ -305,6 +324,23 @@ export default class CopilotAgentPlugin extends Plugin {
       try {
         await tokenStore.load();
         await controller.hydrate();
+        // v0.3 Phase 3: hydrate persisted conversations + run TTL prune
+        // before any ConversationRuntime is instantiated (Phase 4
+        // architecture). On recovery, surface a Notice naming the
+        // sidecar so the user can inspect what was salvaged.
+        const result = await conversationsStore.load();
+        if (result.recovered) {
+          new Notice(
+            `[Copilot Agent] Conversation history was unreadable and has been reset. A backup of the prior data was saved to: ${
+              result.recoveryPath ?? "(plugin data dir)"
+            }`,
+            12000,
+          );
+        }
+        const pruned = conversationsStore.pruneOnLoad();
+        if (pruned.droppedCount > 0) {
+          await conversationsStore.flushNow();
+        }
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);
         new Notice(
