@@ -99,6 +99,26 @@ export class ConversationManager {
         archived: c.archived === true ? true : undefined,
       };
       this.conversations.set(c.id, meta);
+      // Defensive: ensure the store has a row for every catalog entry
+      // (so `setActiveId(meta.id)` further down can't throw). In the
+      // normal flow the store already has these — this is idempotent
+      // when they match. Failures are logged, not thrown, so a bad
+      // store row can't block plugin onload.
+      if (this.store) {
+        try {
+          this.store.upsertConversation({
+            id: c.id,
+            name: c.name,
+            createdAt: c.createdAt,
+            lastActiveAt: c.lastActiveAt,
+            archived: c.archived === true ? true : undefined,
+            messages: c.messages,
+            undoEntries: c.undoEntries,
+          });
+        } catch (err) {
+          console.error("[ConversationManager] hydrate upsert failed", err);
+        }
+      }
       // Track the highest numeric id-suffix we've issued so future
       // local ids don't collide.
       const m = /^conv-(\d+)$/.exec(c.id);
@@ -184,14 +204,9 @@ export class ConversationManager {
    */
   create(name?: string): Conversation {
     const conv = this.createInternal(name);
+    // createInternal already persisted; enforceSoftCap may archive
+    // the LRU non-active conv (which writes its own metadata update).
     this.enforceSoftCap();
-    if (this.store) {
-      this.store.upsertConversation({
-        ...conversationToPersistedMetadata(conv),
-        messages: [],
-        undoEntries: [],
-      });
-    }
     this.emit({ kind: "list-changed" });
     return cloneMeta(conv);
   }
@@ -429,6 +444,27 @@ export class ConversationManager {
       lastActiveAt: ts,
     };
     this.conversations.set(id, meta);
+    // Invariant: every Conversation tracked by the manager exists in
+    // the store too. Without this upsert, calling
+    // `store.setActiveId(meta.id)` would throw because the store has
+    // no row for the freshly-minted default. This matters for the
+    // hydrate(empty) and "archive/remove the last active conversation"
+    // paths where we synthesize a default and immediately set it
+    // active (see hydrate / archive / removeConversation).
+    if (this.store) {
+      try {
+        this.store.upsertConversation({
+          ...conversationToPersistedMetadata(meta),
+          messages: [],
+          undoEntries: [],
+        });
+      } catch (err) {
+        console.error(
+          "[ConversationManager] createInternal upsert failed",
+          err,
+        );
+      }
+    }
     return meta;
   }
 

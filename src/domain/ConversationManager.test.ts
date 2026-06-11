@@ -51,6 +51,11 @@ function makeFakeStore(): {
     if (state.activeId === id) state.activeId = null;
   });
   const setActiveSpy = vi.fn((id: string | null) => {
+    // Match real ConversationsStore.setActiveId contract — throws if
+    // the id is absent. Catches the FR-009 fresh-install bug class.
+    if (id !== null && !state.byId.has(id)) {
+      throw new Error(`setActiveId: no conversation with id "${id}" in store`);
+    }
     state.activeId = id;
   });
   const listConversations = () => Array.from(state.byId.values());
@@ -204,6 +209,10 @@ describe("ConversationManager — hydration (FR-009)", () => {
     expect(m.getActiveId()).toBe(activeId);
     expect(state.activeId).toBe(activeId);
     expect(m.list()[0].name).toBe("New conversation");
+    // Regression: the freshly-minted default must exist in the store
+    // BEFORE setActiveId runs (real ConversationsStore.setActiveId
+    // throws if the id is absent).
+    expect(state.byId.has(activeId)).toBe(true);
   });
 
   test("uses persisted activeConversationId when it exists and is not archived", () => {
