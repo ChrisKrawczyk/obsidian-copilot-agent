@@ -26,9 +26,6 @@ import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
 
-// Re-export so test files and other consumers have a stable import path.
-export { filterRawFsToolsIfGated } from "./domain/toolGating";
-
 /**
  * Phase 3 wiring:
  *   1. Build TokenStore + AuthController early (they hold no SDK state).
