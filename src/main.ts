@@ -27,6 +27,12 @@ import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
+import { ConversationManager } from "./domain/ConversationManager";
+import {
+  hydrateChatState,
+  type ConversationRuntime,
+  type ConversationRuntimeFactory,
+} from "./domain/ConversationRuntime";
 
 /**
  * Phase 3 wiring:
@@ -38,7 +44,7 @@ import { filterRawFsToolsIfGated } from "./domain/toolGating";
  *      moves to `error` instead of silently retrying.
  */
 export default class CopilotAgentPlugin extends Plugin {
-  private agent: AgentSession | null = null;
+  private conversationManager: ConversationManager | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -102,30 +108,32 @@ export default class CopilotAgentPlugin extends Plugin {
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;
     const safetyState = new SafetyState();
-    const undoJournal = new UndoJournal(
-      this.app.vault as unknown as ConstructorParameters<typeof UndoJournal>[0],
-    );
+
+    // v0.3 Phase 4: per-conversation runtime architecture. Replaces
+    // the single global UndoJournal + AgentSession with a factory the
+    // ConversationManager calls lazily, once per conversation.
+    //
+    // Tools are statically bound to *each* runtime's journal at
+    // construction time, so the "active vs originating" mid-stream
+    // conversation-switch class of bugs is structurally impossible.
+    //
+    // Read-only tools (readTools, readNoteTools, searchTools) hold no
+    // per-conversation state and could in principle be shared, but
+    // for cohesion we still build them inside the factory — the SDK
+    // doesn't share `Tool` arrays across sessions.
+    //
+    // The frozen gated-tools snapshot (`exposeRawFsToolsAtStartup`)
+    // is captured INTO the closure here, so toggling the setting
+    // mid-session never reaches an already-built runtime nor any
+    // future runtime within this plugin instance — exactly the FR-015
+    // "next session start" semantic.
 
     // We need the AuthController reference before the agent (for
     // onAuthError) AND vice-versa (AuthController wraps the agent
     // token sink). Resolve by assigning post-construction.
     let controllerRef: AuthController | null = null;
 
-    const readTools = createReadTools(
-      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
-    );
-    const writeTools = createWriteTools({
-      vault: this.app.vault as unknown as Parameters<
-        typeof createWriteTools
-      >[0]["vault"],
-      workspace: this.app.workspace as unknown as Parameters<
-        typeof createWriteTools
-      >[0]["workspace"],
-      undoJournal,
-    });
-    // Phase 3 (Chat UX + Vault Tools): construct ObsidianApi once and
-    // share with the read-note tool factory. Phase 4 will reuse the
-    // same instance for write-note tools.
+    // ObsidianApi is stateless — share across runtimes.
     const ws = this.app.workspace as unknown as {
       getActiveFile: () => unknown;
       getActiveViewOfType: (k: unknown) => unknown;
@@ -136,7 +144,6 @@ export default class CopilotAgentPlugin extends Plugin {
         typeof createReadTools
       >[0],
       workspace: {
-        // Bind methods so Obsidian's `this`-sensitive APIs work.
         getActiveFile: () =>
           ws.getActiveFile() as ReturnType<
             NonNullable<
@@ -161,8 +168,6 @@ export default class CopilotAgentPlugin extends Plugin {
               >["getLeaf"]
             >
           >,
-        // Obsidian's runtime MarkdownView class — required so
-        // getActiveViewOfType(MarkdownView) hits the markdown editor.
         markdownViewSymbol: MarkdownView,
       },
       metadataCache: this.app.metadataCache as unknown as ConstructorParameters<
@@ -177,134 +182,220 @@ export default class CopilotAgentPlugin extends Plugin {
         plugins?: ConstructorParameters<typeof ObsidianApi>[0]["plugins"];
       }).plugins,
     });
-    const readNoteTools = createReadNoteTools(
-      obsidianApi,
-      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
-    );
-    // v0.3 Phase 2: read-only search tools (search_by_tag, search_by_name,
-    // list_all_tags). All three skipPermission per FR-017.
-    const searchTools = createSearchTools(
-      obsidianApi,
-      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
-    );
-    // Phase 4: vault-write note tools. Reuses writeTools' deps + the
-    // shared ObsidianApi instance + a deterministic clock (for daily
-    // notes). Each handler enforces FR-012 (read-only guard) where
-    // applicable; permission gating is handled by SafetyPolicy below.
+
     const now = (): Date => new Date();
-    const writeNoteTools = createWriteNoteTools({
-      vault: this.app.vault as unknown as Parameters<
-        typeof createWriteTools
-      >[0]["vault"],
-      workspace: this.app.workspace as unknown as Parameters<
-        typeof createWriteTools
-      >[0]["workspace"],
-      undoJournal,
-      api: obsidianApi,
-      now,
-      vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
-    });
 
-    const agent = new CopilotAgentSession({
-      cliPath,
-      gitHubToken: null,
-      baseDirectory,
-      decider: denyAll,
-      logLevel: "info",
-      onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
-      // Phase 3+4: register vault read/write tools. Read tools use
-      // skipPermission (always allowed inside vault). Write tools
-      // intentionally DO NOT skip permission — every invocation flows
-      // through SafetyPolicy below. `open_note` is the one exception:
-      // it's read-equivalent navigation and sets skipPermission itself.
-      //
-      // v0.3 Phase 1: when `exposeRawFsToolsAtStartup` is false, the
-      // six v0.1 raw-FS tools (view/read_file/search_content/
-      // create_file/edit_file/delete_file) are filtered out so the
-      // model can't invoke them. Filtering is done once at startup
-      // (per FR-015's "next session start" rule and C2-A's frozen-
-      // snapshot guarantee). `ALL_VAULT_TOOL_ENTRIES` stays unchanged
-      // so historical messages still render those tool names.
-      tools: filterRawFsToolsIfGated(
-        [
-          ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-        ],
-        exposeRawFsToolsAtStartup,
-      ),
-      // Phase 6: route all permission requests through SafetyPolicy.
-      // `config` is read on every decision so settings changes apply
-      // immediately. `extractVaultPath` pulls the candidate vault
-      // path out of write-tool args for allowlist matching. For
-      // `create_daily_note` we synthesize the path the same way the
-      // handler will, so gate-side and write-side paths match exactly.
-      safety: {
-        config: () => {
-          const snap = safetySettingsStore.snapshot();
-          return {
-            fsDefaultMode: snap.defaultMode,
-            vaultAllowlist: snap.allowlist,
-            builtinAutoApprove: snap.autoApproveBuiltins,
-          };
-        },
-        state: safetyState,
-        extractVaultPath: (req) => {
-          const r = req as { toolName?: unknown; args?: { path?: unknown } };
-          const tool = typeof r.toolName === "string" ? r.toolName : "";
-          if (tool === "create_daily_note") {
-            return resolveDailyNotePath(obsidianApi, now()).path;
-          }
-          if (tool === "insert_into_active_note") {
-            return obsidianApi.getActiveNotePath() ?? undefined;
-          }
-          if (tool === "create_task") {
-            // F2: mirror createTaskImpl's target resolution so the per-path
-            // allowlist sees the same path the handler will write to.
-            const va = safetySettingsStore.snapshot().vaultAwareness;
-            if (
-              va.taskTargetMode === "custom-path" &&
-              typeof va.customTaskTargetPath === "string" &&
-              va.customTaskTargetPath.trim().length > 0
-            ) {
-              return va.customTaskTargetPath.trim();
+    // Latest token broadcast across all live runtime sessions. Updated
+    // by the AuthController via the tokenSink and re-applied to any
+    // newly-constructed runtime so it starts authenticated.
+    let currentToken: string | null = null;
+    // Registry of live (instantiated) runtimes — used by the
+    // broadcasting tokenSink so token rotations reach every runtime
+    // that has actually been built. Lazily-uninstantiated runtimes
+    // start with `currentToken` at construction time, so they don't
+    // need broadcasts.
+    const liveRuntimes = new Set<{
+      session: AgentSession;
+      conversationId: string;
+    }>();
+
+    // The factory that ConversationManager uses to materialize a
+    // runtime on first activation. Captures all shared deps via
+    // closure; binds tools to the per-runtime journal.
+    const runtimeFactory: ConversationRuntimeFactory = (
+      metadata,
+      hydration,
+      persistAdapter,
+    ) => {
+      const journal = new UndoJournal({
+        vault: this.app.vault as unknown as ConstructorParameters<
+          typeof UndoJournal
+        >[0] extends { vault: infer V }
+          ? V
+          : never,
+        initialEntries: hydration?.undoEntries,
+        persist: persistAdapter
+          ? (op, entry) => persistAdapter.onJournalOp(op, entry)
+          : undefined,
+      });
+
+      const readTools = createReadTools(
+        this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+      );
+      const writeTools = createWriteTools({
+        vault: this.app.vault as unknown as Parameters<
+          typeof createWriteTools
+        >[0]["vault"],
+        workspace: this.app.workspace as unknown as Parameters<
+          typeof createWriteTools
+        >[0]["workspace"],
+        undoJournal: journal,
+      });
+      const readNoteTools = createReadNoteTools(
+        obsidianApi,
+        this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+      );
+      const searchTools = createSearchTools(
+        obsidianApi,
+        this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+      );
+      const writeNoteTools = createWriteNoteTools({
+        vault: this.app.vault as unknown as Parameters<
+          typeof createWriteTools
+        >[0]["vault"],
+        workspace: this.app.workspace as unknown as Parameters<
+          typeof createWriteTools
+        >[0]["workspace"],
+        undoJournal: journal,
+        api: obsidianApi,
+        now,
+        vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
+      });
+
+      const session = new CopilotAgentSession({
+        cliPath,
+        gitHubToken: currentToken,
+        baseDirectory,
+        decider: denyAll,
+        logLevel: "info",
+        onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
+        // v0.3 Phase 1: gated tool list captured at plugin onload and
+        // frozen via `exposeRawFsToolsAtStartup`. Toggling the setting
+        // mid-session does not reach this runtime, nor any future
+        // runtime built within this plugin instance — exactly the
+        // FR-015 "next session start" semantic.
+        tools: filterRawFsToolsIfGated(
+          [
+            ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+            ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+            ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+            ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+            ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ],
+          exposeRawFsToolsAtStartup,
+        ),
+        safety: {
+          config: () => {
+            const snap = safetySettingsStore.snapshot();
+            return {
+              fsDefaultMode: snap.defaultMode,
+              vaultAllowlist: snap.allowlist,
+              builtinAutoApprove: snap.autoApproveBuiltins,
+            };
+          },
+          state: safetyState,
+          extractVaultPath: (req) => {
+            const r = req as { toolName?: unknown; args?: { path?: unknown } };
+            const tool = typeof r.toolName === "string" ? r.toolName : "";
+            if (tool === "create_daily_note") {
+              return resolveDailyNotePath(obsidianApi, now()).path;
             }
-            return resolveDailyNotePath(obsidianApi, now()).path;
-          }
-          const args = r.args;
-          return typeof args?.path === "string" ? args.path : undefined;
+            if (tool === "insert_into_active_note") {
+              return obsidianApi.getActiveNotePath() ?? undefined;
+            }
+            if (tool === "create_task") {
+              const va = safetySettingsStore.snapshot().vaultAwareness;
+              if (
+                va.taskTargetMode === "custom-path" &&
+                typeof va.customTaskTargetPath === "string" &&
+                va.customTaskTargetPath.trim().length > 0
+              ) {
+                return va.customTaskTargetPath.trim();
+              }
+              return resolveDailyNotePath(obsidianApi, now()).path;
+            }
+            const args = r.args;
+            return typeof args?.path === "string" ? args.path : undefined;
+          },
         },
-      },
-      // Phase 2 (Chat UX + Vault Tools): vault-aware preamble. Read on
-      // every first send so settings updates apply on the next session
-      // reset without restarting the runtime.
-      preamble: () => {
-        const va = safetySettingsStore.snapshot().vaultAwareness;
-        if (va.mode === "none") return null;
-        const vaultRoot =
-          (
-            this.app.vault.adapter as { getBasePath?: () => string }
-          ).getBasePath?.() ?? baseDirectory;
-        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        const todayInTimezone = formatTodayInTimezone(new Date(), timezone);
-        const text = assemblePreamble({
-          mode: va.mode,
-          vaultRootAbsPath: vaultRoot,
-          timezone,
-          todayInTimezone,
-          customBody: va.customBody,
-          excludeRawFs: !exposeRawFsToolsAtStartup,
-        });
-        return text || null;
-      },
-    });
-    this.agent = agent;
+        preamble: () => {
+          const va = safetySettingsStore.snapshot().vaultAwareness;
+          if (va.mode === "none") return null;
+          const vaultRoot =
+            (
+              this.app.vault.adapter as { getBasePath?: () => string }
+            ).getBasePath?.() ?? baseDirectory;
+          const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const todayInTimezone = formatTodayInTimezone(new Date(), timezone);
+          const text = assemblePreamble({
+            mode: va.mode,
+            vaultRootAbsPath: vaultRoot,
+            timezone,
+            todayInTimezone,
+            customBody: va.customBody,
+            excludeRawFs: !exposeRawFsToolsAtStartup,
+          });
+          return text || null;
+        },
+      });
 
+      const state = hydrateChatState(hydration?.messages);
+      const liveEntry = { session, conversationId: metadata.id };
+      liveRuntimes.add(liveEntry);
+
+      const runtime: ConversationRuntime = {
+        conversationId: metadata.id,
+        session,
+        journal,
+        state,
+        async dispose() {
+          liveRuntimes.delete(liveEntry);
+          try {
+            await session.dispose();
+          } catch (err) {
+            console.warn("[copilot-agent] runtime session.dispose threw", err);
+          }
+        },
+      };
+      return runtime;
+    };
+
+    // Construct the conversation manager. It will hydrate from the
+    // ConversationsStore once the async hydrate block runs below.
+    const conversationManager = new ConversationManager({
+      runtimeFactory,
+      store: conversationsStore,
+    });
+    this.conversationManager = conversationManager;
+
+    // Broadcasting token sink: pushes token updates to every live
+    // runtime AND remembers the latest value for runtimes that haven't
+    // been instantiated yet (they pick it up from `currentToken` at
+    // construction time).
     const tokenSink: AgentTokenSink = {
-      setToken: (token) => agent.setToken(token),
-      reconnect: () => agent.reconnect(),
+      setToken: async (token) => {
+        currentToken = token;
+        for (const entry of liveRuntimes) {
+          try {
+            await entry.session.setToken(token);
+          } catch (err) {
+            console.warn("[copilot-agent] session.setToken broadcast", err);
+          }
+        }
+      },
+      reconnect: async () => {
+        // Reconnect every live session; only one can stream at a time
+        // per SI-11 but token rotations may require all to refresh.
+        const targets = Array.from(liveRuntimes);
+        const results = await Promise.all(
+          targets.map((e) =>
+            e.session
+              .reconnect()
+              .then((id: string | undefined) => id)
+              .catch((err: unknown) => {
+                console.warn(
+                  "[copilot-agent] session.reconnect broadcast",
+                  err,
+                );
+                return undefined;
+              }),
+          ),
+        );
+        // Surface the first model id we successfully resolved so the
+        // AuthController UI can display it (matches v0.2 behaviour where
+        // there was a single session).
+        return results.find((id): id is string => typeof id === "string");
+      },
     };
     const controller = new AuthController({
       http: obsidianHttpClient(),
@@ -341,6 +432,14 @@ export default class CopilotAgentPlugin extends Plugin {
         if (pruned.droppedCount > 0) {
           await conversationsStore.flushNow();
         }
+        // v0.3 Phase 4: hydrate the manager from the loaded store.
+        // This establishes the catalog + active id, but does NOT
+        // instantiate any runtime yet (lazy on first getActiveRuntime).
+        const snap = conversationsStore.snapshot();
+        conversationManager.hydrate({
+          conversations: snap.conversations,
+          activeConversationId: snap.activeConversationId,
+        });
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);
         new Notice(
@@ -362,13 +461,9 @@ export default class CopilotAgentPlugin extends Plugin {
     this.addSettingTab(settingsTab);
 
     registerChatView(this, {
-      agent,
+      manager: conversationManager,
       auth: controller,
-      undoJournal,
       openSettings: () => {
-        // Obsidian doesn't expose a typed API for "open my settings tab",
-        // but the workspace command does the right thing. Falls back to
-        // a notice if the API isn't available.
         const setting = (this.app as unknown as {
           setting?: {
             open: () => void;
@@ -390,13 +485,13 @@ export default class CopilotAgentPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     console.log("[copilot-agent] Unloading");
-    const agent = this.agent;
-    this.agent = null;
-    if (agent) {
+    const manager = this.conversationManager;
+    this.conversationManager = null;
+    if (manager) {
       try {
-        await agent.dispose();
-      } catch (e) {
-        console.warn("[copilot-agent] dispose threw", e);
+        await manager.disposeAll();
+      } catch (err) {
+        console.warn("[copilot-agent] manager.disposeAll threw", err);
       }
     }
   }

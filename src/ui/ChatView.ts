@@ -9,13 +9,19 @@ import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
 import type { UndoJournal } from "../domain/UndoJournal";
+import type { ConversationManager } from "../domain/ConversationManager";
 import { decideKeydownAction } from "./chatKeydown";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
 interface ChatViewDeps {
-  /** Lazily-initialised SDK adapter. The view never constructs it. */
-  agent: AgentSession;
+  /**
+   * v0.3 Phase 4: per-conversation runtime architecture. The view
+   * reads the active runtime via `manager.getActiveRuntime()` and
+   * re-binds on `active-changed` events. The manager owns the
+   * Map<id, runtime> so this view never sees a half-constructed one.
+   */
+  manager: ConversationManager;
   /**
    * Auth state source. ChatView subscribes to gate the composer:
    * sends are only allowed while state.kind === "connected".
@@ -26,20 +32,23 @@ interface ChatViewDeps {
    * Obsidian's internal `setting.openTabById`.
    */
   openSettings: () => void;
-  /**
-   * Phase 6: undo journal for vault write tools. Click on the inline
-   * Undo button routes here. Optional so Phase 5 tests still construct
-   * the view without it.
-   */
-  undoJournal?: UndoJournal;
 }
 
 export class ChatView extends ItemView {
-  private state = new ChatState();
-  private agent: AgentSession;
+  private readonly manager: ConversationManager;
+  /**
+   * Cached references to the active runtime's state/session/journal.
+   * Re-bound whenever `manager` emits `active-changed`. Initialised
+   * to placeholder values (a synthetic empty `ChatState`) until the
+   * manager finishes hydrating; the view subscribes to `list-changed`
+   * to pick up the real runtime once available.
+   */
+  private state: ChatState = new ChatState();
+  private agent: AgentSession | null = null;
+  private undoJournal?: UndoJournal;
+  private boundConversationId: string | null = null;
   private auth: AuthController;
   private openSettings: () => void;
-  private undoJournal?: UndoJournal;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
@@ -81,6 +90,7 @@ export class ChatView extends ItemView {
   private currentPlaceholderId?: string;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
+  private unsubManager?: () => void;
   private currentAuthKind: AuthState["kind"] = "disconnected";
   /**
    * IME composition state, tracked via the textarea's compositionstart /
@@ -94,10 +104,26 @@ export class ChatView extends ItemView {
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
-    this.agent = deps.agent;
+    this.manager = deps.manager;
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
-    this.undoJournal = deps.undoJournal;
+    this.bindActiveRuntime();
+  }
+
+  /**
+   * Pull the active runtime from the manager and re-bind cached
+   * `state`/`agent`/`undoJournal` references. Safe to call before
+   * hydration (returns early when no active id is set yet).
+   */
+  private bindActiveRuntime(): void {
+    const activeId = this.manager.getActiveId();
+    if (!activeId) return;
+    if (activeId === this.boundConversationId) return;
+    const runtime = this.manager.getActiveRuntime();
+    this.state = runtime.state;
+    this.agent = runtime.session;
+    this.undoJournal = runtime.journal;
+    this.boundConversationId = activeId;
   }
 
   getViewType(): string {
@@ -136,11 +162,11 @@ export class ChatView extends ItemView {
     // pure-render.
     this.renderer.setToolCallHandlers({
       onApprove: (id) =>
-        this.agent.resolveApproval(id, { kind: "approve-once" }),
+        this.agent?.resolveApproval(id, { kind: "approve-once" }),
       onApproveForSession: (id) =>
-        this.agent.resolveApproval(id, { kind: "approve-for-session" }),
+        this.agent?.resolveApproval(id, { kind: "approve-for-session" }),
       onReject: (id) =>
-        this.agent.resolveApproval(id, {
+        this.agent?.resolveApproval(id, {
           kind: "reject",
           reason: "Rejected by user.",
         }),
@@ -227,11 +253,28 @@ export class ChatView extends ItemView {
 
     this.unsubState = this.state.subscribe(() => this.syncList());
     this.unsubAuth = this.auth.subscribe((s) => this.renderAuth(s));
+    // v0.3 Phase 4: re-bind when the manager flips active conversations
+    // (or when first hydrating from disk and the active runtime appears).
+    this.unsubManager = this.manager.subscribe((ev) => {
+      if (ev.kind === "active-changed" || ev.kind === "list-changed") {
+        const prevId = this.boundConversationId;
+        this.bindActiveRuntime();
+        if (this.boundConversationId !== prevId) {
+          // New runtime → tear down the stale state subscription and
+          // re-attach to the new runtime's ChatState. Then re-render
+          // the list against the new state's current messages.
+          this.unsubState?.();
+          this.unsubState = this.state.subscribe(() => this.syncList());
+          this.syncList();
+        }
+      }
+    });
   }
 
   async onClose(): Promise<void> {
     this.unsubState?.();
     this.unsubAuth?.();
+    this.unsubManager?.();
     this.renderer?.dispose();
     this.renderer = undefined;
   }
@@ -312,7 +355,7 @@ export class ChatView extends ItemView {
     }
     this.sendBtnEl.disabled = true;
     try {
-      await this.agent.cancelCurrent();
+      await this.agent?.cancelCurrent();
     } catch (e) {
       console.warn("[ChatView] cancelCurrent threw", e);
     }
@@ -323,6 +366,15 @@ export class ChatView extends ItemView {
     if (this.pending) return;
     if (this.currentAuthKind !== "connected") {
       new Notice("Not connected. Open settings to sign in.", 5000);
+      return;
+    }
+    // v0.3 Phase 4: ensure we're bound to the latest active runtime
+    // (covers the boot-time window between view construction and
+    // ConversationManager.hydrate completing).
+    this.bindActiveRuntime();
+    const session = this.agent;
+    if (!session) {
+      new Notice("Conversation not ready yet — please retry.", 5000);
       return;
     }
     const text = this.inputEl.value.trim();
@@ -346,7 +398,7 @@ export class ChatView extends ItemView {
 
     this.setStreaming(true);
     try {
-      for await (const ev of this.agent.sendMessageStreaming(text)) {
+      for await (const ev of session.sendMessageStreaming(text)) {
         if (this.userRequestedStop) {
           // Drain the iterator but don't apply any further updates.
           // The placeholder is already frozen as `interrupted`; we

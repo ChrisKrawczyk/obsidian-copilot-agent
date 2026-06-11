@@ -1,14 +1,15 @@
 import { Plugin } from "obsidian";
 import { ChatView, CHAT_VIEW_TYPE } from "./ChatView";
-import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController } from "../auth/AuthController";
-import type { UndoJournal } from "../domain/UndoJournal";
+import type { ConversationManager } from "../domain/ConversationManager";
 
 interface ChatViewRegistrationDeps {
-  agent: AgentSession;
+  /** v0.3 Phase 4: replaces the old single `agent` + `undoJournal`
+   *  injection. ChatView reads the active runtime from the manager
+   *  and re-binds when the manager emits `active-changed`. */
+  manager: ConversationManager;
   auth: AuthController;
   openSettings: () => void;
-  undoJournal?: UndoJournal;
 }
 
 export function registerChatView(
