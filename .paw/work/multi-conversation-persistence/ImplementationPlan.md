@@ -4,10 +4,12 @@
 Generated via multi-model planning (gpt-5.4 + gemini-3.1-pro-preview + claude-opus-4.7).
 Per-model drafts live in ./planning/ (gitignored). Final structure follows the opus draft,
 which front-loads independent low-risk wins (Phases 1-2) before the persistence/runtime
-refactor, and explicitly names the FR-007 captured-at-send-time invariant. A per-conversation-
-runtime alternative (one CopilotAgentSession per conversation, surfaced by gpt-5.4) is
-documented in Phase 4 as a fallback if the captured-at-send-time approach proves fragile
-during implementation.
+refactor. Phase 4's architecture is the per-conversation-runtime model (gpt-5.4's
+contribution): one CopilotAgentSession + tool-factory set per conversation, with each tool
+statically bound to its conversation's UndoJournal at construction. This eliminates the
+"active vs originating" tool-binding class of bugs at the cost of slightly higher idle
+memory (≤ 20 sessions, all lazy). Planning-docs-review (MF-2) selected this approach over
+the shared-session captured-at-send-time alternative.
 -->
 
 ## Overview
@@ -28,7 +30,7 @@ v0.3 transforms the chat panel from a single ephemeral thread into a durable, mu
 ## Desired End State
 
 - A user can create, switch, rename, and delete named conversations from a picker at the top of the chat pane; up to 20 active conversations are surfaced (older ones soft-archive on disk).
-- Conversation list, per-conversation message history, active-conversation id, and per-conversation undo entries persist via Obsidian plugin data and survive plugin reload, Obsidian restart, and OS reboot; corruption produces a Notice + `.bak` recovery, not a crash.
+- Conversation list, per-conversation message history, active-conversation id, and per-conversation undo entries persist via Obsidian plugin data and survive plugin reload, Obsidian restart, and OS reboot; corruption produces a Notice + sibling `conversations_recovery.bak.json` backup file (the shared `data.json` is NOT renamed, so `auth`/`safety` subtrees remain functional), not a crash.
 - An in-flight assistant stream continues to land in its originating conversation even when the user switches to view a different conversation; Stop, approvals, and token rotation behave exactly as in v0.2.
 - Undo on a tool-driven file change works the same after a restart (within 7 days, last 50 per conversation), with a confirmation prompt when the target file has been modified externally since the snapshot.
 - A new setting "Expose v0.1 raw-filesystem tools" (default OFF) hides the six v0.1 raw-FS tools from the SDK tool list on the next session start; turning it back ON restores prior behavior.
@@ -41,7 +43,7 @@ v0.3 transforms the chat panel from a single ephemeral thread into a durable, mu
 
 ## What We're NOT Doing
 
-Copied verbatim from `Spec.md` § Scope / Out of Scope:
+Copied from `Spec.md` § Scope / Out of Scope, with planning-layer additions noted in this plan's Phase Candidates section:
 
 - MCP integration.
 - Extra-vault filesystem roots.
@@ -61,7 +63,7 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 - [ ] **Phase 1: Raw-FS tool gating** — Introduce the `exposeRawFsTools` setting and filter the tool list at session-construction time.
 - [ ] **Phase 2: New read-only search tools** — Add `search_by_tag`, `search_by_name`, `list_all_tags` through the FR-017 read-only path.
 - [ ] **Phase 3: Persistence foundation** — Introduce versioned `ConversationsStore` with corruption recovery, debounced writes, and the v0.2-compatible top-level-merge pattern.
-- [ ] **Phase 4: Conversation manager + persisted UndoJournal** — Refactor `UndoJournal` and chat state behind a per-conversation `ConversationManager` with serialization adapters; preserve in-flight stream binding.
+- [ ] **Phase 4: Per-conversation runtime + persisted UndoJournal** — Introduce `ConversationRuntime` (one `CopilotAgentSession` + `UndoJournal` + tools per conversation), refactor `UndoJournal` for persistence, replace the global session/journal in `main.ts` with the manager's runtime factory.
 - [ ] **Phase 5: Multi-conversation chat UI** — Add the picker, CRUD affordances, archive-at-21 behavior, and v0.2-session migration on first load.
 - [ ] **Phase 6: Cross-restart Undo finalization** — Apply 7-day TTL + 50-entry cap on load, file-modified-since-snapshot confirmation, persistent "Undone" marker, and gated-tool history rendering rules.
 - [ ] **Phase 7: Documentation** — Update README, CHANGELOG, and Docs.md for v0.3.
@@ -112,18 +114,20 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 
 ### Changes Required:
 
-- **`src/tools/ObsidianApi.ts`**: Extend `AppLike["metadataCache"]` with optional `getTags?(): Record<string, number>` and an optional `getMarkdownFiles`-backed tag→files traversal helper. Add wrapper methods `listAllTags()` and `findFilesByTag(tag)` that preserve native `this` the same way `getFileCache` does (`src/tools/ObsidianApi.ts:106-108`, `src/tools/ObsidianApi.ts:225-232`). Both must return a `metadata-cache-not-ready` discriminated status (consistent with the existing `index-unavailable`/`not-found` pattern) so the agent can retry per Risks § "metadata cache populating."
-- **`src/tools/SearchTools.ts`** (new): Implement `search_by_tag`, `search_by_name`, `list_all_tags` following the `createReadNoteTools` registration pattern (`src/tools/ReadNoteTools.ts:29-46`, `src/tools/ReadNoteTools.ts:57-208`). All three use `skipPermission: true`; the FR-017 read-only checklist comment from `ReadTools.ts:53-75` is duplicated/adapted at the top. Tag normalization (leading `#` stripped) lives in a small pure helper.
+- **`src/tools/ObsidianApi.ts`**: Extend `AppLike["metadataCache"]` with optional `getTags?(): Record<string, number>` (the Obsidian API returns tag names *with* the leading `#` as keys mapped to occurrence counts — pin this shape in a JSDoc comment so the search-tool consumer doesn't re-normalize the key). Add wrapper methods `listAllTags()` and `findFilesByTag(tag)` that preserve native `this` the same way `getFileCache` does (`src/tools/ObsidianApi.ts:106-108`, `src/tools/ObsidianApi.ts:225-232`). The `listAllTags()` wrapper uses `metadataCache.getTags()` when available and falls back to scanning `getFileCache()` for each markdown file when the API is absent (e.g., older Obsidian versions, test doubles); both code paths produce the same `Record<"#tag", number>` shape and are functionally complete — the fallback is not a degraded mode. Both wrappers return a `metadata-cache-not-ready` discriminated status (consistent with the existing `index-unavailable`/`not-found` pattern) so the agent can retry per Risks § "metadata cache populating."
+- **`src/tools/SearchTools.ts`** (new): Implement `search_by_tag`, `search_by_name`, `list_all_tags` following the `createReadNoteTools` registration pattern (`src/tools/ReadNoteTools.ts:29-46`, `src/tools/ReadNoteTools.ts:57-208`). All three use `skipPermission: true`; the FR-017 read-only checklist comment from `ReadTools.ts:53-75` is duplicated/adapted at the top. Tag normalization (leading `#` stripped on *input*; output keys retain `#` to match the wrapper's pinned shape) lives in a small pure helper.
   - `search_by_tag`: combines `cache.tags` + frontmatter tags via the same merge as `vault_metadata` (`src/tools/ReadNoteTools.ts:588-634`); cap 200 results with a `truncated: true` flag.
   - `search_by_name`: iterates `vault.getMarkdownFiles()`; bucket-ranks exact > prefix > substring (case-insensitive); cap 50.
   - `list_all_tags`: prefers `metadataCache.getTags()` when available, falls back to scanning `getFileCache` for each markdown file; sorts by count desc.
 - **`src/domain/vaultToolManifest.ts`**: Add three new entries to a new `V03_READ_TOOL_ENTRIES` block and append into `ALL_VAULT_TOOL_ENTRIES` (`src/domain/vaultToolManifest.ts:147-152`). Mark all three R/O so `PreambleAssembler` renders the `_(R/O)_` suffix (`src/domain/PreambleAssembler.ts:114-115`).
 - **`src/main.ts`**: Construct via `createSearchTools(obsidianApi, vault)` next to `createReadNoteTools` and concatenate ahead of write-note tools (`src/main.ts:144-164`).
 - **`src/sdk/AgentSession.ts`**: `buildSafetyInput()` already classifies unknown tool names as `builtin`; verify the three new names are explicitly classified as `vault`/read so the universal permission gate routes them through the FR-017 auto-approve path (`src/sdk/AgentSession.ts:1242-1282`).
+- **`src/ui/messageRenderer.ts`** (FR-018, MF-3): Add a renderer branch for the three new search-tool result shapes that renders matched notes as clickable links. Each row uses `workspace.openLinkText(path, "", false)` (or the equivalent `openLinkText(linktext, sourcePath, newLeaf)` invocation used elsewhere in the codebase for note-link affordances) on click, so the user can jump from a search result straight into the note. Keep the existing plain-text rendering as a fallback when the tool-result payload doesn't match the expected `{ matches: Array<{ path, displayName }> }` shape so old persisted entries don't blow up.
 - **Tests**:
-  - New `src/tools/SearchTools.test.ts`: tag with/without `#`, empty vault, `#` not present, truncation at 200, ranking buckets for name search, sort order for `list_all_tags`, `metadata-cache-not-ready` status path.
+  - New `src/tools/SearchTools.test.ts`: tag with/without `#`, empty vault, `#` not present, truncation at 200, ranking buckets for name search, sort order for `list_all_tags`, `metadata-cache-not-ready` status path, and the `getTags()`-absent fallback path producing identical output to the `getTags()`-present path on the same fixture.
   - Extend `src/tools/ObsidianApi.test.ts` for the new wrappers' `this`-preservation (mirror existing test at `:288-316`).
   - Extend `src/sdk/AgentSession.test.ts` (or whichever covers `buildSafetyInput`) to confirm the three names are auto-approved.
+  - Extend `src/ui/messageRenderer.test.ts` (or add new) to assert search-tool results render with clickable links and a click handler that calls the workspace `openLinkText` API.
 
 ### Success Criteria:
 
@@ -135,6 +139,7 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 #### Manual Verification:
 - [ ] "what tags are in my vault" calls `list_all_tags` with no approval prompt.
 - [ ] "show me notes tagged #project" returns exactly the matching notes; tag normalization works with or without `#`.
+- [ ] Search-tool result rows render as clickable links; clicking a row opens the target note in the active pane.
 - [ ] On a fresh vault open before the metadata cache is ready, calling a search tool returns the not-ready status and the agent retries.
 - [ ] Performance spot-check on a 1000-note / 30-tag vault (or scaled approximation): `list_all_tags` < 500 ms, `search_by_tag` < 200 ms (SC-006).
 
@@ -145,16 +150,18 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 ### Changes Required:
 
 - **`src/persistence/ConversationsStore.ts`** (new): A third top-level-merge store living alongside `TokenStore` and `SafetySettingsStore`. Owns the `conversations` and `activeConversationId` keys plus a top-level `schemaVersion: 1`. Mirrors the proven contract:
-  - Injected `PluginDataIO` (the same shape passed to `TokenStore` from `src/main.ts:59-66`).
+  - Injected `PluginDataIO` (the same shape passed to `TokenStore` from `src/main.ts:59-66`) and the Obsidian `vault.adapter` (needed to write the sibling recovery backup file).
   - Tail-serialized writes via a single tail promise (follow `TokenStore.flush()` merge-and-write at `src/auth/TokenStore.ts:81-108`).
   - Debounced flush at ≤1 write per 500 ms (spec NFR) — implement as a `scheduleFlush()` helper that coalesces calls.
-  - `load()` is async, validates schema version, normalizes per-field, and on parse failure: (a) renames the existing `data.json` to `<original>.bak` via Obsidian adapter, (b) returns defaults, (c) emits a one-shot `recovered: true` flag the plugin surfaces as a Notice.
-  - Public API: `loadAll()`, `getActiveId()`, `setActiveId(id)`, `listConversations()`, `upsertConversation(c)`, `removeConversation(id)`, `appendMessage(convId, msg)`, `replaceMessage(convId, msgId, partial)`, `recordUndo(convId, entry)`, `markUndone(convId, entryId)`, `pruneOnLoad()` (applies 7-day TTL and last-50 cap per FR-011).
-- **`src/persistence/PersistedShape.ts`** (new): Type declarations for `PersistedConversation`, `PersistedMessage`, `PersistedUndoEntry`, `PersistedState`. `PersistedMessage` mirrors `Message` from `src/domain/types.ts:15-77` minus any non-serializable handles. `schemaVersion = 1`.
+  - `flushNow()`: synchronous-completion-promise that cancels any pending debounce timer and writes immediately. Called from `CopilotAgentPlugin.onunload()` (Phase 5) so a fast Obsidian close after a switch / message-append does not lose the last update. Also called internally by the SF-2 50-cap path so trimming is durable before the next message.
+  - `load()` is async, validates schema version, normalizes per-field, and on parse failure: (a) writes the malformed `conversations` subtree (and its sibling keys we control) to a sibling file at `<plugin-data-dir>/conversations_recovery.bak.json` via `app.vault.adapter.write` — the shared `data.json` is **not** renamed and `auth`/`safety` subtrees remain intact, (b) overwrites only our top-level keys (`conversations`, `activeConversationId`, `schemaVersion`) with defaults using the same merge-and-write pattern, (c) returns defaults plus a one-shot `recovered: true` flag the plugin surfaces as a Notice.
+  - Public API: `loadAll()`, `getActiveId()`, `setActiveId(id)`, `listConversations()`, `upsertConversation(c)`, `removeConversation(id)`, `appendMessage(convId, msg)`, `replaceMessage(convId, msgId, partial)`, `recordUndo(convId, entry)`, `markUndone(convId, entryId)`, `pruneOnLoad()`, `flushNow()`.
+  - **`recordUndo(convId, entry)` enforces the 50-entry cap synchronously** (SF-2): if the conversation's persisted undo array already contains 50 entries, drop the oldest before appending the new one. This guarantees the cap is honored even across rapid tool calls within a session; `pruneOnLoad()` only handles the 7-day TTL (cap enforcement at load time is redundant once `recordUndo` enforces it).
+- **`src/persistence/PersistedShape.ts`** (new): Type declarations for `PersistedConversation`, `PersistedMessage`, `PersistedUndoEntry`, `PersistedState`. `PersistedMessage` mirrors `Message` from `src/domain/types.ts:15-77` minus any non-serializable handles. `schemaVersion = 1`. Note: this shape covers only the `conversations` subtree owned by `ConversationsStore`; settings (`auth`, `safety`) remain owned by their existing stores under their own top-level keys.
 - **`src/persistence/migrate.ts`** (new): Stub `migrate(raw: unknown): { state: PersistedState; recovered: boolean }`. v0.3 only knows `schemaVersion === 1`; anything else triggers the recovery path. Document the migration-policy contract in a top-of-file comment so v0.4+ has a stable extension point (Risk § "future migrations").
-- **`src/main.ts`**: After `safetyStore` (`src/main.ts:59-66`), construct `conversationsStore = new ConversationsStore({ loadData: …, saveData: …, adapter: this.app.vault.adapter })`; defer `await conversationsStore.load()` into the existing async hydration block (`src/main.ts:261-268`). On `recovered: true`, show a `new Notice(...)`.
+- **`src/main.ts`**: After `safetyStore` (`src/main.ts:59-66`), construct `conversationsStore = new ConversationsStore({ loadData: …, saveData: …, adapter: this.app.vault.adapter })`; defer `await conversationsStore.load()` into the existing async hydration block (`src/main.ts:261-268`). On `recovered: true`, show a `new Notice(...)` that names the sibling backup file path.
 - **Tests**:
-  - New `src/persistence/ConversationsStore.test.ts`: round-trip save/load, top-level-merge preserves `auth`/`safety` keys (mirror `TokenStore` tests), debounce coalescing, schema-version mismatch triggers `.bak` rename + recovery flag, malformed JSON triggers recovery, write tail-serialization (two concurrent flushes complete in order).
+  - New `src/persistence/ConversationsStore.test.ts`: round-trip save/load, top-level-merge preserves `auth`/`safety` keys (mirror `TokenStore` tests), debounce coalescing, schema-version mismatch triggers sibling-file write + recovery flag (assert `data.json` is **not** renamed and the simulated `auth`/`safety` subtrees survive recovery), malformed JSON triggers recovery via sibling file, write tail-serialization (two concurrent flushes complete in order), `recordUndo` 50-cap enforcement (51st entry evicts the oldest synchronously before write), `flushNow()` cancels the pending debounce and resolves only after the write completes.
   - New `src/persistence/migrate.test.ts`: known version passes through; unknown version flags `recovered: true`.
 
 ### Success Criteria:
@@ -166,35 +173,39 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 
 #### Manual Verification:
 - [ ] Deploy → trigger a load → confirm `data.json` gains a `conversations` key while `auth`/`safety` remain intact.
-- [ ] Corrupt `data.json` to `{conversations: "garbage", schemaVersion: 999}` → reload plugin → a Notice appears, `.bak` exists on disk, plugin still loads.
+- [ ] Corrupt `data.json` to `{conversations: "garbage", schemaVersion: 999, auth: {...real auth...}, safety: {...real safety...}}` → reload plugin → a Notice appears, the sibling `conversations_recovery.bak.json` exists in the plugin-data directory and contains the malformed subtree, `data.json` is **not** renamed, the `auth` and `safety` subtrees are still present and functional (token didn't get logged out, safety settings didn't reset), and the plugin loads with one empty conversation.
 
 ---
 
-## Phase 4: Conversation manager + persisted UndoJournal
+## Phase 4: Per-conversation runtime + persisted UndoJournal
+
+### Architecture (chosen via planning-docs-review MF-2)
+
+Each conversation owns a **`ConversationRuntime`** — a self-contained object holding its own `CopilotAgentSession`, its own `UndoJournal`, and its own tool-factory instances. Tools are statically bound at construction time to *that* conversation's journal, so the "active vs originating" mid-stream conversation-switch class of bugs is eliminated structurally: there is no shared journal, no captured-at-send-time discipline to enforce, and no global session whose approval/streaming maps could leak across conversations.
+
+The trade-off (slightly higher idle memory for ≤ 20 sessions, larger refactor than the shared-session alternative) was accepted because (a) the SDK session is small and lazily instantiated per conversation, (b) v0.3 supports at most one concurrent stream per plugin instance — multi-leaf chat is Out of Scope (SI-11), so concurrent-session resource pressure is bounded by user activity not conversation count, and (c) removing the binding-discipline failure mode is worth the refactor.
 
 ### Changes Required:
 
-- **`src/domain/Conversation.ts`** (new): A `Conversation` aggregates `id`, `name`, `createdAt`, `lastActiveAt`, `archived`, an owned `ChatState`, and an owned `UndoJournal`. Provides `toPersisted()` / `static fromPersisted(...)` adapters that map to `PersistedConversation`/`PersistedUndoEntry` from Phase 3.
-- **`src/domain/ConversationManager.ts`** (new): Owns the in-memory map of `Conversation` objects, the `activeId`, and the policy logic (FR-002 soft cap at 20, FR-005 auto-naming + suffix-disambiguation, FR-009 active-on-load resolution). Emits a small `subscribe(listener)` change-feed for the chat view. Each mutating call writes through to `ConversationsStore` (debounced).
-- **`src/domain/UndoJournal.ts`**: Make the existing class accept an optional `{ persist?: (entry, op) => void; initialEntries?: PersistedUndoEntry[] }` constructor argument. Public API surface (`record`, `get`, `undo`, `clear`) is unchanged so existing call sites in `src/tools/WriteTools.ts:101-201` and `src/tools/WriteNoteTools.ts:104-206` keep working. `record()` calls `persist(entry, "add")` after store, `undo()` calls `persist(entry, "mark-undone")` on success. Update the class header comment to reflect persistence.
-- **`src/domain/ConversationManager.ts`** wires each `Conversation`'s journal `persist` callback into `ConversationsStore.recordUndo` / `markUndone`.
-- **`src/main.ts`**: Replace the single `new UndoJournal()` at `src/main.ts:69-71` with a manager-owned construction. Tool factories (`createWriteTools`, `createWriteNoteTools`) currently expect a single journal; introduce an indirection `getJournalForActiveConversation()` (a function the manager exposes) so the existing factory signatures don't break — tools always operate on the active conversation's journal (which is the conversation whose stream triggered the tool call, per FR-007 captured-at-send-time semantics).
-  - Important: this indirection must be captured **at send time** alongside `currentPlaceholderId` (`src/ui/ChatView.ts:317-341`) so a mid-stream conversation switch does not redirect an in-flight tool's undo entry to the wrong conversation.
+- **`src/domain/ConversationRuntime.ts`** (new): Owns one `CopilotAgentSession`, one `UndoJournal`, one `ChatState`, and the per-runtime tool-factory instances (`createWriteTools`, `createWriteNoteTools`, plus read-tools and the new search-tools which are stateless and could be shared but for simplicity are created per-runtime). The journal reference is **captured into each tool closure at construction time** — tools never look up an "active" journal, they hold a direct reference to this runtime's journal. The session's tools list, auth wiring, and preamble-assembler usage mirror v0.2's `main.ts` construction but scoped to this runtime. Hydration (`fromPersisted`) accepts prior message history and undo entries; new runtimes start empty. Exposes a `dispose()` method that cancels any in-flight stream and detaches listeners (called by `ConversationManager.removeConversation`).
+- **`src/domain/Conversation.ts`** (new): Lightweight persisted-state value type: `id`, `name`, `createdAt`, `lastActiveAt`, `archived`, plus serialization helpers (`toPersisted()` / `fromPersisted()`) for the `PersistedConversation`/`PersistedUndoEntry` shapes from Phase 3. Decoupled from the runtime so the manager can list/sort conversations cheaply without spinning up sessions for archived items.
+- **`src/domain/ConversationManager.ts`** (new): Owns the `Map<id, Conversation>` of metadata plus a `Map<id, ConversationRuntime>` of *lazily-instantiated* runtimes (a runtime is created the first time a conversation is selected or receives a message). Owns `activeId` and the policy logic (FR-002 soft cap at 20, FR-005 auto-naming + suffix-disambiguation, FR-009 active-on-load resolution). Emits a `subscribe(listener)` change-feed for the chat view. Each mutating call writes through to `ConversationsStore` (debounced). The manager constructs each `ConversationRuntime` with the dependencies it needs (auth, safety, ObsidianApi, vault, preamble assembler, plus the `ConversationsStore` callbacks for `persist(entry, op)` so the journal can write through).
+- **`src/domain/UndoJournal.ts`**: Make the existing class accept an optional `{ persist?: (entry, op) => void; initialEntries?: PersistedUndoEntry[] }` constructor argument. Public API surface (`record`, `get`, `undo`, `clear`) is unchanged so existing call sites in `src/tools/WriteTools.ts:101-201` and `src/tools/WriteNoteTools.ts:104-206` keep working without modification — they already hold the journal reference passed to their factory, which is now per-runtime. `record()` calls `persist(entry, "add")` after store, `undo()` calls `persist(entry, "mark-undone")` on success. Update the class header comment to reflect persistence.
+- **`src/main.ts`**: Remove the single global `new UndoJournal()` (`src/main.ts:69-71`) and the single global `new CopilotAgentSession(...)` (`src/main.ts:166-183`). Replace with `conversationManager = new ConversationManager({ runtimeFactory, conversationsStore })` where `runtimeFactory(persistedConv)` is a closure that builds a `ConversationRuntime` with the shared dependencies (auth, safety, obsidianApi, vault, preamble assembler, gated tool-list per Phase 1). Hydrate by iterating loaded conversations and registering their metadata; runtimes hydrate lazily on first activation.
+- **`src/ui/ChatViewRegistration.ts`**: Inject `conversationManager` into the view dependency object instead of (or alongside) the now-removed single `session`/`undoJournal` (`src/ui/ChatViewRegistration.ts:14-20`). For backward compatibility during development, can briefly retain shims that read from `manager.getActiveRuntime()`.
+- **`src/ui/ChatView.ts`**: Replace the private `state = new ChatState()` (`src/ui/ChatView.ts:38`) with `manager.getActiveRuntime().state`. The streaming loop sends through `manager.getActiveRuntime().session` — no need to capture this at send time because tools are statically bound, but the placeholder-id capture from v0.2 (`src/ui/ChatView.ts:317-341`) remains so that stream deltas continue to land on the right message bubble when the user has scrolled or switched views. On `onSelect(newId)`, swap the active runtime, re-bind the change-feed, and re-render. Approval-prompt and Undo-button handlers (`src/ui/ChatView.ts:133-148`) operate on the runtime that originated them (each runtime owns its own pending-approval map, so no cross-conversation leakage is possible).
+- **`src/sdk/AgentSession.ts`**: Unchanged. Each runtime instantiates its own `CopilotAgentSession`; the SDK already isolates per-session state.
 
-### Architectural alternative (documented, not chosen)
+### Rejected alternative (documented for posterity)
 
-A second architecture was surfaced during multi-model planning: spin up **one `CopilotAgentSession` per conversation** instead of sharing one global session with active-at-send-time capture in `ChatView`. The per-conversation-runtime approach removes the binding-discipline risk entirely (each session naturally owns its own stream and approval maps) at the cost of a larger refactor and slightly higher idle memory (≤ 20 sessions). The captured-at-send-time approach was chosen because:
-- Only one stream is in flight at any time (the input is disabled while streaming — verify in `src/ui/ChatView.ts:317-341`), so concurrent streams across conversations are not a real concern in v0.3.
-- It keeps `CopilotAgentSession` construction, auth wiring, and preamble assembly unchanged from v0.2.
-- Phase 4's regression tests directly exercise the binding discipline.
+A shared-session architecture (one global `CopilotAgentSession` + one global `UndoJournal`, with `ChatView` capturing the active-conversation reference at send time) was also evaluated. It is rejected because it requires hand-maintained discipline at every send site to capture the originating-conversation's journal — a class of bug that recurs in stream-handling code and that planning-docs-review flagged as the highest risk in the shared-session approach. Per-conversation-runtime eliminates the class structurally for a modest memory cost.
 
-If during Phase 4 implementation the captured-at-send-time discipline proves fragile (e.g., pending approvals leak between conversations in manual testing), fall back to per-conversation `ConversationRuntime` objects each owning their own `CopilotAgentSession` / `ChatState` / `UndoJournal`. This is a self-contained change within `ConversationManager` and `ChatView`.
-- **`src/ui/ChatView.ts`**: Replace the private `state = new ChatState()` (`src/ui/ChatView.ts:38`) with an indirection that reads `manager.getActive().state`. The streaming loop captures `const conv = manager.getActive()` once at send time and writes deltas/tool-calls into `conv.state` regardless of which conversation is currently displayed. `syncList()` continues to render `manager.getActive().state.getMessages()` from the subscribed change-feed.
-- **`src/sdk/AgentSession.ts`**: Unchanged. Per CodeResearch (`:465-468`, `:703-704`) the SDK already captures session locally; the conversation binding is layered above the SDK in `ChatView`.
-- **Tests**:
-  - New `src/domain/ConversationManager.test.ts`: CRUD, soft-cap archive-at-21, FR-005 auto-naming + disambiguation, FR-009 active resolution (active still exists, active was deleted, none exist).
-  - New `src/domain/UndoJournal.persistence.test.ts`: hydration from `initialEntries`, `persist` callback called on `record` and `undo`, existing v0.2 behavior unchanged when no `persist` is provided.
-  - Extend `src/ui/ChatView` keydown/UI tests with a node-friendly fake manager to assert streaming-into-originating-conversation when active changes mid-stream (refactor into a pure helper module like `src/ui/chatKeydown.ts` per the repo's DOM-free testing convention).
+### Tests:
+
+- New `src/domain/ConversationRuntime.test.ts`: a runtime constructed with conversation A's journal records undo entries against A only; a separately constructed runtime for B records against B only; switching the manager's `activeId` between A and B never causes tool calls in A to record into B's journal even when manager.activeId points at B at the moment of `record()`.
+- New `src/domain/ConversationManager.test.ts`: CRUD, soft-cap archive-at-21, FR-005 auto-naming + disambiguation, FR-009 active resolution (active still exists, active was deleted, none exist), lazy runtime instantiation (no runtime built for archived/never-selected conversations), `dispose()` called on runtime when its conversation is removed.
+- New `src/domain/UndoJournal.persistence.test.ts`: hydration from `initialEntries`, `persist` callback called on `record` and `undo`, existing v0.2 behavior unchanged when no `persist` is provided.
+- Refactor any `ChatView` tests touching session/journal to construct a fake `ConversationManager` exposing a fake runtime; the existing pure-helper extraction convention (`src/ui/chatKeydown.ts`) applies.
 
 ### Success Criteria:
 
@@ -205,8 +216,9 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 - [ ] 410 v0.2 baseline tests remain green.
 
 #### Manual Verification:
-- [ ] Start a long stream in conversation A, switch to a fresh conversation B mid-stream → B shows nothing new, A's stream completes correctly when re-selected.
-- [ ] An approval prompt fired during a stream in A remains bound to A even if the user views B before resolving it.
+- [ ] Start a long stream in conversation A, switch to a fresh conversation B mid-stream → B shows nothing new, A's stream completes correctly when re-selected. A's undo journal contains the new entries; B's journal is empty.
+- [ ] An approval prompt fired during a stream in A remains bound to A even if the user views B before resolving it; approving from A's view (after switching back) succeeds.
+- [ ] Confirm only one stream is in flight at a time per plugin instance (multi-leaf chat is Out of Scope per SI-11).
 
 ---
 
@@ -218,11 +230,12 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 - **`src/ui/conversationPickerLogic.ts`** (new, DOM-free): Pure functions for sort order, truncation, suffix-disambiguation lookup, and "should archive" computation. Tested in node per `vitest.config.ts:4-8` (mirrors `src/ui/chatKeydown.ts`).
 - **`src/ui/ChatView.ts`**: Add the picker to the existing header (`src/ui/ChatView.ts:120-125`) above the title row. Wire `onCreate`/`onSelect`/`onRename`/`onDelete` to the `ConversationManager`. On `onSelect`, re-subscribe `syncList()` to the new active conversation's state. Confirmation dialog for delete uses Obsidian's modal pattern. Approval-prompt and Undo-button handlers (currently `src/ui/ChatView.ts:133-148`) read from the active conversation's renderer.
 - **`src/ui/ChatViewRegistration.ts`**: Inject the `ConversationManager` into the view dependency object alongside the existing agent/undoJournal/auth (`src/ui/ChatViewRegistration.ts:14-20`).
-- **`src/main.ts`**: Pass `conversationManager` into `registerChatView` (`src/main.ts:289-307`). On first v0.3 load with empty persisted data, run FR-019 migration: if a `ChatView` instance is currently live with non-empty `ChatState`, seed a single conversation from it; else create one empty "Untitled" conversation.
+- **`src/main.ts`**: Pass `conversationManager` into `registerChatView` (`src/main.ts:289-307`). On first v0.3 load (per SF-1), when `conversationsStore.loadAll()` reports no persisted conversations, the `ConversationManager` is initialized with a single empty "Untitled" conversation — no attempt is made to migrate v0.2's in-memory `ChatState`, because `ChatState` lives on `ChatView` and is destroyed when the v0.2 build unloads, before v0.3's `onload` runs. Add a `CopilotAgentPlugin.onunload()` (SI-3) that awaits `conversationsStore.flushNow()` (and any other store's flush) before returning, so a fast close after a message-append or rename does not lose the last update.
 - **`styles.css`**: Add classes for `.copilot-agent-conv-picker`, `.copilot-agent-conv-picker-list`, `.copilot-agent-conv-picker-item`, ellipsis truncation, hover/active states. Keep visual styling consistent with the existing chat header.
 - **Tests**:
   - New `src/ui/conversationPickerLogic.test.ts`: sort, truncation, suffix-disambiguation, archive-trigger on 21st.
-  - Extend `src/domain/ConversationManager.test.ts` to cover the FR-019 migration branch (empty persisted + non-empty in-memory ChatState → one seeded conversation with auto-name).
+  - Extend `src/domain/ConversationManager.test.ts` to cover the SF-1 first-load behavior: empty persisted data → exactly one "Untitled" conversation is created and set active; no attempt to read v0.2 `ChatState`.
+  - New `src/main.onunload.test.ts` (or extend `main` tests): `onunload()` calls `flushNow()` on `ConversationsStore` and resolves only after the flush completes.
 
 ### Success Criteria:
 
@@ -245,14 +258,14 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 
 ### Changes Required:
 
-- **`src/domain/UndoJournal.ts`**: Add a constructor option `loadOptions: { ttlMs: number; maxEntries: number }` used by `pruneOnLoad()` to drop entries older than 7 days and to keep only the last 50 per journal (FR-011). The drop happens during `ConversationManager` hydration before the journal is exposed to UI.
-- **`src/domain/UndoJournal.ts`**: Extend `undo()` (`src/domain/UndoJournal.ts:97-188`) so the "file content matches snapshot" guard returns a discriminated `divergence: "modified" | "missing" | "ok"` result instead of throwing/silently bailing. The caller (chat renderer) decides whether to prompt.
+- **`src/domain/UndoJournal.ts`**: Add a constructor option `loadOptions: { ttlMs: number }` used by `pruneOnLoad()` to drop entries older than 7 days (FR-011 TTL portion). The 50-entry cap is enforced synchronously at `recordUndo` time in `ConversationsStore` (Phase 3, per SF-2) and does not need to be re-applied here. The drop happens during `ConversationManager` hydration before the journal is exposed to UI.
+- **`src/domain/UndoJournal.ts`**: Extend `undo()` (`src/domain/UndoJournal.ts:97-188`) so the "file content matches snapshot" guard returns a discriminated `divergence: "modified" | "missing" | "ok"` result instead of throwing/silently bailing. **Divergence detection is content-based**: read the current file content and compare it byte-for-byte (or hash-for-hash) to the entry's snapshot `before`. No mtime / size metadata is added to persisted entries (SI-1) — this matches how the in-session UndoJournal already detects external edits and avoids storing filesystem-dependent fields in plugin data. The caller (chat renderer) decides whether to prompt.
 - **`src/ui/ChatView.ts`** (Undo handler at `:133-148`): When `divergence === "modified"` or `"missing"`, open an Obsidian modal with a brief description ("File was modified outside the agent on …" / "File no longer exists; recreate from snapshot?"). On explicit confirm, call `undo({ force: true })`.
 - **`src/persistence/ConversationsStore.ts`**: `markUndone(convId, entryId)` writes through immediately (no debounce) so a successful undo survives a fast restart — FR-013.
 - **`src/ui/messageRenderer.ts`** (or wherever tool-call rows render): When rendering a historical tool-call whose tool name is in `V01_RAW_FS_TOOL_NAMES` and the setting is currently OFF, suppress the Undo button (FR-016) — the tool name and result text still render normally. The renderer must already render historical tool-calls; this is a conditional on button visibility only.
 - **`src/persistence/ConversationsStore.ts`**: Track persisted data size; when it crosses 5 MB on save, surface a one-shot `new Notice("Copilot Agent: conversation data exceeds 5 MB; consider pruning old conversations")` (SC-011). Use a `sizeWarned: boolean` field in memory so the Notice fires once per session.
 - **Tests**:
-  - New `src/domain/UndoJournal.crossRestart.test.ts`: hydrate with mixed-age entries → TTL drops the right ones; >50 entries → only last 50 retained; `undo()` returns `divergence: "modified"` when mtime/size differ; `undo({force: true})` restores; `markUndone` persistence flag is read on re-hydrate.
+  - New `src/domain/UndoJournal.crossRestart.test.ts`: hydrate with mixed-age entries → TTL drops the right ones; `undo()` returns `divergence: "modified"` when current file content differs from the snapshot `before` (content comparison, not mtime/size); `divergence: "missing"` when the file no longer exists; `undo({force: true})` restores; `markUndone` persistence flag is read on re-hydrate. (50-cap behavior is tested in `ConversationsStore.test.ts` under Phase 3.)
   - Extend `src/ui/ChatView` test surface (via the pure-helper extraction approach) for the gated-tool-no-Undo-button rule and the modified-file confirmation branch.
   - Extend `src/persistence/ConversationsStore.test.ts` for the 5 MB Notice trigger.
 
@@ -265,10 +278,10 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 
 #### Manual Verification:
 - [ ] Run an `edit_note`, restart Obsidian, click Undo within 7 days → file reverts; entry shows "Undone" and Undo button disappears.
-- [ ] Edit the same file manually after the tool call, then click Undo → modal explains divergence, requires confirmation; on confirm, file reverts.
+- [ ] Edit the same file manually after the tool call (changing its content), then click Undo → modal explains divergence (content differs from snapshot), requires confirmation; on confirm, file reverts.
 - [ ] Delete the targeted file manually, then click Undo → modal offers to recreate from snapshot.
 - [ ] Backdate an entry's `recordedAt` past 7 days in `data.json`, reload → entry is dropped from storage and no Undo button appears.
-- [ ] In a conversation with 60 undoable entries, reload → only the last 50 retain Undo buttons; older tool-call messages still render.
+- [ ] Drive a single conversation past 50 undoable tool calls in one session (no restart) → the oldest entries are evicted on the fly per SF-2 and `data.json` never holds more than 50 entries for that conversation.
 
 ---
 
@@ -276,7 +289,7 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 
 ### Changes Required:
 
-- **`.paw/work/multi-conversation-persistence/Docs.md`** (new): Technical reference following the style of `.paw/work/chat-ux-vault-tools/Docs.md`. Sections: multi-conversation model (entities, lifecycle, archive policy), persistence layout (`data.json` keys, schema version, corruption recovery, `.bak` policy), cross-restart Undo contract (TTL, cap, divergence prompt, "Undone" finality), raw-FS gating contract (toggle, next-session-start semantics), new search tools (signatures, FR-017 auto-approval rationale, MetadataCache dependency), migration-policy contract for future schema versions.
+- **`.paw/work/multi-conversation-persistence/Docs.md`** (new): Technical reference following the style of `.paw/work/chat-ux-vault-tools/Docs.md`. Sections: multi-conversation model (entities, lifecycle, archive policy, per-conversation runtime architecture), persistence layout (`data.json` keys per store, schema version, corruption recovery via sibling `conversations_recovery.bak.json` file with auth/safety preservation guarantee), cross-restart Undo contract (TTL, cap, content-based divergence prompt, "Undone" finality), raw-FS gating contract (toggle, next-session-start semantics), new search tools (signatures, FR-017 auto-approval rationale, MetadataCache dependency), migration-policy contract for future schema versions.
 - **`README.md`**: New "v0.3 — Multi-Conversation & Persistence" H2 section near the top of release notes following the existing pattern (`README.md:31-47`). Cover: conversation picker, restart-resume, cross-restart Undo, raw-FS toggle (and one-time Notice on first v0.3 load explaining the change), three new search tools.
 - **`CHANGELOG.md`**: New v0.3 entry mirroring existing version section style (`CHANGELOG.md:6-24`). Categorized H3s: Added (picker, persistence, search tools, raw-FS toggle), Changed (Undo now survives restart; raw-FS tools no longer exposed by default), Migration (one-time Notice; how to re-enable raw-FS tools).
 - **`.github/copilot-instructions.md`**: No changes expected unless the deploy/test workflow shifts; verify no documented invariants are broken.
@@ -291,6 +304,9 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 #### Manual Verification:
 - [ ] README, CHANGELOG, and Docs.md are consistent with shipped behavior (no TBDs; toggle name and default exactly match the Settings UI; tool names exactly match the SDK manifest).
 - [ ] Docs.md "What is NOT in v0.3" enumerates the Out-of-Scope items from Spec § Scope (SC-012).
+- [ ] **SC-001 byte-identical persistence check**: take a snapshot of `data.json`, restart Obsidian without any new chat activity, take a second snapshot — the `conversations` subtree is byte-identical between snapshots (no spurious re-writes during quiescent load).
+- [ ] **SC-010 30-minute multi-story regression**: run all five user-story flows (P1–P5) for ~30 minutes, exercising at least one Stop mid-stream, one approval-prompt acceptance and one denial, one token rotation (via the auth settings), and the four edge cases (corruption recovery, 21st-conversation archival, file-modified-since-snapshot undo, file-deleted-since-snapshot undo). No stream is interrupted, no approval-prompt regression occurs, the Stop button works mid-stream, and token rotation continues to work as in v0.2.
+- [ ] **SC-009 test-count audit**: confirm `npm test` reports a total test count ≥ 410 (v0.2 baseline) + the sum of newly added tests across Phases 1–6, with zero regressions in any previously-passing suite.
 
 ---
 
