@@ -369,6 +369,11 @@ export class ChatView extends ItemView {
 
     this.unsubState = this.state.subscribe(() => this.syncList());
     this.unsubAuth = this.auth.subscribe((s) => this.renderAuth(s));
+    // Initial render so hydrated messages appear immediately on view
+    // open (subscribe only fires on subsequent changes; without this
+    // call a freshly opened view shows the title but no messages
+    // until the user does something that mutates state).
+    this.syncList();
     // v0.3 Phase 4: re-bind when the manager flips active conversations
     // (or when first hydrating from disk and the active runtime appears).
     this.unsubManager = this.manager.subscribe((ev) => {

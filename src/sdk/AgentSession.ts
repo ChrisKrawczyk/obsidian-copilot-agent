@@ -234,6 +234,10 @@ export interface AgentSession {
 }
 
 const SDK_IDLE_TIMEOUT_MS = 180_000;
+// SDK ceiling: passed as the second arg to session.sendAndWait so the
+// SDK's own (wall-clock, non-idle-aware) timeout doesn't fire before
+// our idle watchdog. Set high; our bumpIdleTimer is the actual guard.
+const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
 
 export class CopilotAgentSession implements AgentSession {
@@ -429,7 +433,7 @@ export class CopilotAgentSession implements AgentSession {
     // streaming path resets it on each delta / tool event.
     try {
       const outgoing = this.wrapWithPreamble(text);
-      const resp = await this.session.sendAndWait(outgoing);
+      const resp = await this.session.sendAndWait(outgoing, SDK_HARD_CEILING_MS);
       if (timedOut) {
         throw new Error(
           `Model went idle for over ${SDK_IDLE_TIMEOUT_MS / 1000}s`,
@@ -646,7 +650,7 @@ export class CopilotAgentSession implements AgentSession {
     // the queue draining loop below.
     const outgoing = this.wrapWithPreamble(text);
     session
-      .sendAndWait(outgoing)
+      .sendAndWait(outgoing, SDK_HARD_CEILING_MS)
       .then(
         (resp) => {
           settled = true;
@@ -1628,7 +1632,7 @@ export interface SdkToolExecutionCompleteEvent {
 }
 
 export interface SdkSession {
-  sendAndWait: (prompt: string) => Promise<unknown>;
+  sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;
   /**
