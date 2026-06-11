@@ -43,6 +43,7 @@ function makeFakeStore(): {
   setActiveSpy: ReturnType<typeof vi.fn>;
   recordUndoSpy: ReturnType<typeof vi.fn>;
   markUndoneSpy: ReturnType<typeof vi.fn>;
+  removeUndoEntrySpy: ReturnType<typeof vi.fn>;
 } {
   const state: FakeStoreState = { byId: new Map(), activeId: null };
 
@@ -77,6 +78,11 @@ function makeFakeStore(): {
       e.id === entryId ? { ...e, undone: true } : e,
     );
   });
+  const removeUndoEntrySpy = vi.fn((convId: string, entryId: string) => {
+    const c = state.byId.get(convId);
+    if (!c) return;
+    c.undoEntries = c.undoEntries.filter((e) => e.id !== entryId);
+  });
   const appendMessageSpy = vi.fn(
     (convId: string, msg: PersistedMessage) => {
       const c = state.byId.get(convId);
@@ -102,6 +108,7 @@ function makeFakeStore(): {
     listConversations,
     recordUndo: recordUndoSpy,
     markUndone: markUndoneSpy,
+    removeUndoEntry: removeUndoEntrySpy,
     appendMessage: appendMessageSpy,
     replaceMessage: replaceMessageSpy,
   } as unknown as ConversationsStore;
@@ -114,6 +121,7 @@ function makeFakeStore(): {
     setActiveSpy,
     recordUndoSpy,
     markUndoneSpy,
+    removeUndoEntrySpy,
   };
 }
 
@@ -576,6 +584,26 @@ describe("ConversationManager — runtime persistence wiring", () => {
       undone: true,
     });
     expect(markUndoneSpy).toHaveBeenCalledWith("conv-1", "u1");
+  });
+
+  test("runtime persist adapter mirrors 'evict' to store.removeUndoEntry (Phase 6 TTL backstop)", () => {
+    const { factory, built } = makeFakeFactory();
+    const { store, removeUndoEntrySpy } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    m.getActiveRuntime();
+    const adapter = built[0].persistAdapter!;
+    adapter.onJournalOp("evict", {
+      id: "u-stale",
+      kind: "modify",
+      scope: "vault",
+      path: "a.md",
+      recordedAt: 1,
+    });
+    expect(removeUndoEntrySpy).toHaveBeenCalledWith("conv-1", "u-stale");
   });
 });
 

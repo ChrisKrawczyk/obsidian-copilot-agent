@@ -16,6 +16,7 @@ import { ConversationPicker, confirmDestructive, promptForText } from "./Convers
 import { buildPickerItems, wouldTriggerArchiveOnCreate } from "./conversationPickerLogic";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
+import { runUndoFlow } from "./undoFlow";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -857,54 +858,25 @@ export class ChatView extends ItemView {
    * the user sees the reason (e.g. file has been modified since).
    */
   private async handleUndoClick(undoId: string): Promise<void> {
-    if (!this.undoJournal) {
-      new Notice("Undo is not available in this build.");
-      return;
-    }
-    const entry = this.undoJournal.get(undoId);
-    if (!entry) {
-      new Notice("Cannot undo: no journal entry for this action.");
-      return;
-    }
-    let outcome = await this.undoJournal.undo(entry.id);
-    // v0.3 Phase 6 (FR-012): divergence flow. When the file no longer
-    // matches the snapshot, the journal returns ok:false WITH a
-    // divergence code. Walk the user through a confirm overlay (reuses
-    // the picker's confirmDestructive) and retry with `{force:true}`
-    // if they accept. Any other ok:false (e.g. "no prior content")
-    // surfaces as a plain Notice — no force retry, those are bugs not
-    // user-overrideable conditions.
-    if (
-      !outcome.ok &&
-      outcome.divergence &&
-      outcome.divergence !== "ok"
-    ) {
-      const message = divergenceConfirmMessage(
-        outcome.divergence,
-        entry.path,
-      );
-      const accepted = await confirmDestructive(
-        this.app,
-        "Undo with divergence",
-        message,
-        "Revert anyway",
-      );
-      if (!accepted) return;
-      outcome = await this.undoJournal.undo(entry.id, { force: true });
-    }
-    if (!outcome.ok) {
-      new Notice(outcome.reason ?? "Undo failed.");
-      return;
-    }
+    const result = await runUndoFlow(undoId, {
+      journal: this.undoJournal,
+      confirm: (title, body, ctaLabel) =>
+        confirmDestructive(this.app, title, body, ctaLabel),
+      notify: (m) => {
+        new Notice(m);
+      },
+    });
+    if (result.result !== "success") return;
+    const undoneId = result.entry.id;
     const messages = this.state.getMessages();
     for (const m of messages) {
-      const hit = m.toolCalls?.find((c) => c.undoId === entry.id);
+      const hit = m.toolCalls?.find((c) => c.undoId === undoneId);
       if (hit) {
         this.state.upsertToolCall(m.id, {
           id: hit.id,
           kind: hit.kind,
           outcome: "completed",
-          undoId: entry.id,
+          undoId: undoneId,
           undone: true,
         });
         break;
@@ -913,24 +885,8 @@ export class ChatView extends ItemView {
   }
 }
 
-/**
- * v0.3 Phase 6 (FR-012): user-facing copy for each divergence kind.
- * Centralised here so the strings are easy to review/translate later
- * and so tests can assert the prompt text without duplicating it.
- */
-function divergenceConfirmMessage(
-  divergence: "modified" | "missing" | "existed",
-  path: string,
-): string {
-  switch (divergence) {
-    case "modified":
-      return `"${path}" has been modified outside the agent since this action ran. Revert to the recorded snapshot anyway?`;
-    case "missing":
-      return `"${path}" no longer exists. Recreate it from the recorded snapshot?`;
-    case "existed":
-      return `A file already exists at "${path}". Overwrite it with the recorded snapshot?`;
-  }
-}
+// divergenceConfirmMessage moved to ./undoFlow.ts (Phase 6 refactor for
+// unit-testability).
 
 /**
  * Pull the undoId from a write-tool result. Our handlers return a

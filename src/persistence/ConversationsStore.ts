@@ -331,6 +331,26 @@ export class ConversationsStore {
   }
 
   /**
+   * v0.3 Phase 6: drop a single undo entry from a conversation. Used
+   * to mirror an in-memory `UndoJournal` eviction (TTL backstop or
+   * max-cap trim) so the persisted store doesn't accumulate ghost
+   * entries that the journal has already forgotten about. No-op if
+   * the conversation or entry is missing — callers (the manager's
+   * persist adapter) may run before the store has caught up.
+   */
+  removeUndoEntry(convId: string, entryId: string): void {
+    this.assertLoaded();
+    const idx = this.findConvIndex(convId);
+    if (idx < 0) return;
+    const conv = this.cached.conversations[idx];
+    const eIdx = conv.undoEntries.findIndex((e) => e.id === entryId);
+    if (eIdx < 0) return;
+    const next = conv.undoEntries.filter((_, i) => i !== eIdx);
+    this.replaceConvAt(idx, { ...conv, undoEntries: next });
+    this.markDirty();
+  }
+
+  /**
    * Drop undo entries older than the 7-day TTL across ALL persisted
    * conversations. Called from `main.ts` BEFORE any
    * `ConversationRuntime` is instantiated (per Phase 4 architecture)
@@ -392,11 +412,15 @@ export class ConversationsStore {
   }
 
   private requireConvIndex(convId: string): number {
-    const idx = this.cached.conversations.findIndex((c) => c.id === convId);
+    const idx = this.findConvIndex(convId);
     if (idx < 0) {
       throw new Error(`No conversation with id "${convId}" in store`);
     }
     return idx;
+  }
+
+  private findConvIndex(convId: string): number {
+    return this.cached.conversations.findIndex((c) => c.id === convId);
   }
 
   private replaceConvAt(idx: number, conv: PersistedConversation): void {

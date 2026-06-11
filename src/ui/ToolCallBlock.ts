@@ -38,6 +38,23 @@ export interface ToolCallBlockHandlers {
 }
 
 /**
+ * v0.3 Phase 6 (FR-016): pure decision helper extracted so the
+ * suppression logic can be unit-tested without standing up a DOM. The
+ * renderer calls this to decide whether to emit the Undo button.
+ */
+export function shouldRenderUndoButton(
+  call: Pick<ToolCall, "outcome" | "undoId" | "undone" | "name">,
+  handlers: Pick<ToolCallBlockHandlers, "onUndo" | "isUndoSuppressed">,
+): boolean {
+  if (call.outcome !== "completed") return false;
+  if (!call.undoId) return false;
+  if (call.undone) return false;
+  if (!handlers.onUndo) return false;
+  if (call.name && handlers.isUndoSuppressed?.(call.name)) return false;
+  return true;
+}
+
+/**
  * Render a single tool call as a collapsible `<details>` block. The
  * element is fully self-contained (no event listeners or component
  * lifecycle) so MessageRenderer can drop it and rebuild on any state
@@ -100,15 +117,10 @@ export function renderToolCallBlock(
   summary.appendChild(statusPill);
 
   // Undo button (rendered for completed write calls with an undoId).
-  const undoSuppressed =
-    !!call.name && !!handlers.isUndoSuppressed?.(call.name);
-  if (
-    call.outcome === "completed" &&
-    call.undoId &&
-    !call.undone &&
-    handlers.onUndo &&
-    !undoSuppressed
-  ) {
+  // v0.3 Phase 6 (FR-016): the suppression predicate gates this so
+  // raw-FS tool calls disappear from the action affordance when the
+  // user has the `exposeRawFsTools` setting OFF.
+  if (shouldRenderUndoButton(call, handlers)) {
     const undoBtn = document.createElement("button");
     undoBtn.type = "button";
     undoBtn.classList.add("copilot-agent-toolcall-undo");

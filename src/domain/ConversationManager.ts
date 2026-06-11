@@ -490,13 +490,16 @@ export class ConversationManager {
             });
           } else if (op === "mark-undone") {
             store.markUndone(id, entry.id);
+          } else if (op === "evict") {
+            // v0.3 Phase 6: the journal evicted an entry on its own
+            // (TTL backstop at hydrate, or future trim paths). Mirror
+            // the removal in the store so `data.json` doesn't keep
+            // ghost entries the in-memory journal has forgotten. The
+            // SF-2 cap path runs through `recordUndo` (which evicts
+            // store-side independently) so it does NOT come through
+            // here — only the standalone eviction surfaces does.
+            store.removeUndoEntry(id, entry.id);
           }
-          // "evict" is implicit on the store side — the in-memory
-          // journal evicted; the store's own 50-cap on `recordUndo`
-          // will mirror when the next add lands. Calling
-          // store.recordUndo above already returns evictedId for the
-          // store-side eviction (which we don't need to mirror back —
-          // the journal already evicted in lockstep).
         } catch (err) {
           console.error(
             "[ConversationManager] journal-op persist failed",
