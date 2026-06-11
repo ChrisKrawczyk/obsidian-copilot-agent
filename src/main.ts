@@ -18,6 +18,7 @@ import { createWriteTools } from "./tools/WriteTools";
 import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
+import { createSearchTools } from "./tools/SearchTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { UndoJournal } from "./domain/UndoJournal";
@@ -161,6 +162,12 @@ export default class CopilotAgentPlugin extends Plugin {
       obsidianApi,
       this.app.vault as unknown as Parameters<typeof createReadTools>[0],
     );
+    // v0.3 Phase 2: read-only search tools (search_by_tag, search_by_name,
+    // list_all_tags). All three skipPermission per FR-017.
+    const searchTools = createSearchTools(
+      obsidianApi,
+      this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+    );
     // Phase 4: vault-write note tools. Reuses writeTools' deps + the
     // shared ObsidianApi instance + a deterministic clock (for daily
     // notes). Each handler enforces FR-012 (read-only guard) where
@@ -204,6 +211,7 @@ export default class CopilotAgentPlugin extends Plugin {
           ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ],
         exposeRawFsToolsAtStartup,

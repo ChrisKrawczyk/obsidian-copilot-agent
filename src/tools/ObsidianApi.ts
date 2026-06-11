@@ -36,7 +36,8 @@ export type ApiResult<T> =
         | "index-unavailable"
         | "not-found"
         | "not-a-folder"
-        | "invalid-path";
+        | "invalid-path"
+        | "metadata-cache-not-ready";
       cause?: unknown;
     };
 
@@ -100,12 +101,34 @@ export interface AppLike {
     getLeaf?: (newLeaf?: boolean) => {
       openFile: (file: TFileLike) => Promise<void>;
     } | null;
+    /**
+     * v0.3 Phase 2 (FR-018): open a note by its link text (path or
+     * basename). The third argument is `newLeaf` — pass `false` to
+     * reuse the active leaf. Optional because older builds and test
+     * doubles may not implement it; the renderer treats absence as
+     * "best-effort no-op."
+     */
+    openLinkText?: (
+      linktext: string,
+      sourcePath: string,
+      newLeaf?: boolean,
+    ) => void | Promise<void>;
     /** Symbol to pass to getActiveViewOfType; supplied by `obsidian` at runtime. */
     markdownViewSymbol?: unknown;
   };
   metadataCache?: {
     resolvedLinks?: Record<string, Record<string, number>>;
     getFileCache?: (file: TFileLike) => FileCacheLike | null;
+    /**
+     * Native Obsidian: returns a record mapping tag-strings (WITH the
+     * leading `#`, e.g. `"#project/work"`) to the number of times that
+     * tag occurs across the vault. Optional because older Obsidian
+     * builds and our test doubles don't always implement it; the
+     * `listAllTags()` wrapper falls back to scanning `getFileCache()`
+     * per markdown file when this is absent. Both code paths produce
+     * the same `Record<"#tag", number>` shape.
+     */
+    getTags?: () => Record<string, number>;
   };
   /** `app.internalPlugins.plugins['daily-notes']?.instance?.options`. */
   internalPlugins?: {
@@ -234,6 +257,105 @@ export class ObsidianApi {
         return { ok: false, reason: "not-found" };
       }
       return { ok: true, value: cache };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
+   * v0.3 Phase 2: list every distinct tag in the vault, paired with its
+   * occurrence count. Native Obsidian exposes `metadataCache.getTags()`
+   * which already returns a `Record<"#tag", number>` shape; when that
+   * call is missing (older Obsidian builds / some test doubles) we
+   * fall back to scanning `getFileCache()` for each markdown file and
+   * tallying both the inline `cache.tags` and frontmatter `tags`/`tag`
+   * fields. Both code paths produce the SAME shape (keys retain the
+   * leading `#`) so callers don't need to branch on which path ran.
+   *
+   * Returns `metadata-cache-not-ready` only when both the native API
+   * is absent AND the file-cache fallback can't run (no markdown
+   * file iterator, or `getFileCache` is missing). This lets the agent
+   * retry per the "metadata cache populating" risk in the spec.
+   */
+  listAllTags(): ApiResult<Record<string, number>> {
+    const mc = this.app.metadataCache;
+    if (mc && typeof mc.getTags === "function") {
+      try {
+        const raw = mc.getTags();
+        if (raw && typeof raw === "object") {
+          // Trust Obsidian's shape but defensively normalise: keys
+          // missing the `#` get one prepended; non-numeric counts
+          // coerce to 0; empty keys drop out.
+          const out: Record<string, number> = {};
+          for (const [k, v] of Object.entries(raw)) {
+            const norm = normalizeTagKey(k);
+            if (!norm) continue;
+            const count = typeof v === "number" && Number.isFinite(v) ? v : 0;
+            out[norm] = (out[norm] ?? 0) + count;
+          }
+          return { ok: true, value: out };
+        }
+      } catch (e) {
+        return { ok: false, reason: "native-failed", cause: e };
+      }
+    }
+    // Fallback: walk all markdown files, tally tags via getFileCache.
+    if (
+      typeof this.app.vault.getMarkdownFiles !== "function" ||
+      !mc ||
+      typeof mc.getFileCache !== "function"
+    ) {
+      return { ok: false, reason: "metadata-cache-not-ready" };
+    }
+    try {
+      const tally: Record<string, number> = {};
+      const files = this.app.vault.getMarkdownFiles();
+      for (const file of files) {
+        const cache = mc.getFileCache(file);
+        if (!cache) continue;
+        for (const t of collectFileTagsForFallback(cache)) {
+          tally[t] = (tally[t] ?? 0) + 1;
+        }
+      }
+      return { ok: true, value: tally };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
+   * v0.3 Phase 2: every markdown file whose metadata cache reports the
+   * given tag (matching is exact and case-sensitive on the post-`#`
+   * string — Obsidian itself preserves case in its cache). Input may
+   * include or omit a leading `#`. Falls back to scanning `getFileCache`
+   * per markdown file, since Obsidian doesn't expose a single bulk
+   * "files-with-tag" call.
+   */
+  findFilesByTag(rawTag: string): ApiResult<TFileLike[]> {
+    const target = normalizeTagKey(rawTag);
+    if (!target) {
+      return { ok: false, reason: "invalid-path", cause: "empty tag" };
+    }
+    const mc = this.app.metadataCache;
+    if (
+      typeof this.app.vault.getMarkdownFiles !== "function" ||
+      !mc ||
+      typeof mc.getFileCache !== "function"
+    ) {
+      return { ok: false, reason: "metadata-cache-not-ready" };
+    }
+    try {
+      const files = this.app.vault.getMarkdownFiles();
+      const matches: TFileLike[] = [];
+      for (const file of files) {
+        const cache = mc.getFileCache(file);
+        if (!cache) continue;
+        const fileTags = collectFileTagsForFallback(cache);
+        if (fileTags.has(target)) {
+          matches.push(file);
+        }
+      }
+      return { ok: true, value: matches };
     } catch (e) {
       return { ok: false, reason: "native-failed", cause: e };
     }
@@ -691,4 +813,47 @@ function walkFolder(
     tree.children!.push(walkFolder(child, remainingDepth - 1, counter));
   }
   return tree;
+}
+
+/**
+ * v0.3 Phase 2 tag helpers.
+ * Tag keys throughout this module retain the leading `#` so the shape
+ * matches Obsidian's native `metadataCache.getTags()` exactly. `#` is
+ * lowercased away from the key (it's the literal hash character, not
+ * tag content); the rest of the string is left as-is so case-sensitive
+ * tag comparisons remain meaningful (Obsidian preserves case).
+ */
+export function normalizeTagKey(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  const stripped = raw.trim().replace(/^#+/, "");
+  return stripped.length > 0 ? `#${stripped}` : "";
+}
+
+/** Returns the set of `#tag` keys (with leading `#`) referenced by a file's cache. */
+export function collectFileTagsForFallback(
+  cache: FileCacheLike,
+): Set<string> {
+  const out = new Set<string>();
+  for (const t of cache.tags ?? []) {
+    const norm = normalizeTagKey(t.tag);
+    if (norm) out.add(norm);
+  }
+  const fm = cache.frontmatter as
+    | { tags?: unknown; tag?: unknown }
+    | undefined;
+  if (fm) {
+    const raw = fm.tags ?? fm.tag;
+    if (typeof raw === "string") {
+      for (const piece of raw.split(/[\s,]+/)) {
+        const norm = normalizeTagKey(piece);
+        if (norm) out.add(norm);
+      }
+    } else if (Array.isArray(raw)) {
+      for (const piece of raw) {
+        const norm = normalizeTagKey(piece);
+        if (norm) out.add(norm);
+      }
+    }
+  }
+  return out;
 }

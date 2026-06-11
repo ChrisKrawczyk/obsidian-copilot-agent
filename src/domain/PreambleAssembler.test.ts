@@ -80,6 +80,9 @@ describe("assemblePreamble", () => {
     const all = [
       ...READ_NOTE_TOOL_NAMES,
       ...WRITE_NOTE_TOOL_NAMES,
+      "search_by_tag",
+      "search_by_name",
+      "list_all_tags",
       "view",
       "read_file",
       "search_content",
@@ -88,6 +91,14 @@ describe("assemblePreamble", () => {
       "delete_file",
     ];
     expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("v0.3 Phase 2 search tools appear in the inventory marked R/O", () => {
+    for (const name of ["search_by_tag", "search_by_name", "list_all_tags"]) {
+      expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(
+        new RegExp(`\`${name}\`\\s+_\\(R/O\\)_`),
+      );
+    }
   });
 
   it("read-only entries are tagged R/O in the inventory; mutating entries are not", () => {

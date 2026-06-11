@@ -145,6 +145,23 @@ export class ChatView extends ItemView {
           reason: "Rejected by user.",
         }),
       onUndo: (id) => void this.handleUndoClick(id),
+      // v0.3 Phase 2 (FR-018, MF-3): clicking a search-result row opens
+      // the matched note in the active leaf. We reuse Obsidian's
+      // openLinkText so the user lands on the canonical resolved file
+      // (including any aliases / link-text resolution Obsidian applies).
+      onOpenLink: (linkText) => {
+        try {
+          (this.app.workspace as unknown as {
+            openLinkText?: (
+              link: string,
+              src: string,
+              newLeaf?: boolean,
+            ) => void;
+          }).openLinkText?.(linkText, "", false);
+        } catch (e) {
+          new Notice(`Could not open ${linkText}: ${(e as Error).message}`);
+        }
+      },
     });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });

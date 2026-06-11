@@ -143,9 +143,32 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
 ];
 
+/**
+ * v0.3 Phase 2 read-only search tools. All three are auto-approved
+ * under the FR-017 read-only gate (`skipPermission: true`).
+ */
+export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
+  {
+    name: "search_by_tag",
+    hint: "Find every note tagged with the given tag (with or without leading '#'). Capped at 200 results.",
+    readOnly: true,
+  },
+  {
+    name: "search_by_name",
+    hint: "Find notes by file basename. Ranks exact > prefix > substring (case-insensitive). Capped at 50.",
+    readOnly: true,
+  },
+  {
+    name: "list_all_tags",
+    hint: "List every distinct tag in the vault paired with its occurrence count, sorted by count desc.",
+    readOnly: true,
+  },
+];
+
 /** All tool entries combined, in inventory presentation order. */
 export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   ...READ_NOTE_TOOL_ENTRIES,
+  ...V03_READ_TOOL_ENTRIES,
   ...WRITE_NOTE_TOOL_ENTRIES,
   ...V01_TOOL_ENTRIES,
 ];
@@ -153,19 +176,23 @@ export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 /** Phase 3 read-only tool names — exported for `skipPermission` wiring. */
 export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 
+/** v0.3 Phase 2 read-only search-tool names. */
+export const V03_READ_TOOL_NAMES = V03_READ_TOOL_ENTRIES.map((e) => e.name);
+
 /** Phase 4/5 mutating + workspace tool names (excludes read-equivalent `open_note`). */
 export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.filter(
   (e) => !e.readOnly,
 ).map((e) => e.name);
 
 /**
- * v0.3 Phase 1: the six v0.1 raw-filesystem tool names. When the
- * "Expose v0.1 raw-filesystem tools" setting is OFF (default), these
- * are filtered out of the SDK-bound tools list and the preamble
- * inventory at plugin startup. The constant lives here (not in
- * `ReadTools.ts` / `WriteTools.ts`) so `main.ts`, `PreambleAssembler.ts`,
- * and the chat renderer (Phase 6 — historical entry rendering) can
- * import a single source of truth without re-declaring the list.
+ * v0.3 Phase 1: the six v0.1 raw-filesystem tool names. The
+ * "Expose v0.1 raw-filesystem tools" setting (default ON; users can
+ * opt OUT for a strictly vault-only agent) gates whether these are
+ * filtered out of the SDK-bound tools list and the preamble inventory
+ * at plugin startup. The constant lives here (not in `ReadTools.ts` /
+ * `WriteTools.ts`) so `main.ts`, `PreambleAssembler.ts`, and the chat
+ * renderer (Phase 6 — historical entry rendering) can import a single
+ * source of truth without re-declaring the list.
  */
 export const V01_RAW_FS_TOOL_NAMES = [
   "view",

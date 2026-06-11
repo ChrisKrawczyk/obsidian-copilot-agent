@@ -1,4 +1,9 @@
 import type { ToolCall } from "../domain/types";
+import {
+  parseSearchToolResult,
+  type SearchMatchView,
+  type TagCountView,
+} from "./searchResultRenderer";
 
 /**
  * Callback surface from the chat view into the block. The block emits
@@ -11,6 +16,14 @@ export interface ToolCallBlockHandlers {
   onApproveForSession?: (callId: string) => void;
   onReject?: (callId: string) => void;
   onUndo?: (callId: string) => void;
+  /**
+   * v0.3 Phase 2 (FR-018, MF-3): the block calls this when the user
+   * clicks a search-tool match row. The view wires it to
+   * `app.workspace.openLinkText(path, "", false)` so the target note
+   * opens in the active leaf. Kept as a callback (not a direct
+   * Obsidian dependency) so the block stays unit-testable.
+   */
+  onOpenLink?: (linkText: string) => void;
 }
 
 /**
@@ -110,7 +123,16 @@ export function renderToolCallBlock(
     body.appendChild(makeLabeledPre("Arguments", call.argsPreview));
   }
   if (call.outcome === "completed" && call.resultContent) {
-    body.appendChild(makeLabeledPre("Result", call.resultContent));
+    const matchesEl = renderSearchMatchesIfAny(
+      call.name,
+      call.resultContent,
+      handlers,
+    );
+    if (matchesEl) {
+      body.appendChild(matchesEl);
+    } else {
+      body.appendChild(makeLabeledPre("Result", call.resultContent));
+    }
   }
   if (
     (call.outcome === "errored" || call.outcome === "denied") &&
@@ -264,4 +286,103 @@ function statusText(outcome: ToolCall["outcome"]): string {
     default:
       return outcome;
   }
+}
+
+function renderSearchMatchesIfAny(
+  toolName: string | undefined,
+  resultJson: string,
+  handlers: ToolCallBlockHandlers,
+): HTMLElement | null {
+  const shape = parseSearchToolResult(toolName, resultJson);
+  if (!shape) return null;
+  if (shape.kind === "matches") {
+    return renderMatchList(shape.matches, shape.total, shape.truncated, handlers);
+  }
+  return renderTagList(shape.tags);
+}
+
+function renderMatchList(
+  matches: SearchMatchView[],
+  total: number,
+  truncated: boolean,
+  handlers: ToolCallBlockHandlers,
+): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.classList.add(
+    "copilot-agent-toolcall-section",
+    "copilot-agent-search-results",
+  );
+  const labelEl = document.createElement("div");
+  labelEl.classList.add("copilot-agent-toolcall-section-label");
+  labelEl.textContent =
+    matches.length === 0
+      ? "No matching notes."
+      : truncated
+        ? `${matches.length} of ${total} matches (truncated)`
+        : `${matches.length} match${matches.length === 1 ? "" : "es"}`;
+  wrap.appendChild(labelEl);
+
+  if (matches.length === 0) return wrap;
+
+  const list = document.createElement("ul");
+  list.classList.add("copilot-agent-search-list");
+  for (const m of matches) {
+    const li = document.createElement("li");
+    li.classList.add("copilot-agent-search-item");
+    const link = document.createElement("a");
+    link.classList.add("copilot-agent-search-link");
+    link.href = "#";
+    link.textContent = m.displayName;
+    link.title = m.path;
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handlers.onOpenLink?.(m.path);
+    });
+    li.appendChild(link);
+    const pathHint = document.createElement("span");
+    pathHint.classList.add("copilot-agent-search-path");
+    pathHint.textContent = ` — ${m.path}`;
+    li.appendChild(pathHint);
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  return wrap;
+}
+
+function renderTagList(
+  tags: TagCountView[],
+): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.classList.add(
+    "copilot-agent-toolcall-section",
+    "copilot-agent-search-results",
+  );
+  const labelEl = document.createElement("div");
+  labelEl.classList.add("copilot-agent-toolcall-section-label");
+  labelEl.textContent =
+    tags.length === 0
+      ? "No tags in vault."
+      : `${tags.length} tag${tags.length === 1 ? "" : "s"}`;
+  wrap.appendChild(labelEl);
+
+  if (tags.length === 0) return wrap;
+
+  const list = document.createElement("ul");
+  list.classList.add("copilot-agent-search-list");
+  for (const t of tags) {
+    const li = document.createElement("li");
+    li.classList.add("copilot-agent-search-item");
+    const tagEl = document.createElement("span");
+    tagEl.classList.add("copilot-agent-search-tag");
+    tagEl.textContent = t.tag;
+    li.appendChild(tagEl);
+    const countEl = document.createElement("span");
+    countEl.classList.add("copilot-agent-search-count");
+    countEl.textContent = ` × ${t.count}`;
+    li.appendChild(countEl);
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  return wrap;
 }
