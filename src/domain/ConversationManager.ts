@@ -40,7 +40,63 @@ import type {
 
 /** Spec FR-002 soft cap. */
 export const CONVERSATION_SOFT_CAP = 20;
-const DEFAULT_NAME = "Untitled";
+/** Bare default seed used when generating a timestamped placeholder
+ *  name (FR-005). Kept as a constant so the auto-name detection
+ *  regex and the formatter agree on the prefix. */
+const DEFAULT_NAME_PREFIX = "Untitled";
+/** Legacy bare default — retained for the `isDefaultConversationName`
+ *  matcher so conversations created before the timestamped variant
+ *  shipped still auto-rename on first send. */
+const DEFAULT_NAME = DEFAULT_NAME_PREFIX;
+
+/**
+ * FR-005 formatter: "Untitled YYYY-MM-DD HH:MM" in local time. Used as
+ * the seed for `createInternal` when no explicit name is provided so
+ * each new conversation starts with a unique, sortable placeholder
+ * label (the picker still applies " N" suffix-dedup if two are
+ * created in the same minute).
+ */
+export function formatUntitledName(now: number): string {
+  const d = new Date(now);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${DEFAULT_NAME_PREFIX} ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * FR-005 auto-name detector. Returns true iff `name` looks like one
+ * of the manager-generated placeholder names — i.e., the user has
+ * NOT manually renamed yet. Used by ChatView to decide whether the
+ * first user message should drive auto-naming.
+ *
+ * Patterns matched:
+ *   - "Untitled"
+ *   - "Untitled N"               (legacy bare-default + suffix-dedup)
+ *   - "Untitled YYYY-MM-DD HH:MM"
+ *   - "Untitled YYYY-MM-DD HH:MM N"
+ */
+export function isDefaultConversationName(name: string): boolean {
+  return /^Untitled(\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})?(\s+\d+)?$/.test(name);
+}
+
+/**
+ * FR-005 derivation: take the first non-empty line of the user's
+ * message, trim, and truncate to ~40 chars with ellipsis. Returns ""
+ * for empty / whitespace-only input so the caller can skip the
+ * rename. Surrogate-pair safe via Array.from.
+ */
+export function deriveConversationNameFromMessage(
+  text: string,
+  maxChars = 40,
+): string {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const chars = Array.from(trimmed);
+    if (chars.length <= maxChars) return trimmed;
+    return chars.slice(0, maxChars - 1).join("") + "…";
+  }
+  return "";
+}
 
 export interface ConversationManagerOptions {
   /** Factory that builds a runtime for a given conversation. */
@@ -137,7 +193,7 @@ export class ConversationManager {
     if (!resolved) resolved = this.pickFallbackActive();
     if (!resolved) {
       // Empty catalog → create a default.
-      resolved = this.createInternal(DEFAULT_NAME).id;
+      resolved = this.createInternal().id;
     }
 
     this.activeId = resolved;
@@ -222,6 +278,27 @@ export class ConversationManager {
     this.emit({ kind: "metadata-changed", id });
   }
 
+  /**
+   * Spec FR-005: if a conversation still bears one of the manager-
+   * generated placeholder names, derive a name from the first user
+   * message and rename. No-op when the name has already been
+   * user-customised (or auto-set on a prior turn). Idempotent —
+   * ChatView calls this on every send; only the first call where the
+   * predicate matches actually mutates.
+   *
+   * Returns `true` if a rename happened, `false` otherwise (caller
+   * can use this to log/audit but isn't expected to react).
+   */
+  maybeAutoNameFromFirstMessage(convId: string, firstMessage: string): boolean {
+    const conv = this.conversations.get(convId);
+    if (!conv) return false;
+    if (!isDefaultConversationName(conv.name)) return false;
+    const derived = deriveConversationNameFromMessage(firstMessage);
+    if (derived.length === 0) return false;
+    this.rename(convId, derived);
+    return true;
+  }
+
   archive(id: string): void {
     const conv = this.conversations.get(id);
     if (!conv) return;
@@ -230,7 +307,7 @@ export class ConversationManager {
     this.persistMetadataOnly(conv);
     if (this.activeId === id) {
       const fallback = this.pickFallbackActive();
-      const next = fallback ?? this.createInternal(DEFAULT_NAME).id;
+      const next = fallback ?? this.createInternal().id;
       const previous = this.activeId;
       this.activeId = next;
       if (this.store) this.store.setActiveId(next);
@@ -260,7 +337,7 @@ export class ConversationManager {
     if (this.activeId === id) {
       const previous = this.activeId;
       const fallback = this.pickFallbackActive();
-      const next = fallback ?? this.createInternal(DEFAULT_NAME).id;
+      const next = fallback ?? this.createInternal().id;
       this.activeId = next;
       if (this.store) this.store.setActiveId(next);
       this.emit({ kind: "active-changed", previousId: previous, nextId: next });
@@ -432,7 +509,13 @@ export class ConversationManager {
 
   private createInternal(name?: string): Conversation {
     const trimmed = name?.trim();
-    const seed = trimmed && trimmed.length > 0 ? trimmed : DEFAULT_NAME;
+    // Spec FR-005: when no explicit name is provided, seed with a
+    // timestamped placeholder so the user can distinguish freshly-
+    // created conversations in the picker before the first message
+    // arrives and auto-naming kicks in (ChatView.handleSend wires
+    // that via `maybeAutoNameFromFirstMessage`).
+    const seed =
+      trimmed && trimmed.length > 0 ? trimmed : formatUntitledName(this.now());
     const finalName = this.uniqueName(seed, null);
     this.idCounter += 1;
     const id = `conv-${this.idCounter}`;

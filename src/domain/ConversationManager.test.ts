@@ -9,6 +9,9 @@ import { describe, expect, test, vi } from "vitest";
 import {
   ConversationManager,
   CONVERSATION_SOFT_CAP,
+  deriveConversationNameFromMessage,
+  formatUntitledName,
+  isDefaultConversationName,
   type ConversationChangeEvent,
 } from "./ConversationManager";
 import type { Conversation } from "./Conversation";
@@ -208,7 +211,10 @@ describe("ConversationManager — hydration (FR-009)", () => {
     expect(m.list()).toHaveLength(1);
     expect(m.getActiveId()).toBe(activeId);
     expect(state.activeId).toBe(activeId);
-    expect(m.list()[0].name).toBe("Untitled");
+    // FR-005: timestamped default. Exact string is TZ-dependent so
+    // we assert the format rather than a fixed value.
+    expect(isDefaultConversationName(m.list()[0].name)).toBe(true);
+    expect(m.list()[0].name.startsWith("Untitled ")).toBe(true);
     // Regression: the freshly-minted default must exist in the store
     // BEFORE setActiveId runs (real ConversationsStore.setActiveId
     // throws if the id is absent).
@@ -294,25 +300,42 @@ describe("ConversationManager — hydration (FR-009)", () => {
 });
 
 describe("ConversationManager — create + auto-naming (FR-005)", () => {
-  test("first new() yields 'Untitled'", () => {
+  test("first new() yields a timestamped 'Untitled YYYY-MM-DD HH:MM' name", () => {
     const { factory } = makeFakeFactory();
     const { store } = makeFakeStore();
-    const m = new ConversationManager({ runtimeFactory: factory, store });
+    // Fixed `now` so the suffix-dedup path is exercised (hydrate +
+    // create share the same timestamp → second one needs " 2").
+    const fixed = Date.UTC(2026, 5, 11, 17, 0, 0); // 2026-06-11 17:00 UTC
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      now: () => fixed,
+    });
     m.hydrate({ conversations: [], activeConversationId: null });
-    // hydrate already created one default — clear by archiving and creating.
     const c = m.create();
-    expect(c.name).toBe("Untitled 2");
+    expect(isDefaultConversationName(c.name)).toBe(true);
+    // Must be the second one (suffix " 2") because hydrate created
+    // the first with the same timestamp.
+    expect(c.name.endsWith(" 2")).toBe(true);
   });
 
-  test("collisions get numeric suffix '… 2', '… 3'", () => {
+  test("collisions get numeric suffix '… 2', '… 3' on the timestamped seed", () => {
     const { factory } = makeFakeFactory();
     const { store } = makeFakeStore();
-    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const fixed = Date.UTC(2026, 5, 11, 17, 0, 0);
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      now: () => fixed,
+    });
     m.hydrate({ conversations: [], activeConversationId: null });
     const c2 = m.create();
     const c3 = m.create();
-    expect(c2.name).toBe("Untitled 2");
-    expect(c3.name).toBe("Untitled 3");
+    // hydrate took the bare timestamped seed; c2 → " 2"; c3 → " 3".
+    expect(c2.name.endsWith(" 2")).toBe(true);
+    expect(c3.name.endsWith(" 3")).toBe(true);
+    expect(isDefaultConversationName(c2.name)).toBe(true);
+    expect(isDefaultConversationName(c3.name)).toBe(true);
   });
 
   test("explicit name preserved if unique", () => {
@@ -674,3 +697,125 @@ describe("ConversationManager — subscribe events", () => {
     expect(events.filter((e) => e.kind === "active-changed")).toHaveLength(0);
   });
 });
+
+// ---------- FR-005 auto-naming helpers + manager hook ----------
+
+describe("formatUntitledName (FR-005)", () => {
+  test("produces 'Untitled YYYY-MM-DD HH:MM' in local time", () => {
+    // Build a Date locally so the assertion matches whatever TZ the
+    // test runs in (CI agents can be UTC, dev machines often aren't).
+    const d = new Date(2026, 5, 11, 14, 5, 0); // local 2026-06-11 14:05
+    const out = formatUntitledName(d.getTime());
+    expect(out).toBe("Untitled 2026-06-11 14:05");
+  });
+
+  test("pads single-digit month/day/hour/minute", () => {
+    const d = new Date(2026, 0, 3, 4, 7, 0); // local 2026-01-03 04:07
+    expect(formatUntitledName(d.getTime())).toBe("Untitled 2026-01-03 04:07");
+  });
+});
+
+describe("isDefaultConversationName (FR-005)", () => {
+  test("matches bare 'Untitled' + numeric-suffix variant", () => {
+    expect(isDefaultConversationName("Untitled")).toBe(true);
+    expect(isDefaultConversationName("Untitled 2")).toBe(true);
+    expect(isDefaultConversationName("Untitled 42")).toBe(true);
+  });
+
+  test("matches timestamped variant + its numeric suffix", () => {
+    expect(isDefaultConversationName("Untitled 2026-06-11 14:05")).toBe(true);
+    expect(isDefaultConversationName("Untitled 2026-06-11 14:05 3")).toBe(true);
+  });
+
+  test("rejects user-chosen names", () => {
+    expect(isDefaultConversationName("Trip planning")).toBe(false);
+    expect(isDefaultConversationName("Untitled stuff")).toBe(false);
+    expect(isDefaultConversationName("untitled")).toBe(false); // case-sensitive
+    // Note: "Untitled 2026" (a 4-digit-only suffix without a date) is
+    // not distinguished from the legitimate " N" disambiguation
+    // suffix — small ambiguity, accepted.
+  });
+});
+
+describe("deriveConversationNameFromMessage (FR-005)", () => {
+  test("uses the first non-empty line", () => {
+    expect(deriveConversationNameFromMessage("\n\nHello there\nrest")).toBe(
+      "Hello there",
+    );
+  });
+
+  test("trims leading/trailing whitespace", () => {
+    expect(deriveConversationNameFromMessage("   hi   ")).toBe("hi");
+  });
+
+  test("truncates to ~40 chars with ellipsis", () => {
+    const long = "x".repeat(80);
+    const out = deriveConversationNameFromMessage(long);
+    expect(Array.from(out)).toHaveLength(40);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  test("emoji counted as one char (surrogate-safe)", () => {
+    const out = deriveConversationNameFromMessage("🎯".repeat(50), 10);
+    expect(Array.from(out)).toHaveLength(10);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  test("returns empty string when input is blank", () => {
+    expect(deriveConversationNameFromMessage("   \n\n  ")).toBe("");
+  });
+});
+
+describe("ConversationManager.maybeAutoNameFromFirstMessage (FR-005)", () => {
+  test("renames when name is still a default + first-message non-empty", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const id = m.hydrate({ conversations: [], activeConversationId: null });
+    const changed = m.maybeAutoNameFromFirstMessage(id, "Plan a hike");
+    expect(changed).toBe(true);
+    expect(m.get(id)?.name).toBe("Plan a hike");
+  });
+
+  test("no-op when the user has already renamed", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const id = m.hydrate({ conversations: [], activeConversationId: null });
+    m.rename(id, "My custom name");
+    const changed = m.maybeAutoNameFromFirstMessage(id, "Tell me a joke");
+    expect(changed).toBe(false);
+    expect(m.get(id)?.name).toBe("My custom name");
+  });
+
+  test("no-op when first-message content is blank", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const id = m.hydrate({ conversations: [], activeConversationId: null });
+    const before = m.get(id)?.name;
+    const changed = m.maybeAutoNameFromFirstMessage(id, "   \n  ");
+    expect(changed).toBe(false);
+    expect(m.get(id)?.name).toBe(before);
+  });
+
+  test("no-op when convId is unknown", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    expect(m.maybeAutoNameFromFirstMessage("nope", "hello")).toBe(false);
+  });
+
+  test("idempotent: second call after rename does nothing", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const id = m.hydrate({ conversations: [], activeConversationId: null });
+    expect(m.maybeAutoNameFromFirstMessage(id, "First message text")).toBe(true);
+    expect(m.maybeAutoNameFromFirstMessage(id, "Different second message")).toBe(false);
+    expect(m.get(id)?.name).toBe("First message text");
+  });
+});
+
+

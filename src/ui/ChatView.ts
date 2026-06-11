@@ -231,8 +231,12 @@ export class ChatView extends ItemView {
         })();
       },
     });
-    header.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
-    this.statusEl = header.createDiv({
+    // v0.3 Phase 5 hotfix: title + status share a flex row underneath
+    // the picker so the model name ("Connected · gpt-4o") stays
+    // visible alongside the title (the original v0.2 layout).
+    const titleRow = header.createDiv({ cls: "copilot-agent-header-row" });
+    titleRow.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
+    this.statusEl = titleRow.createDiv({
       cls: "copilot-agent-status",
       text: "…",
     });
@@ -517,6 +521,21 @@ export class ChatView extends ItemView {
     // persisted as `pending` so the conversation row has a slot for
     // the final replace at the end of the turn.
     if (convId) {
+      // v0.3 Phase 5 follow-up (FR-005): auto-derive a conversation
+      // name from the very first user message. The manager itself
+      // gates on "is the current name still a default?" so this is
+      // safe to call unconditionally — if the user already renamed
+      // the conversation, it's a no-op.
+      const userMsgCount = state
+        .getMessages()
+        .filter((m) => m.role === "user").length;
+      if (userMsgCount === 1) {
+        try {
+          this.manager.maybeAutoNameFromFirstMessage(convId, text);
+        } catch (e) {
+          console.warn("[ChatView] auto-name failed", e);
+        }
+      }
       const userMsg = state
         .getMessages()
         .find((m) => m.id === userMsgId);

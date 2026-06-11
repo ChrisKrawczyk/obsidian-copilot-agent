@@ -31,6 +31,12 @@
   border-bottom: 1px solid var(--background-modifier-border);
   flex: 0 0 auto;
 }
+.copilot-agent-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
 
 /* v0.3 Phase 5: conversation picker dropdown anchored at top of the
    chat header. Acts as a button that opens an Obsidian Menu. */
