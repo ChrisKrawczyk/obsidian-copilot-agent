@@ -125,7 +125,6 @@ export class ConversationsStore {
   private loaded = false;
   private dirty = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private debounceResolve: (() => void) | null = null;
   private readonly debounceMs: number;
   private readonly now: () => number;
   /** v0.3 Phase 6: fires the SC-011 size warning exactly once. */
@@ -221,6 +220,19 @@ export class ConversationsStore {
     this.assertLoaded();
     const cleaned = cloneConversation(conv);
     const idx = this.cached.conversations.findIndex((c) => c.id === cleaned.id);
+    // CONS-2 / SC-001: guard against quiescent re-writes. When
+    // ConversationManager.hydrate mirrors persisted rows back into the
+    // store on plugin load, normalising both sides through
+    // cloneConversation gives us a deterministic JSON-stringify shape
+    // we can short-circuit on. Without this guard a clean restart
+    // marks the store dirty and re-flushes data.json even though no
+    // user action occurred.
+    if (idx >= 0) {
+      const existingNorm = cloneConversation(this.cached.conversations[idx]);
+      if (JSON.stringify(existingNorm) === JSON.stringify(cleaned)) {
+        return;
+      }
+    }
     const next = [...this.cached.conversations];
     if (idx >= 0) {
       next[idx] = cleaned;
@@ -386,14 +398,7 @@ export class ConversationsStore {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    const pendingResolve = this.debounceResolve;
-    this.debounceResolve = null;
-    try {
-      await this.flushImmediate();
-    } finally {
-      // Wake any callers awaiting the prior debounced flush.
-      pendingResolve?.();
-    }
+    await this.flushImmediate();
   }
 
   /** Returns a snapshot of the in-memory state. Useful for tests and
@@ -441,12 +446,9 @@ export class ConversationsStore {
       return;
     }
     if (this.debounceTimer) return;
-    this.debounceResolve = null;
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
-      const resolve = this.debounceResolve;
-      this.debounceResolve = null;
-      void this.flushImmediate().finally(() => resolve?.());
+      void this.flushImmediate();
     }, this.debounceMs);
   }
 

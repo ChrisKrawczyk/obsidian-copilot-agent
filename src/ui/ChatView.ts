@@ -13,7 +13,7 @@ import type { ConversationManager } from "../domain/ConversationManager";
 import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
 import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
-import { buildPickerItems, wouldTriggerArchiveOnCreate } from "./conversationPickerLogic";
+import { buildPickerItems } from "./conversationPickerLogic";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
@@ -49,11 +49,12 @@ interface ChatViewDeps {
    */
   openSettings: () => void;
   /**
-   * v0.3 Phase 6 (FR-016): live snapshot of the user's
-   * `exposeRawFsTools` setting. We use a getter so a toggle in the
-   * settings tab takes effect on the next render without us having to
-   * subscribe to the safety store from inside the view. Used by the
-   * Undo-button suppression predicate handed to MessageRenderer.
+   * v0.3 Phase 6 (FR-016) + SINGLE-2 / FR-015: returns the
+   * `exposeRawFsTools` STARTUP snapshot (not the live setting). Used
+   * by the Undo-button suppression predicate handed to MessageRenderer
+   * so the UI matches the runtime's actual registered tool surface
+   * (which was frozen at plugin onload). main.ts wires this to
+   * `exposeRawFsToolsAtStartup`.
    */
   getExposeRawFsTools: () => boolean;
 }
@@ -199,20 +200,11 @@ export class ChatView extends ItemView {
       },
       onCreate: () => {
         try {
-          // Warn (non-blocking) before triggering the soft-cap auto-
-          // archive so the user understands why an old chat just
-          // disappeared from the list (FR-002).
-          if (
-            wouldTriggerArchiveOnCreate(
-              this.manager.listActive(),
-              CONVERSATION_SOFT_CAP,
-            )
-          ) {
-            new Notice(
-              `Soft cap of ${CONVERSATION_SOFT_CAP} conversations reached — archiving the oldest.`,
-              4000,
-            );
-          }
+          // CONS-4 / FR-002: the UI used to fire a generic "archiving
+          // the oldest" Notice here BEFORE create()/enforceSoftCap()
+          // ran, which couldn't name the archived conversation. The
+          // named Notice now fires from the manager subscription
+          // below in response to an `auto-archived` event.
           const conv = this.manager.create();
           return conv.id;
         } catch (e) {
@@ -286,11 +278,11 @@ export class ChatView extends ItemView {
       onUndo: (id) => void this.handleUndoClick(id),
       // v0.3 Phase 6 (FR-016): suppress the Undo affordance on
       // historical raw-FS tool calls when the user has the
-      // `exposeRawFsTools` setting OFF. The call name + result still
-      // render so the user can read what happened — only the action
-      // button disappears. Read live via `getExposeRawFsTools()` so
-      // toggling the setting takes effect on the next re-render
-      // without forcing a view reload.
+      // `exposeRawFsTools` setting OFF AT STARTUP. The call name +
+      // result still render so the user can read what happened —
+      // only the action button disappears. Reads the startup snapshot
+      // (per FR-015) so a mid-session toggle does not hide Undo for
+      // tools the runtime still has registered.
       isUndoSuppressed: (toolName) => {
         if (this.getExposeRawFsTools()) return false;
         return RAW_FS_TOOL_NAME_SET.has(toolName);
@@ -391,6 +383,15 @@ export class ChatView extends ItemView {
           this.unsubState = this.state.subscribe(() => this.syncList());
           this.syncList();
         }
+      }
+      if (ev.kind === "auto-archived") {
+        // CONS-4 / FR-002: surface a Notice naming the archived
+        // conversation so the user understands why an old chat just
+        // disappeared from the picker.
+        new Notice(
+          `Soft cap of ${CONVERSATION_SOFT_CAP} conversations reached — archived "${ev.name}".`,
+          4000,
+        );
       }
       // v0.3 Phase 5: picker mirrors the manager catalog. Cheap enough
       // to re-render on every event (≤ 20 items per FR-002).
@@ -540,6 +541,12 @@ export class ChatView extends ItemView {
     // wrong conversation's ChatState (and persist to the wrong row).
     const state = this.state;
     const convId = this.boundConversationId;
+    // SINGLE-1: bump lastActiveAt on the active conversation so the
+    // picker order and soft-cap victim selection reflect activity. A
+    // switch already calls touchActive via setActive; this covers the
+    // "send to the already-active conv" path that wouldn't otherwise
+    // refresh the timestamp.
+    this.manager.touchActive();
     const userMsgId = state.append({ role: "user", content: text });
     const placeholderId = state.append({
       role: "assistant",
@@ -779,29 +786,7 @@ export class ChatView extends ItemView {
         // transient `pending_approval` pseudo-state used while a
         // prompt is awaiting the user). Only terminal outcomes
         // belong in the persisted shape.
-        const persistedToolCalls = finalMsg.toolCalls
-          ?.filter((tc) =>
-            tc.outcome === "completed" ||
-            tc.outcome === "errored" ||
-            tc.outcome === "approved" ||
-            tc.outcome === "denied",
-          )
-          .map((tc) => ({
-            id: tc.id,
-            kind: tc.kind,
-            name: tc.name,
-            source: tc.source,
-            outcome: tc.outcome as
-              | "completed"
-              | "errored"
-              | "approved"
-              | "denied",
-            detail: tc.detail,
-            argsPreview: tc.argsPreview,
-            resultContent: tc.resultContent,
-            undoId: tc.undoId,
-            undone: tc.undone,
-          }));
+        const persistedToolCalls = toPersistedToolCalls(finalMsg.toolCalls);
         this.manager.persistMessageReplace(convId, placeholderId, {
           content: finalMsg.content,
           status,
@@ -879,6 +864,23 @@ export class ChatView extends ItemView {
           undoId: undoneId,
           undone: true,
         });
+        // CONS-1 / FR-013: also persist the updated `toolCalls[].undone`
+        // flag so a restart sees the entry as reverted instead of
+        // re-rendering the Undo button. Without this write the
+        // ConversationsStore.markUndone (which flips the journal entry)
+        // and the rendered tool-call block fall out of sync on reload.
+        const convId = this.boundConversationId;
+        if (convId) {
+          const updated = this.state
+            .getMessages()
+            .find((mm) => mm.id === m.id);
+          const persistedToolCalls = toPersistedToolCalls(updated?.toolCalls);
+          if (persistedToolCalls) {
+            this.manager.persistMessageReplace(convId, m.id, {
+              toolCalls: persistedToolCalls,
+            });
+          }
+        }
         break;
       }
     }
@@ -905,5 +907,42 @@ function extractUndoId(raw: string | undefined): string | undefined {
     // Result wasn't JSON; that's expected for many built-in tools.
   }
   return undefined;
+}
+
+/**
+ * Map ChatState `ToolCall[]` → `PersistedMessage["toolCalls"]`. Drops
+ * the transient `pending_approval` outcome (only terminal outcomes
+ * belong on disk). Used by the streaming send-completion writer AND by
+ * the Undo flow's persistence write so cross-restart Undo state stays
+ * in sync with the journal entry's `undone` flag (CONS-1, FR-013).
+ */
+function toPersistedToolCalls(
+  toolCalls: import("../domain/types").ToolCall[] | undefined,
+): PersistedMessage["toolCalls"] | undefined {
+  if (!toolCalls) return undefined;
+  return toolCalls
+    .filter(
+      (tc) =>
+        tc.outcome === "completed" ||
+        tc.outcome === "errored" ||
+        tc.outcome === "approved" ||
+        tc.outcome === "denied",
+    )
+    .map((tc) => ({
+      id: tc.id,
+      kind: tc.kind,
+      name: tc.name,
+      source: tc.source,
+      outcome: tc.outcome as
+        | "completed"
+        | "errored"
+        | "approved"
+        | "denied",
+      detail: tc.detail,
+      argsPreview: tc.argsPreview,
+      resultContent: tc.resultContent,
+      undoId: tc.undoId,
+      undone: tc.undone,
+    }));
 }
 

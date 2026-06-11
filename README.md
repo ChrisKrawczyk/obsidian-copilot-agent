@@ -110,7 +110,7 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 v0.1 tests retained and unchanged; v0.2 brings the total to **401** across domain (SafetyPolicy, UndoJournal, VaultPath, ChatState, PreambleAssembler), tools (ReadTools, WriteTools, ReadNoteTools, WriteNoteTools, ObsidianApi, TaskFormat, FindTasks, UpdateTask, DailyNotePath), UI (chatKeydown), auth, and the SDK adapter (AgentSession).
+166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brings the total to **609** across the v0.2 baseline plus the new domain modules (ConversationManager, ConversationRuntime, UndoJournal cross-restart + persistence, toolGating, formatToday, lifecycle), persistence (ConversationsStore, migrate), tools (SearchTools), UI (ConversationPicker logic, undoFlow, ToolCallBlock suppression, searchResultRenderer), and settings (SafetySettingsStore exposeRawFsTools).
 
 ## Reference
 

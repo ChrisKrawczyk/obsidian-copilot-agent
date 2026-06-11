@@ -110,7 +110,15 @@ export interface ConversationManagerOptions {
 export type ConversationChangeEvent =
   | { kind: "list-changed" }
   | { kind: "active-changed"; previousId: string | null; nextId: string | null }
-  | { kind: "metadata-changed"; id: string };
+  | { kind: "metadata-changed"; id: string }
+  /**
+   * CONS-4 / FR-002: emitted by `enforceSoftCap` AFTER it archives a
+   * conversation to bring the active count back to the soft cap. The
+   * UI uses this to surface a one-time Notice that names the archived
+   * conversation. Always follows the corresponding `archive` →
+   * `list-changed` event for the same id.
+   */
+  | { kind: "auto-archived"; id: string; name: string };
 
 export type ConversationListener = (event: ConversationChangeEvent) => void;
 
@@ -248,6 +256,11 @@ export class ConversationManager {
     const previous = this.activeId;
     this.activeId = id;
     if (this.store) this.store.setActiveId(id);
+    // SINGLE-1: bump lastActiveAt on the newly-active conversation so
+    // the picker order and soft-cap victim selection reflect actual
+    // usage. touchActive() emits its own metadata-changed event; the
+    // active-changed event below is still needed for runtime rebind.
+    this.touchActive();
     this.emit({ kind: "active-changed", previousId: previous, nextId: id });
   }
 
@@ -349,11 +362,18 @@ export class ConversationManager {
    *  send paths. Persistence is a separate write-through via the
    *  store's appendMessage, but UI still benefits from a fresh sort
    *  key as soon as a turn starts. */
+  /**
+   * SINGLE-1: bump `lastActiveAt` on the active conversation and
+   * mirror the change into the store so picker order and the
+   * soft-cap archive-victim selection reflect real usage. Called
+   * from `setActive()` (switch) and from ChatView (send-start).
+   */
   touchActive(): void {
     if (!this.activeId) return;
     const conv = this.conversations.get(this.activeId);
     if (!conv) return;
     conv.lastActiveAt = this.now();
+    this.persistMetadataOnly(conv);
     this.emit({ kind: "metadata-changed", id: conv.id });
   }
 
@@ -583,14 +603,17 @@ export class ConversationManager {
     // so naturally last in the sort, but double-check).
     const target = active[0];
     if (!target) return;
+    let victim = target;
     if (target.id === this.activeId) {
       // Don't archive the active conversation; pick the next.
       const next = active[1];
       if (!next) return;
-      this.archive(next.id);
-      return;
+      victim = next;
     }
-    this.archive(target.id);
+    this.archive(victim.id);
+    // CONS-4: name the archived conversation in a follow-up event so
+    // the UI can surface a Notice that tells the user which one went.
+    this.emit({ kind: "auto-archived", id: victim.id, name: victim.name });
   }
 
   private pickFallbackActive(): string | null {

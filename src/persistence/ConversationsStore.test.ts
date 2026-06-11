@@ -213,6 +213,35 @@ describe("ConversationsStore — debounce + flushNow", () => {
     await store.flushNow();
     expect(io.saveData).not.toHaveBeenCalled();
   });
+
+  it("upsertConversation is a no-op when the row matches existing state (CONS-2 / SC-001)", async () => {
+    // Arrange: a store pre-loaded with an existing conversation row,
+    // mirroring the post-quiescent-restart shape.
+    const seed: PersistedConversation = {
+      id: "c1",
+      name: "Already there",
+      createdAt: 100,
+      lastActiveAt: 200,
+      messages: [],
+      undoEntries: [],
+    };
+    const io = makeIO({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [seed],
+      activeConversationId: "c1",
+    });
+    const { store } = makeStore({ io, debounceMs: 500 });
+    await store.load();
+    expect(io.saveData).not.toHaveBeenCalled();
+
+    // Act: ConversationManager.hydrate() mirrors the persisted row
+    // back into the store. With the equality guard this is a no-op.
+    store.upsertConversation({ ...seed });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Assert: no spurious flush.
+    expect(io.saveData).not.toHaveBeenCalled();
+  });
 });
 
 describe("ConversationsStore — write tail-serialization", () => {

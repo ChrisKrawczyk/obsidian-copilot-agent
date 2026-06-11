@@ -72,13 +72,13 @@ Copied from `Spec.md` § Scope / Out of Scope, with planning-layer additions not
 
 <!-- Items the spec mentions in passing or that emerged during research as "would be nice but not in v0.3" -->
 
-- [ ] "Show archived" gesture in the picker (spec FR-002 retains data on disk to enable this later).
-- [ ] Conversation export / import (Out of Scope, but persisted shape is already versioned and serializable).
-- [ ] fzf-style fuzzy ranking for `search_by_name` (Assumption notes substring + bucket ranking is sufficient for v0.3).
-- [ ] Per-conversation model selection (Out of Scope; would slot into the picker UI).
-- [ ] Inline "Restore archived" command and an Obsidian command-palette entry for switching conversations by name.
-- [ ] Snapshot compression for large undo `before`/`after` payloads to push past the 5 MB soft limit gracefully.
-- [ ] A shared `PluginDataService` that consolidates the three top-level-merge stores (`auth`, `safety`, `conversations`) behind one tail-serialized writer.
+- [x] [deferred] "Show archived" gesture in the picker (spec FR-002 retains data on disk to enable this later).
+- [x] [deferred] Conversation export / import (Out of Scope, but persisted shape is already versioned and serializable).
+- [x] [deferred] fzf-style fuzzy ranking for `search_by_name` (Assumption notes substring + bucket ranking is sufficient for v0.3).
+- [x] [deferred] Per-conversation model selection (Out of Scope; would slot into the picker UI).
+- [x] [deferred] Inline "Restore archived" command and an Obsidian command-palette entry for switching conversations by name.
+- [x] [deferred] Snapshot compression for large undo `before`/`after` payloads to push past the 5 MB soft limit gracefully.
+- [x] [deferred] A shared `PluginDataService` that consolidates the three top-level-merge stores (`auth`, `safety`, `conversations`) behind one tail-serialized writer.
 
 ---
 

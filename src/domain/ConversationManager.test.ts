@@ -416,6 +416,39 @@ describe("ConversationManager — soft cap (FR-002)", () => {
     // The originally-active (and oldest) was protected.
     expect(m.get(activeId)?.archived).toBeFalsy();
   });
+
+  test("auto-archive emits an `auto-archived` event naming the archived conversation (CONS-4)", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    let t = 1000;
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      now: () => t++,
+    });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    // Rename the seed so the archived victim has a deterministic name
+    // we can assert against.
+    const seedId = m.getActiveId()!;
+    m.rename(seedId, "Oldest");
+    // Switch active off the seed BEFORE filling — otherwise enforceSoftCap
+    // protects the active and archives a different conversation.
+    for (let i = 0; i < CONVERSATION_SOFT_CAP - 1; i++) m.create();
+    const events: ConversationChangeEvent[] = [];
+    m.subscribe((e) => events.push(e));
+    // Switch active to a non-seed conv so the seed becomes the archive
+    // victim on the next overflow-create.
+    const nonSeed = m.list().find((c) => c.id !== seedId)!;
+    m.setActive(nonSeed.id);
+    m.create(); // overflow
+    const archivedEv = events.find((e) => e.kind === "auto-archived");
+    expect(archivedEv).toBeDefined();
+    expect(archivedEv).toEqual({
+      kind: "auto-archived",
+      id: seedId,
+      name: "Oldest",
+    });
+  });
 });
 
 describe("ConversationManager — rename / archive / remove", () => {

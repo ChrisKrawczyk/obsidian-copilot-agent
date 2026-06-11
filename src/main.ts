@@ -22,7 +22,6 @@ import { createWriteNoteTools } from "./tools/WriteNoteTools";
 import { createSearchTools } from "./tools/SearchTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
-import { UndoJournal } from "./domain/UndoJournal";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
@@ -32,6 +31,7 @@ import { flushThenDispose, makeQuitFlushHandler } from "./lifecycle";
 import {
   hydrateChatState,
   type ConversationRuntime,
+  makeRuntimeJournal,
   type ConversationRuntimeFactory,
 } from "./domain/ConversationRuntime";
 
@@ -218,17 +218,18 @@ export default class CopilotAgentPlugin extends Plugin {
       hydration,
       persistAdapter,
     ) => {
-      const journal = new UndoJournal({
-        vault: this.app.vault as unknown as ConstructorParameters<
-          typeof UndoJournal
-        >[0] extends { vault: infer V }
-          ? V
-          : never,
-        initialEntries: hydration?.undoEntries,
-        persist: persistAdapter
-          ? (op, entry) => persistAdapter.onJournalOp(op, entry)
-          : undefined,
-      });
+      // CONS-3 / Plan Phase 6: use the helper so the runtime journal
+      // gets the defensive TTL backstop (`loadOptions.ttlMs`). The
+      // authoritative 7-day prune still runs in `ConversationsStore.
+      // pruneOnLoad` before any runtime is materialised; this guard is
+      // for the rare case where a stale entry slips past the
+      // pre-runtime prune (e.g. a never-opened conversation hydrating
+      // after a long sleep).
+      const journal = makeRuntimeJournal(
+        this.app.vault as unknown as Parameters<typeof makeRuntimeJournal>[0],
+        hydration?.undoEntries,
+        persistAdapter,
+      );
 
       const readTools = createReadTools(
         this.app.vault as unknown as Parameters<typeof createReadTools>[0],
@@ -489,8 +490,12 @@ export default class CopilotAgentPlugin extends Plugin {
     registerChatView(this, {
       manager: conversationManager,
       auth: controller,
-      getExposeRawFsTools: () =>
-        safetySettingsStore.snapshot().exposeRawFsTools,
+      // SINGLE-2 / FR-015: Undo suppression must match the runtime's
+      // actual tool surface, which was frozen at plugin onload via
+      // `exposeRawFsToolsAtStartup`. Reading the live setting here
+      // would let a mid-session toggle hide Undo buttons even though
+      // the running runtime still has those tools registered.
+      getExposeRawFsTools: () => exposeRawFsToolsAtStartup,
       openSettings: () => {
         const setting = (this.app as unknown as {
           setting?: {
