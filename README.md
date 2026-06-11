@@ -2,7 +2,21 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.2 — Phase 1–7 complete. Working end-to-end on Windows desktop. Adds keyboard-first chat, vault-aware preamble, and Obsidian-API-backed note + task tools on top of the v0.1 spike. Not yet packaged for distribution.
+> **Status:** v0.3 — Phase 1–7 complete. Adds multi-conversation support, cross-restart persistence, divergence-aware Undo, three new vault search tools, and an opt-out "raw-FS tools" safety toggle on top of the v0.2 chat UX. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+
+## What's new in v0.3
+
+- **Multi-conversation chat.** A conversation picker at the top of the chat pane (current name + caret). Create, switch, rename, and delete conversations from the dropdown. Up to 20 active conversations; the 21st auto-archives the oldest non-active one (a one-time Notice tells you which). New conversations get a `Untitled YYYY-MM-DD HH:MM` placeholder name and auto-rename from the first non-empty line of your first message (≤ 40 chars). A manual rename always wins over the auto-name.
+- **Cross-restart persistence.** The conversation list, per-conversation message history, and per-conversation undo journals survive plugin reload, Obsidian restart, and OS reboot. Writes are debounced (≤1 per 500 ms) plus an immediate flush on Obsidian's `quit` event so OS-level shutdown still persists everything. The previously active conversation re-hydrates on plugin load and the model name reappears in the header status pill.
+- **Cross-restart Undo with divergence prompt.** Undo entries persist alongside their conversation (50 most recent per conversation, 7-day TTL). After a restart, the Undo button on a tool-call block still works. If the file has been modified, deleted, or recreated outside the agent since the recorded snapshot, an overlay describes the divergence and you can choose **Cancel** or **Revert anyway** (force the revert). Once dismissed, the Undo flips to a "reverted" pill that survives a fast restart (immediate flush on `markUndone`).
+- **Vault-first nudge with raw-FS fallback.** A new safety toggle "Expose v0.1 raw-filesystem tools" defaults **ON**. The six v0.1 raw-FS tools (`view`, `read_file`, `search_content`, `create_file`, `edit_file`, `delete_file`) remain registered as a defensive fallback while the preamble's tool inventory marks them as `(fallback)` and instructs the model to reach for the vault-aware tools first. Users who want a strictly vault-only surface can toggle the setting OFF; the change takes effect on the next plugin reload (next session start). While OFF, the raw-FS tools are not registered with the SDK and are absent from the preamble's tool inventory; historical raw-FS tool-call blocks still render their name + result, but the Undo button is suppressed.
+- **Three new auto-approved search tools** — `search_by_tag`, `search_by_name`, `list_all_tags`. All read-only, vault-scoped, and backed by Obsidian's `MetadataCache`.
+- **Corruption recovery.** If `data.json` becomes unreadable, the plugin preserves the malformed blob at `<plugin-dir>/conversations_recovery.bak.json`, surfaces a Notice naming the sidecar, and starts from defaults. Auth and safety settings survive recovery so you don't have to reconnect.
+- **5 MB size warning.** A one-time Notice fires when `data.json` crosses 5 MB. Address it by deleting unused conversations.
+
+## What is intentionally NOT in v0.3
+
+MCP integration, extra-vault filesystem roots, model picker UI, mid-session settings reload, tag rename/create, per-vault Daily Notes target override, showing or restoring archived conversations from the picker, conversation export/import, sharing conversations across vaults or syncing through Obsidian Sync, search-by-content fuzzy matching, and cross-conversation tool-call inspection. See `.paw/work/multi-conversation-persistence/Docs.md` § "What is NOT in v0.3" for the full enumeration and `.paw/work/multi-conversation-persistence/ImplementationPlan.md` for deferred candidates.
 
 ## What's new in v0.2
 
