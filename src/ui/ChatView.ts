@@ -94,6 +94,12 @@ export class ChatView extends ItemView {
    *  freeze the right runtime's placeholder even after a mid-stream
    *  active switch. */
   private currentStreamState?: ChatState;
+  /** v0.3 Phase 4: AgentSession driving the in-flight stream. Captured
+   *  at handleSend so handleStop cancels the originating runtime's
+   *  session even if the user switched the active conversation
+   *  mid-stream (Phase 5 picker). Without this, this.agent points at
+   *  the NEW active runtime and we'd never abort the actual stream. */
+  private currentStreamSession?: AgentSession;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private unsubManager?: () => void;
@@ -362,7 +368,12 @@ export class ChatView extends ItemView {
     }
     this.sendBtnEl.disabled = true;
     try {
-      await this.agent?.cancelCurrent();
+      // Cancel the ORIGINATING session, not whatever `this.agent` now
+      // points at — a mid-stream `setActive(other)` swaps `this.agent`
+      // to the new runtime's session and calling cancelCurrent() on
+      // it is a no-op (it's idle).
+      const session = this.currentStreamSession ?? this.agent;
+      await session?.cancelCurrent();
     } catch (e) {
       console.warn("[ChatView] cancelCurrent threw", e);
     }
@@ -405,6 +416,7 @@ export class ChatView extends ItemView {
     });
     this.currentPlaceholderId = placeholderId;
     this.currentStreamState = state;
+    this.currentStreamSession = session;
     // Persist the user message immediately so a crash mid-stream
     // doesn't lose the prompt. The assistant placeholder is also
     // persisted as `pending` so the conversation row has a slot for
@@ -437,7 +449,13 @@ export class ChatView extends ItemView {
         id: placeholderId,
         role: "assistant",
         content: "",
-        status: "complete",
+        // Persist as `interrupted` so a crash mid-stream restores the
+        // turn in a non-misleading state (matches PersistedShape's
+        // doc: volatile streaming/pending statuses collapse to
+        // `interrupted` on persist). The final replace below flips
+        // this to `complete` / `error` / `interrupted` based on the
+        // actual outcome once the stream resolves.
+        status: "interrupted",
         createdAt: Date.now(),
       });
     }
@@ -545,6 +563,7 @@ export class ChatView extends ItemView {
     this.stopping = false;
     this.currentPlaceholderId = undefined;
     this.currentStreamState = undefined;
+    this.currentStreamSession = undefined;
 
     if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
