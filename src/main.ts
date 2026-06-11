@@ -24,6 +24,10 @@ import { UndoJournal } from "./domain/UndoJournal";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
+import { filterRawFsToolsIfGated } from "./domain/toolGating";
+
+// Re-export so test files and other consumers have a stable import path.
+export { filterRawFsToolsIfGated } from "./domain/toolGating";
 
 /**
  * Phase 3 wiring:
@@ -65,6 +69,21 @@ export default class CopilotAgentPlugin extends Plugin {
       loadData: () => this.loadData(),
       saveData: (data) => this.saveData(data),
     });
+    // v0.3 Phase 1 (FR-014/FR-015 + C2-A): load safety settings BEFORE
+    // constructing the agent so the gated-tools decision uses the
+    // persisted value, not defaults. The snapshot captured here is
+    // frozen for the lifetime of this plugin instance — toggling the
+    // "Expose v0.1 raw-filesystem tools" setting from the UI updates
+    // persisted state but does not reach this already-running session.
+    // A plugin reload is required to re-snapshot, which is exactly the
+    // "next session start" semantic FR-015 promises.
+    try {
+      await safetySettingsStore.load();
+    } catch (e) {
+      console.error("[copilot-agent] safety settings load failed", e);
+    }
+    const exposeRawFsToolsAtStartup =
+      safetySettingsStore.snapshot().exposeRawFsTools;
     const safetyState = new SafetyState();
     const undoJournal = new UndoJournal(
       this.app.vault as unknown as ConstructorParameters<typeof UndoJournal>[0],
@@ -175,12 +194,23 @@ export default class CopilotAgentPlugin extends Plugin {
       // intentionally DO NOT skip permission — every invocation flows
       // through SafetyPolicy below. `open_note` is the one exception:
       // it's read-equivalent navigation and sets skipPermission itself.
-      tools: [
-        ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-        ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-        ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-        ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-      ],
+      //
+      // v0.3 Phase 1: when `exposeRawFsToolsAtStartup` is false, the
+      // six v0.1 raw-FS tools (view/read_file/search_content/
+      // create_file/edit_file/delete_file) are filtered out so the
+      // model can't invoke them. Filtering is done once at startup
+      // (per FR-015's "next session start" rule and C2-A's frozen-
+      // snapshot guarantee). `ALL_VAULT_TOOL_ENTRIES` stays unchanged
+      // so historical messages still render those tool names.
+      tools: filterRawFsToolsIfGated(
+        [
+          ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ],
+        exposeRawFsToolsAtStartup,
+      ),
       // Phase 6: route all permission requests through SafetyPolicy.
       // `config` is read on every decision so settings changes apply
       // immediately. `extractVaultPath` pulls the candidate vault
@@ -241,6 +271,7 @@ export default class CopilotAgentPlugin extends Plugin {
           timezone,
           todayInTimezone,
           customBody: va.customBody,
+          excludeRawFs: !exposeRawFsToolsAtStartup,
         });
         return text || null;
       },
@@ -261,10 +292,13 @@ export default class CopilotAgentPlugin extends Plugin {
     // Hydrate from disk asynchronously. We don't block onload — the
     // chat view subscribes to the AuthController and renders whatever
     // state arrives.
+    //
+    // Note: `safetySettingsStore.load()` already ran above (synchronously
+    // awaited before agent construction, so the v0.3 raw-FS gating
+    // decision uses the persisted value). We don't reload it here.
     void (async () => {
       try {
         await tokenStore.load();
-        await safetySettingsStore.load();
         await controller.hydrate();
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);

@@ -1,4 +1,4 @@
-import { ALL_VAULT_TOOL_ENTRIES } from "./vaultToolManifest";
+import { ALL_VAULT_TOOL_ENTRIES, V01_RAW_FS_TOOL_NAMES } from "./vaultToolManifest";
 
 /**
  * Phase 2: Vault-aware preamble assembler.
@@ -27,6 +27,14 @@ export interface PreambleInput {
   todayInTimezone: string;
   /** Body to emit verbatim when mode = `custom`. Supports placeholders. */
   customBody?: string;
+  /**
+   * v0.3 Phase 1: when true, the inventory block omits the six v0.1
+   * raw-FS tools so the preamble matches the gated SDK manifest.
+   * Defaults to `false` (full inventory) for back-compat with v0.2
+   * callers and tests. Per FR-015 this is captured at plugin startup
+   * by `main.ts` and frozen for the plugin's lifetime.
+   */
+  excludeRawFs?: boolean;
 }
 
 /** Placeholders the custom-mode body may reference. */
@@ -51,9 +59,18 @@ export const MAX_DEFAULT_PREAMBLE_BYTES = 8 * 1024;
 /**
  * Vault tool inventory block — one bullet per tool. Generated from the
  * shared manifest so adding/removing a tool there updates the preamble
- * in lockstep.
+ * in lockstep. This is the FULL (un-gated) inventory; v0.3 Phase 1
+ * additionally exposes a gated variant via {@link buildToolInventoryBlockGated}
+ * for use when `exposeRawFsTools` is OFF.
  */
-export const VAULT_TOOL_INVENTORY_BLOCK = buildToolInventoryBlock();
+export const VAULT_TOOL_INVENTORY_BLOCK = buildToolInventoryBlock(false);
+
+/**
+ * v0.3 Phase 1: gated inventory block omitting the six v0.1 raw-FS
+ * tools. Used when the "Expose v0.1 raw-filesystem tools" setting is
+ * OFF so the preamble inventory matches the SDK tools list.
+ */
+export const VAULT_TOOL_INVENTORY_BLOCK_GATED = buildToolInventoryBlock(true);
 
 /**
  * Authoring-conventions block (FR-006a/b/c): backlinks, tags, tasks.
@@ -76,6 +93,10 @@ const PREAMBLE_MARKER = "<!-- copilot-agent: vault-aware preamble (v0.2) -->";
 export function assemblePreamble(input: PreambleInput): string {
   if (input.mode === "none") return "";
 
+  const inventoryBlock = input.excludeRawFs
+    ? VAULT_TOOL_INVENTORY_BLOCK_GATED
+    : VAULT_TOOL_INVENTORY_BLOCK;
+
   if (input.mode === "custom") {
     const body = input.customBody ?? "";
     return body
@@ -84,7 +105,7 @@ export function assemblePreamble(input: PreambleInput): string {
       .replaceAll(PREAMBLE_PLACEHOLDERS.VAULT_TODAY, input.todayInTimezone)
       .replaceAll(
         PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY,
-        VAULT_TOOL_INVENTORY_BLOCK,
+        inventoryBlock,
       )
       .replaceAll(
         PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS,
@@ -100,17 +121,21 @@ export function assemblePreamble(input: PreambleInput): string {
     `- Timezone: ${input.timezone}`,
     `- Today: ${input.todayInTimezone}`,
     "",
-    VAULT_TOOL_INVENTORY_BLOCK,
+    inventoryBlock,
     "",
     AUTHORING_CONVENTIONS_BLOCK,
   ].join("\n");
 }
 
-function buildToolInventoryBlock(): string {
+function buildToolInventoryBlock(excludeRawFs: boolean): string {
   const header =
     "## Vault tools\n" +
     "Prefer these vault-specific tools over generic shell discovery. Read-only tools (marked R/O) require no approval; mutating tools route through the user's safety policy.";
-  const lines = ALL_VAULT_TOOL_ENTRIES.map((entry) => {
+  const rawFsSet = new Set<string>(V01_RAW_FS_TOOL_NAMES);
+  const entries = excludeRawFs
+    ? ALL_VAULT_TOOL_ENTRIES.filter((e) => !rawFsSet.has(e.name))
+    : ALL_VAULT_TOOL_ENTRIES;
+  const lines = entries.map((entry) => {
     const tag = entry.readOnly ? " _(R/O)_" : "";
     return `- \`${entry.name}\`${tag}: ${entry.hint}`;
   });

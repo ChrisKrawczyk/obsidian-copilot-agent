@@ -5,11 +5,13 @@ import {
   MAX_DEFAULT_PREAMBLE_BYTES,
   PREAMBLE_PLACEHOLDERS,
   VAULT_TOOL_INVENTORY_BLOCK,
+  VAULT_TOOL_INVENTORY_BLOCK_GATED,
   type PreambleInput,
 } from "./PreambleAssembler";
 import {
   ALL_VAULT_TOOL_ENTRIES,
   READ_NOTE_TOOL_NAMES,
+  V01_RAW_FS_TOOL_NAMES,
   WRITE_NOTE_TOOL_NAMES,
 } from "./vaultToolManifest";
 
@@ -147,5 +149,87 @@ describe("assemblePreamble", () => {
     });
     expect(out).toContain("Timezone: Asia/Tokyo");
     expect(out).toContain("Today: 2026-06-10");
+  });
+
+  // ---------------------------------------------------------------
+  // v0.3 Phase 1 (FR-014/FR-015): gated raw-FS tools in preamble
+  // ---------------------------------------------------------------
+
+  it("excludeRawFs=false (default) emits the FULL inventory naming all v0.1 raw-FS tools", () => {
+    const out = assemblePreamble(baseInput);
+    for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
+      expect(out).toContain(`\`${rawFs}\``);
+    }
+  });
+
+  it("excludeRawFs=true omits all six v0.1 raw-FS tools from the inventory", () => {
+    const out = assemblePreamble({ ...baseInput, excludeRawFs: true });
+    for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
+      expect(out).not.toContain(`\`${rawFs}\``);
+    }
+  });
+
+  it("excludeRawFs=true preserves all v0.2 vault tool entries in the inventory", () => {
+    const out = assemblePreamble({ ...baseInput, excludeRawFs: true });
+    for (const name of [...READ_NOTE_TOOL_NAMES, ...WRITE_NOTE_TOOL_NAMES]) {
+      expect(out).toContain(`\`${name}\``);
+    }
+    // open_note is in WRITE_NOTE_TOOL_ENTRIES but absent from
+    // WRITE_NOTE_TOOL_NAMES (read-equivalent). Verify it is still
+    // mentioned in the gated inventory since it isn't a raw-FS tool.
+    expect(out).toContain("`open_note`");
+  });
+
+  it("excludeRawFs=true uses the gated inventory block; default uses the full block", () => {
+    const gated = assemblePreamble({ ...baseInput, excludeRawFs: true });
+    expect(gated).toContain(VAULT_TOOL_INVENTORY_BLOCK_GATED);
+    const full = assemblePreamble(baseInput);
+    expect(full).toContain(VAULT_TOOL_INVENTORY_BLOCK);
+  });
+
+  it("excludeRawFs=true makes the inventory shorter than the un-gated variant by exactly six entries", () => {
+    const fullLines = VAULT_TOOL_INVENTORY_BLOCK.split("\n").length;
+    const gatedLines = VAULT_TOOL_INVENTORY_BLOCK_GATED.split("\n").length;
+    expect(fullLines - gatedLines).toBe(V01_RAW_FS_TOOL_NAMES.length);
+  });
+
+  it("excludeRawFs is honored under custom mode via the VAULT_TOOL_INVENTORY placeholder", () => {
+    const out = assemblePreamble({
+      ...baseInput,
+      mode: "custom",
+      excludeRawFs: true,
+      customBody: PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY,
+    });
+    for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
+      expect(out).not.toContain(`\`${rawFs}\``);
+    }
+    // And the v0.2 vault tools survive the substitution.
+    expect(out).toContain("`vault_tree`");
+  });
+
+  it("VAULT_TOOL_INVENTORY_BLOCK_GATED tags read-only entries the same way as the full variant", () => {
+    expect(VAULT_TOOL_INVENTORY_BLOCK_GATED).toMatch(
+      /`vault_tree`\s+_\(R\/O\)_/,
+    );
+    expect(VAULT_TOOL_INVENTORY_BLOCK_GATED).not.toMatch(
+      /`create_note`\s+_\(R\/O\)_/,
+    );
+  });
+
+  it("default-mode preamble with excludeRawFs=true stays within the 8 KB size budget (SC-005 unchanged)", () => {
+    const out = assemblePreamble({ ...baseInput, excludeRawFs: true });
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThan(
+      MAX_DEFAULT_PREAMBLE_BYTES,
+    );
+  });
+
+  it("the manifest still contains every v0.1 raw-FS tool (back-compat for historical message rendering)", () => {
+    // Even when gated out of the preamble, ALL_VAULT_TOOL_ENTRIES must
+    // continue to name the v0.1 tools so persisted message history
+    // referencing them still renders tool names correctly (FR-016).
+    const allNames = ALL_VAULT_TOOL_ENTRIES.map((e) => e.name);
+    for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
+      expect(allNames).toContain(rawFs);
+    }
   });
 });

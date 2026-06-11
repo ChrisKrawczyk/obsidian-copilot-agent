@@ -121,6 +121,25 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           });
         });
 
+      new Setting(containerEl)
+        .setName("Expose v0.1 raw-filesystem tools")
+        .setDesc(
+          "When OFF (default), the six v0.1 raw-FS tools (view, " +
+            "read_file, search_content, create_file, edit_file, " +
+            "delete_file) are NOT offered to the model — it relies on " +
+            "the higher-level vault tools (read_note, edit_note, etc.) " +
+            "instead. When ON, the raw-FS tools are offered with their " +
+            "existing approval policy. Takes effect on the next " +
+            "session start (reload the plugin or restart Obsidian).",
+        )
+        .addToggle((toggle) =>
+          toggle
+            .setValue(safety.exposeRawFsTools)
+            .onChange(async (value) => {
+              await this.safetyStore!.setExposeRawFsTools(value);
+            }),
+        );
+
       containerEl.createEl("h4", { text: "Auto-approve built-ins" });
       containerEl.createEl("p", {
         cls: "setting-item-description",

@@ -157,3 +157,21 @@ export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.filter(
   (e) => !e.readOnly,
 ).map((e) => e.name);
+
+/**
+ * v0.3 Phase 1: the six v0.1 raw-filesystem tool names. When the
+ * "Expose v0.1 raw-filesystem tools" setting is OFF (default), these
+ * are filtered out of the SDK-bound tools list and the preamble
+ * inventory at plugin startup. The constant lives here (not in
+ * `ReadTools.ts` / `WriteTools.ts`) so `main.ts`, `PreambleAssembler.ts`,
+ * and the chat renderer (Phase 6 — historical entry rendering) can
+ * import a single source of truth without re-declaring the list.
+ */
+export const V01_RAW_FS_TOOL_NAMES = [
+  "view",
+  "read_file",
+  "search_content",
+  "create_file",
+  "edit_file",
+  "delete_file",
+] as const;
