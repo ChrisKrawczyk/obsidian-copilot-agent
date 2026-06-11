@@ -24,11 +24,91 @@
 
 .copilot-agent-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.35rem;
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid var(--background-modifier-border);
   flex: 0 0 auto;
+}
+
+/* v0.3 Phase 5: conversation picker dropdown anchored at top of the
+   chat header. Acts as a button that opens an Obsidian Menu. */
+.copilot-agent-conv-picker {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.copilot-agent-conv-picker-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.25rem 0.5rem;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+.copilot-agent-conv-picker-button:hover {
+  background: var(--background-modifier-hover);
+}
+.copilot-agent-conv-picker-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.copilot-agent-conv-picker-chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  opacity: 0.7;
+}
+
+/* Lightweight inline prompt/confirm overlay used by ConversationPicker
+   for rename and delete affordances. Kept local to the plugin so we
+   don't fight with Obsidian's Modal lifecycle for these tiny dialogs. */
+.copilot-agent-prompt-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--background-modifier-cover, rgba(0, 0, 0, 0.35));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: var(--layer-modal, 9999);
+}
+.copilot-agent-prompt-card {
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  padding: 1rem 1.25rem;
+  min-width: 320px;
+  max-width: 90vw;
+  box-shadow: var(--shadow-l);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.copilot-agent-prompt-card h3 {
+  margin: 0;
+  font-size: var(--font-ui-medium);
+}
+.copilot-agent-prompt-input {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.copilot-agent-prompt-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 .copilot-agent-title {

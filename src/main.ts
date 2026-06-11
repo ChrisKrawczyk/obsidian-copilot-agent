@@ -485,6 +485,31 @@ export default class CopilotAgentPlugin extends Plugin {
         }
       },
     });
+
+    // v0.3 Phase 5 (FR-008 durability): Obsidian awaits handlers on
+    // its `quit` event before closing the app, giving us a final
+    // opportunity to flush any pending debounced writes. `onunload`
+    // covers plugin disable/reload; `quit` covers the close-window
+    // path where `onunload` may or may not fire depending on platform.
+    // Typed loosely because the Obsidian d.ts in this repo's
+    // node_modules doesn't declare the `quit` channel.
+    try {
+      const ws = this.app.workspace as unknown as {
+        on?: (name: string, cb: () => void | Promise<void>) => unknown;
+      };
+      const ref = ws.on?.("quit", async () => {
+        try {
+          await this.conversationsStore?.flushNow();
+        } catch (err) {
+          console.warn("[copilot-agent] quit-flush threw", err);
+        }
+      });
+      if (ref) this.register(() => (this.app.workspace as unknown as {
+        offref?: (r: unknown) => void;
+      }).offref?.(ref));
+    } catch (err) {
+      console.warn("[copilot-agent] could not register quit handler", err);
+    }
   }
 
   async onunload(): Promise<void> {

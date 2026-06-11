@@ -12,6 +12,9 @@ import type { UndoJournal } from "../domain/UndoJournal";
 import type { ConversationManager } from "../domain/ConversationManager";
 import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
+import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
+import { buildPickerItems, wouldTriggerArchiveOnCreate } from "./conversationPickerLogic";
+import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -113,6 +116,11 @@ export class ChatView extends ItemView {
    * in depth.
    */
   private isComposing = false;
+  /** v0.3 Phase 5: header conversation picker. Constructed in onOpen,
+   *  destroyed in onClose. Re-rendered on every manager event so the
+   *  visible list/active-name stays in sync without coupling the
+   *  picker to the manager directly. */
+  private picker?: ConversationPicker;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
@@ -156,6 +164,73 @@ export class ChatView extends ItemView {
     root.addClass("copilot-agent-chat-root");
 
     const header = root.createDiv({ cls: "copilot-agent-header" });
+    // v0.3 Phase 5: picker mounts above the title row so users can
+    // switch conversations without leaving the view. Callbacks route
+    // back through `this.manager` — the picker holds no catalog state.
+    this.picker = new ConversationPicker(header, this.app, {
+      onSelect: (id) => {
+        try {
+          this.manager.setActive(id);
+        } catch (e) {
+          new Notice(`Could not switch conversation: ${(e as Error).message}`);
+        }
+      },
+      onCreate: () => {
+        try {
+          // Warn (non-blocking) before triggering the soft-cap auto-
+          // archive so the user understands why an old chat just
+          // disappeared from the list (FR-002).
+          if (
+            wouldTriggerArchiveOnCreate(
+              this.manager.listActive(),
+              CONVERSATION_SOFT_CAP,
+            )
+          ) {
+            new Notice(
+              `Soft cap of ${CONVERSATION_SOFT_CAP} conversations reached — archiving the oldest.`,
+              4000,
+            );
+          }
+          const conv = this.manager.create();
+          return conv.id;
+        } catch (e) {
+          new Notice(`Could not create conversation: ${(e as Error).message}`);
+          return undefined;
+        }
+      },
+      onRename: (id, currentName) => {
+        void (async () => {
+          const next = await promptForText(
+            this.app,
+            "Rename conversation",
+            currentName,
+            "Conversation name",
+          );
+          if (next === null) return;
+          try {
+            this.manager.rename(id, next);
+          } catch (e) {
+            new Notice(`Rename failed: ${(e as Error).message}`);
+          }
+        })();
+      },
+      onDelete: (id, currentName) => {
+        void (async () => {
+          const ok = await confirmDestructive(
+            this.app,
+            "Delete conversation",
+            `"${currentName}" will be permanently removed. This cannot be undone.`,
+            "Delete",
+          );
+          if (!ok) return;
+          try {
+            await this.manager.removeConversation(id);
+          } catch (e) {
+            new Notice(`Delete failed: ${(e as Error).message}`);
+          }
+        })();
+      },
+    });
     header.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
     this.statusEl = header.createDiv({
       cls: "copilot-agent-status",
@@ -280,13 +355,33 @@ export class ChatView extends ItemView {
           this.syncList();
         }
       }
+      // v0.3 Phase 5: picker mirrors the manager catalog. Cheap enough
+      // to re-render on every event (≤ 20 items per FR-002).
+      this.refreshPicker();
     });
+    // Initial render so the picker reflects whatever the manager
+    // already hydrated by the time the view opens.
+    this.refreshPicker();
+  }
+
+  /** Build picker items from the manager's current catalog + active
+   *  id, then push them into the picker. */
+  private refreshPicker(): void {
+    if (!this.picker) return;
+    const items = buildPickerItems(
+      this.manager.listActive(),
+      this.manager.getActiveId(),
+    );
+    const active = items.find((i) => i.isActive);
+    this.picker.render(items, active?.fullName ?? null);
   }
 
   async onClose(): Promise<void> {
     this.unsubState?.();
     this.unsubAuth?.();
     this.unsubManager?.();
+    this.picker?.destroy();
+    this.picker = undefined;
     this.renderer?.dispose();
     this.renderer = undefined;
   }
