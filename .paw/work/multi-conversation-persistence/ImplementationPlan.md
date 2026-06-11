@@ -136,6 +136,7 @@ Copied verbatim from `Spec.md` § Scope / Out of Scope:
 - [ ] "what tags are in my vault" calls `list_all_tags` with no approval prompt.
 - [ ] "show me notes tagged #project" returns exactly the matching notes; tag normalization works with or without `#`.
 - [ ] On a fresh vault open before the metadata cache is ready, calling a search tool returns the not-ready status and the agent retries.
+- [ ] Performance spot-check on a 1000-note / 30-tag vault (or scaled approximation): `list_all_tags` < 500 ms, `search_by_tag` < 200 ms (SC-006).
 
 ---
 
@@ -236,6 +237,7 @@ If during Phase 4 implementation the captured-at-send-time discipline proves fra
 - [ ] Delete a conversation with confirmation → it disappears from picker and from `data.json`.
 - [ ] Create 21 conversations → the oldest non-active archives (no longer in picker); reopen `data.json` to confirm its data is retained on disk.
 - [ ] Picker remains usable when the pane is narrowed.
+- [ ] Switching between two conversations via the picker updates the displayed message stream within ~100 ms (subjective spot-check, SC-002).
 
 ---
 
