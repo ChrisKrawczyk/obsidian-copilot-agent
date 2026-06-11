@@ -419,11 +419,13 @@ export default class CopilotAgentPlugin extends Plugin {
     void (async () => {
       try {
         await tokenStore.load();
-        await controller.hydrate();
         // v0.3 Phase 3: hydrate persisted conversations + run TTL prune
-        // before any ConversationRuntime is instantiated (Phase 4
-        // architecture). On recovery, surface a Notice naming the
-        // sidecar so the user can inspect what was salvaged.
+        // BEFORE auth hydrate. The reconnect step inside auth hydrate
+        // calls `tokenSink.reconnect()` which broadcasts to every live
+        // ConversationRuntime — if no runtime is live yet, the model id
+        // can't be resolved and the UI shows "Connected" without the
+        // model name. Materialising the active runtime before auth
+        // hydrate keeps the model display populated on first load.
         const result = await conversationsStore.load();
         if (result.recovered) {
           new Notice(
@@ -445,6 +447,19 @@ export default class CopilotAgentPlugin extends Plugin {
           conversations: snap.conversations,
           activeConversationId: snap.activeConversationId,
         });
+        // Materialise the active runtime so the broadcasting tokenSink
+        // has a live AgentSession to forward setToken/reconnect to
+        // during auth hydrate (otherwise the resolved model id never
+        // makes it back to the UI on first load).
+        try {
+          conversationManager.getActiveRuntime();
+        } catch (err) {
+          console.warn(
+            "[copilot-agent] failed to warm active runtime pre-auth",
+            err,
+          );
+        }
+        await controller.hydrate();
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);
         new Notice(
