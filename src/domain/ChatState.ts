@@ -12,6 +12,27 @@ export class ChatState {
   private readonly listeners = new Set<ChatStateListener>();
   private idCounter = 0;
 
+  /**
+   * Optionally seed initial messages (v0.3 Phase 4 hydration). Uses
+   * `silent: true` semantics — no listeners fire and id counter is
+   * advanced past any numeric ids in the seed so future `append`
+   * calls don't collide.
+   */
+  constructor(initial?: readonly Message[]) {
+    if (initial && initial.length > 0) {
+      for (const m of initial) {
+        this.messages.push({ ...m });
+        // Ids look like "m12"; advance counter past the largest seed id
+        // so future `append` calls don't collide.
+        const match = /^m(\d+)$/.exec(m.id);
+        if (match) {
+          const n = Number(match[1]);
+          if (Number.isFinite(n) && n > this.idCounter) this.idCounter = n;
+        }
+      }
+    }
+  }
+
   /** Snapshot of the current message list (immutable copy). */
   getMessages(): readonly Message[] {
     return this.messages.slice();

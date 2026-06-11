@@ -55,6 +55,23 @@ export interface SafetySettings {
    * one snapshot. See `VaultAwarenessSettings.ts` for field semantics.
    */
   vaultAwareness: VaultAwarenessSettings;
+
+  /**
+   * v0.3 Phase 1: gates the six v0.1 raw-filesystem tools (`view`,
+   * `read_file`, `search_content`, `create_file`, `edit_file`,
+   * `delete_file`). Default ON — the model is offered both the
+   * higher-level v0.2 vault tools AND the raw-FS tools, with preamble
+   * guidance directing it to prefer vault tools first and treat the
+   * raw-FS tools as a fallback. Users who want a strictly vault-only
+   * agent can turn this OFF; the gated tools are then dropped from
+   * the SDK manifest and the preamble inventory.
+   *
+   * Per FR-015, toggling this takes effect on the next session start
+   * only: `main.ts` snapshots the value at plugin onload and freezes
+   * the SDK tools list and preamble tool-inventory for the lifetime of
+   * the plugin instance. A plugin reload is required to re-snapshot.
+   */
+  exposeRawFsTools: boolean;
 }
 
 export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
@@ -62,6 +79,7 @@ export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
   allowlist: [],
   autoApproveBuiltins: {},
   vaultAwareness: { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
+  exposeRawFsTools: true,
 };
 
 /** SDK kinds we surface as built-in toggles in the settings UI. */
@@ -104,6 +122,7 @@ export class SafetySettingsStore {
       allowlist: [...this.cached.allowlist],
       autoApproveBuiltins: { ...this.cached.autoApproveBuiltins },
       vaultAwareness: { ...this.cached.vaultAwareness },
+      exposeRawFsTools: this.cached.exposeRawFsTools,
     };
   }
 
@@ -141,6 +160,11 @@ export class SafetySettingsStore {
       ...this.cached,
       vaultAwareness: { ...this.cached.vaultAwareness, ...update },
     };
+    await this.persist();
+  }
+
+  async setExposeRawFsTools(value: boolean): Promise<void> {
+    this.cached = { ...this.cached, exposeRawFsTools: value };
     await this.persist();
   }
 
@@ -204,5 +228,9 @@ function mergeWithDefaults(
           )
         : {},
     vaultAwareness: mergeVaultAwarenessSettings(partial.vaultAwareness),
+    exposeRawFsTools:
+      typeof partial.exposeRawFsTools === "boolean"
+        ? partial.exposeRawFsTools
+        : true,
   };
 }

@@ -9,13 +9,35 @@ import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
 import type { UndoJournal } from "../domain/UndoJournal";
+import type { ConversationManager } from "../domain/ConversationManager";
+import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
+import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
+import { buildPickerItems } from "./conversationPickerLogic";
+import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
+import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
+import { runUndoFlow } from "./undoFlow";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
+/**
+ * v0.3 Phase 6 (FR-016): precomputed Set of raw-FS tool names so the
+ * per-render Undo-suppression predicate stays O(1). Kept module-level
+ * (not per-instance) because the manifest is a static compile-time
+ * constant.
+ */
+const RAW_FS_TOOL_NAME_SET: ReadonlySet<string> = new Set(
+  V01_RAW_FS_TOOL_NAMES,
+);
+
 interface ChatViewDeps {
-  /** Lazily-initialised SDK adapter. The view never constructs it. */
-  agent: AgentSession;
+  /**
+   * v0.3 Phase 4: per-conversation runtime architecture. The view
+   * reads the active runtime via `manager.getActiveRuntime()` and
+   * re-binds on `active-changed` events. The manager owns the
+   * Map<id, runtime> so this view never sees a half-constructed one.
+   */
+  manager: ConversationManager;
   /**
    * Auth state source. ChatView subscribes to gate the composer:
    * sends are only allowed while state.kind === "connected".
@@ -27,19 +49,32 @@ interface ChatViewDeps {
    */
   openSettings: () => void;
   /**
-   * Phase 6: undo journal for vault write tools. Click on the inline
-   * Undo button routes here. Optional so Phase 5 tests still construct
-   * the view without it.
+   * v0.3 Phase 6 (FR-016) + SINGLE-2 / FR-015: returns the
+   * `exposeRawFsTools` STARTUP snapshot (not the live setting). Used
+   * by the Undo-button suppression predicate handed to MessageRenderer
+   * so the UI matches the runtime's actual registered tool surface
+   * (which was frozen at plugin onload). main.ts wires this to
+   * `exposeRawFsToolsAtStartup`.
    */
-  undoJournal?: UndoJournal;
+  getExposeRawFsTools: () => boolean;
 }
 
 export class ChatView extends ItemView {
-  private state = new ChatState();
-  private agent: AgentSession;
+  private readonly manager: ConversationManager;
+  /**
+   * Cached references to the active runtime's state/session/journal.
+   * Re-bound whenever `manager` emits `active-changed`. Initialised
+   * to placeholder values (a synthetic empty `ChatState`) until the
+   * manager finishes hydrating; the view subscribes to `list-changed`
+   * to pick up the real runtime once available.
+   */
+  private state: ChatState = new ChatState();
+  private agent: AgentSession | null = null;
+  private undoJournal?: UndoJournal;
+  private boundConversationId: string | null = null;
   private auth: AuthController;
   private openSettings: () => void;
-  private undoJournal?: UndoJournal;
+  private getExposeRawFsTools: () => boolean;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
@@ -79,8 +114,20 @@ export class ChatView extends ItemView {
    * `abort()` does not flush in-flight deltas.
    */
   private currentPlaceholderId?: string;
+  /** v0.3 Phase 4: ChatState owning the in-flight stream. Captured
+   *  alongside `currentPlaceholderId` at handleSend so handleStop can
+   *  freeze the right runtime's placeholder even after a mid-stream
+   *  active switch. */
+  private currentStreamState?: ChatState;
+  /** v0.3 Phase 4: AgentSession driving the in-flight stream. Captured
+   *  at handleSend so handleStop cancels the originating runtime's
+   *  session even if the user switched the active conversation
+   *  mid-stream (Phase 5 picker). Without this, this.agent points at
+   *  the NEW active runtime and we'd never abort the actual stream. */
+  private currentStreamSession?: AgentSession;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
+  private unsubManager?: () => void;
   private currentAuthKind: AuthState["kind"] = "disconnected";
   /**
    * IME composition state, tracked via the textarea's compositionstart /
@@ -91,13 +138,35 @@ export class ChatView extends ItemView {
    * in depth.
    */
   private isComposing = false;
+  /** v0.3 Phase 5: header conversation picker. Constructed in onOpen,
+   *  destroyed in onClose. Re-rendered on every manager event so the
+   *  visible list/active-name stays in sync without coupling the
+   *  picker to the manager directly. */
+  private picker?: ConversationPicker;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
-    this.agent = deps.agent;
+    this.manager = deps.manager;
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
-    this.undoJournal = deps.undoJournal;
+    this.getExposeRawFsTools = deps.getExposeRawFsTools;
+    this.bindActiveRuntime();
+  }
+
+  /**
+   * Pull the active runtime from the manager and re-bind cached
+   * `state`/`agent`/`undoJournal` references. Safe to call before
+   * hydration (returns early when no active id is set yet).
+   */
+  private bindActiveRuntime(): void {
+    const activeId = this.manager.getActiveId();
+    if (!activeId) return;
+    if (activeId === this.boundConversationId) return;
+    const runtime = this.manager.getActiveRuntime();
+    this.state = runtime.state;
+    this.agent = runtime.session;
+    this.undoJournal = runtime.journal;
+    this.boundConversationId = activeId;
   }
 
   getViewType(): string {
@@ -118,8 +187,70 @@ export class ChatView extends ItemView {
     root.addClass("copilot-agent-chat-root");
 
     const header = root.createDiv({ cls: "copilot-agent-header" });
-    header.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
-    this.statusEl = header.createDiv({
+    // v0.3 Phase 5: picker mounts above the title row so users can
+    // switch conversations without leaving the view. Callbacks route
+    // back through `this.manager` — the picker holds no catalog state.
+    this.picker = new ConversationPicker(header, this.app, {
+      onSelect: (id) => {
+        try {
+          this.manager.setActive(id);
+        } catch (e) {
+          new Notice(`Could not switch conversation: ${(e as Error).message}`);
+        }
+      },
+      onCreate: () => {
+        try {
+          // CONS-4 / FR-002: the UI used to fire a generic "archiving
+          // the oldest" Notice here BEFORE create()/enforceSoftCap()
+          // ran, which couldn't name the archived conversation. The
+          // named Notice now fires from the manager subscription
+          // below in response to an `auto-archived` event.
+          const conv = this.manager.create();
+          return conv.id;
+        } catch (e) {
+          new Notice(`Could not create conversation: ${(e as Error).message}`);
+          return undefined;
+        }
+      },
+      onRename: (id, currentName) => {
+        void (async () => {
+          const next = await promptForText(
+            this.app,
+            "Rename conversation",
+            currentName,
+            "Conversation name",
+          );
+          if (next === null) return;
+          try {
+            this.manager.rename(id, next);
+          } catch (e) {
+            new Notice(`Rename failed: ${(e as Error).message}`);
+          }
+        })();
+      },
+      onDelete: (id, currentName) => {
+        void (async () => {
+          const ok = await confirmDestructive(
+            this.app,
+            "Delete conversation",
+            `"${currentName}" will be permanently removed. This cannot be undone.`,
+            "Delete",
+          );
+          if (!ok) return;
+          try {
+            await this.manager.removeConversation(id);
+          } catch (e) {
+            new Notice(`Delete failed: ${(e as Error).message}`);
+          }
+        })();
+      },
+    });
+    // v0.3 Phase 5 hotfix: title + status share a flex row underneath
+    // the picker so the model name ("Connected · gpt-4o") stays
+    // visible alongside the title (the original v0.2 layout).
+    const titleRow = header.createDiv({ cls: "copilot-agent-header-row" });
+    titleRow.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
+    this.statusEl = titleRow.createDiv({
       cls: "copilot-agent-status",
       text: "…",
     });
@@ -136,15 +267,43 @@ export class ChatView extends ItemView {
     // pure-render.
     this.renderer.setToolCallHandlers({
       onApprove: (id) =>
-        this.agent.resolveApproval(id, { kind: "approve-once" }),
+        this.agent?.resolveApproval(id, { kind: "approve-once" }),
       onApproveForSession: (id) =>
-        this.agent.resolveApproval(id, { kind: "approve-for-session" }),
+        this.agent?.resolveApproval(id, { kind: "approve-for-session" }),
       onReject: (id) =>
-        this.agent.resolveApproval(id, {
+        this.agent?.resolveApproval(id, {
           kind: "reject",
           reason: "Rejected by user.",
         }),
       onUndo: (id) => void this.handleUndoClick(id),
+      // v0.3 Phase 6 (FR-016): suppress the Undo affordance on
+      // historical raw-FS tool calls when the user has the
+      // `exposeRawFsTools` setting OFF AT STARTUP. The call name +
+      // result still render so the user can read what happened —
+      // only the action button disappears. Reads the startup snapshot
+      // (per FR-015) so a mid-session toggle does not hide Undo for
+      // tools the runtime still has registered.
+      isUndoSuppressed: (toolName) => {
+        if (this.getExposeRawFsTools()) return false;
+        return RAW_FS_TOOL_NAME_SET.has(toolName);
+      },
+      // v0.3 Phase 2 (FR-018, MF-3): clicking a search-result row opens
+      // the matched note in the active leaf. We reuse Obsidian's
+      // openLinkText so the user lands on the canonical resolved file
+      // (including any aliases / link-text resolution Obsidian applies).
+      onOpenLink: (linkText) => {
+        try {
+          (this.app.workspace as unknown as {
+            openLinkText?: (
+              link: string,
+              src: string,
+              newLeaf?: boolean,
+            ) => void;
+          }).openLinkText?.(linkText, "", false);
+        } catch (e) {
+          new Notice(`Could not open ${linkText}: ${(e as Error).message}`);
+        }
+      },
     });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
@@ -210,11 +369,62 @@ export class ChatView extends ItemView {
 
     this.unsubState = this.state.subscribe(() => this.syncList());
     this.unsubAuth = this.auth.subscribe((s) => this.renderAuth(s));
+    // Initial render so hydrated messages appear immediately on view
+    // open (subscribe only fires on subsequent changes; without this
+    // call a freshly opened view shows the title but no messages
+    // until the user does something that mutates state).
+    this.syncList();
+    // v0.3 Phase 4: re-bind when the manager flips active conversations
+    // (or when first hydrating from disk and the active runtime appears).
+    this.unsubManager = this.manager.subscribe((ev) => {
+      if (ev.kind === "active-changed" || ev.kind === "list-changed") {
+        const prevId = this.boundConversationId;
+        this.bindActiveRuntime();
+        if (this.boundConversationId !== prevId) {
+          // New runtime → tear down the stale state subscription and
+          // re-attach to the new runtime's ChatState. Then re-render
+          // the list against the new state's current messages.
+          this.unsubState?.();
+          this.unsubState = this.state.subscribe(() => this.syncList());
+          this.syncList();
+        }
+      }
+      if (ev.kind === "auto-archived") {
+        // CONS-4 / FR-002: surface a Notice naming the archived
+        // conversation so the user understands why an old chat just
+        // disappeared from the picker.
+        new Notice(
+          `Soft cap of ${CONVERSATION_SOFT_CAP} conversations reached — archived "${ev.name}".`,
+          4000,
+        );
+      }
+      // v0.3 Phase 5: picker mirrors the manager catalog. Cheap enough
+      // to re-render on every event (≤ 20 items per FR-002).
+      this.refreshPicker();
+    });
+    // Initial render so the picker reflects whatever the manager
+    // already hydrated by the time the view opens.
+    this.refreshPicker();
+  }
+
+  /** Build picker items from the manager's current catalog + active
+   *  id, then push them into the picker. */
+  private refreshPicker(): void {
+    if (!this.picker) return;
+    const items = buildPickerItems(
+      this.manager.listActive(),
+      this.manager.getActiveId(),
+    );
+    const active = items.find((i) => i.isActive);
+    this.picker.render(items, active?.fullName ?? null);
   }
 
   async onClose(): Promise<void> {
     this.unsubState?.();
     this.unsubAuth?.();
+    this.unsubManager?.();
+    this.picker?.destroy();
+    this.picker = undefined;
     this.renderer?.dispose();
     this.renderer = undefined;
   }
@@ -291,11 +501,17 @@ export class ChatView extends ItemView {
     //      messages. We do this BEFORE awaiting cancelCurrent() so a
     //      slow abort can't leak more text into the visible message.
     if (this.currentPlaceholderId) {
-      this.state.interruptStreaming(this.currentPlaceholderId);
+      const streamState = this.currentStreamState ?? this.state;
+      streamState.interruptStreaming(this.currentPlaceholderId);
     }
     this.sendBtnEl.disabled = true;
     try {
-      await this.agent.cancelCurrent();
+      // Cancel the ORIGINATING session, not whatever `this.agent` now
+      // points at — a mid-stream `setActive(other)` swaps `this.agent`
+      // to the new runtime's session and calling cancelCurrent() on
+      // it is a no-op (it's idle).
+      const session = this.currentStreamSession ?? this.agent;
+      await session?.cancelCurrent();
     } catch (e) {
       console.warn("[ChatView] cancelCurrent threw", e);
     }
@@ -308,19 +524,100 @@ export class ChatView extends ItemView {
       new Notice("Not connected. Open settings to sign in.", 5000);
       return;
     }
+    // v0.3 Phase 4: ensure we're bound to the latest active runtime
+    // (covers the boot-time window between view construction and
+    // ConversationManager.hydrate completing).
+    this.bindActiveRuntime();
+    const session = this.agent;
+    if (!session) {
+      new Notice("Conversation not ready yet — please retry.", 5000);
+      return;
+    }
     const text = this.inputEl.value.trim();
     if (!text) return;
     this.inputEl.value = "";
     this.userRequestedStop = false;
     this.setBusy(true);
 
-    this.state.append({ role: "user", content: text });
-    const placeholderId = this.state.append({
+    // v0.3 Phase 4: capture the originating runtime's state + id at
+    // send time. A mid-stream `setActive(other)` switches `this.state`
+    // and `this.agent` to a DIFFERENT runtime — without capture, the
+    // streaming deltas/tool-calls below would silently leak into the
+    // wrong conversation's ChatState (and persist to the wrong row).
+    const state = this.state;
+    const convId = this.boundConversationId;
+    // SINGLE-1: bump lastActiveAt on the active conversation so the
+    // picker order and soft-cap victim selection reflect activity. A
+    // switch already calls touchActive via setActive; this covers the
+    // "send to the already-active conv" path that wouldn't otherwise
+    // refresh the timestamp.
+    this.manager.touchActive();
+    const userMsgId = state.append({ role: "user", content: text });
+    const placeholderId = state.append({
       role: "assistant",
       content: "",
       status: "pending",
     });
     this.currentPlaceholderId = placeholderId;
+    this.currentStreamState = state;
+    this.currentStreamSession = session;
+    // Persist the user message immediately so a crash mid-stream
+    // doesn't lose the prompt. The assistant placeholder is also
+    // persisted as `pending` so the conversation row has a slot for
+    // the final replace at the end of the turn.
+    if (convId) {
+      // v0.3 Phase 5 follow-up (FR-005): auto-derive a conversation
+      // name from the very first user message. The manager itself
+      // gates on "is the current name still a default?" so this is
+      // safe to call unconditionally — if the user already renamed
+      // the conversation, it's a no-op.
+      const userMsgCount = state
+        .getMessages()
+        .filter((m) => m.role === "user").length;
+      if (userMsgCount === 1) {
+        try {
+          this.manager.maybeAutoNameFromFirstMessage(convId, text);
+        } catch (e) {
+          console.warn("[ChatView] auto-name failed", e);
+        }
+      }
+      const userMsg = state
+        .getMessages()
+        .find((m) => m.id === userMsgId);
+      if (userMsg) {
+        // User messages should always be `complete` once appended;
+        // narrow the broader ChatState `MessageStatus` to the persisted
+        // shape. Any unexpected non-terminal value collapses to
+        // `complete` for the persisted form (we already wrote the
+        // canonical user text).
+        const persistedStatus: PersistedMessage["status"] =
+          userMsg.status === "interrupted"
+            ? "interrupted"
+            : userMsg.status === "error"
+              ? "error"
+              : "complete";
+        this.manager.persistMessageAppend(convId, {
+          id: userMsg.id,
+          role: userMsg.role,
+          content: userMsg.content,
+          status: persistedStatus,
+          createdAt: userMsg.createdAt,
+        });
+      }
+      this.manager.persistMessageAppend(convId, {
+        id: placeholderId,
+        role: "assistant",
+        content: "",
+        // Persist as `interrupted` so a crash mid-stream restores the
+        // turn in a non-misleading state (matches PersistedShape's
+        // doc: volatile streaming/pending statuses collapse to
+        // `interrupted` on persist). The final replace below flips
+        // this to `complete` / `error` / `interrupted` based on the
+        // actual outcome once the stream resolves.
+        status: "interrupted",
+        createdAt: Date.now(),
+      });
+    }
 
     let receivedAnyDelta = false;
     let finalContent = "";
@@ -329,7 +626,7 @@ export class ChatView extends ItemView {
 
     this.setStreaming(true);
     try {
-      for await (const ev of this.agent.sendMessageStreaming(text)) {
+      for await (const ev of session.sendMessageStreaming(text)) {
         if (this.userRequestedStop) {
           // Drain the iterator but don't apply any further updates.
           // The placeholder is already frozen as `interrupted`; we
@@ -338,11 +635,11 @@ export class ChatView extends ItemView {
         }
         if (ev.type === "delta") {
           receivedAnyDelta = true;
-          this.state.appendDelta(placeholderId, ev.text);
+          state.appendDelta(placeholderId, ev.text);
         } else if (ev.type === "tool_call_start") {
           // Live tool-call block. We map AgentSession's structural
           // type to the domain ToolCall shape (they share fields).
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -360,7 +657,7 @@ export class ChatView extends ItemView {
           // `"undoId"` field set by createFileImpl/editFileImpl/
           // deleteFileImpl. If absent, undoId stays undefined.
           const undoId = extractUndoId(ev.content);
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: ev.outcome,
@@ -375,7 +672,7 @@ export class ChatView extends ItemView {
           // Pass undefined for fields the prior state may have set
           // (resultContent, detail, undoId, undone) so a same-id
           // re-prompt doesn't render stale post-execution chrome.
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -394,7 +691,7 @@ export class ChatView extends ItemView {
           // overwrite this immediately if execution proceeds.
           const newOutcome =
             ev.choice.kind === "reject" ? "denied" : "approved";
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: newOutcome,
@@ -424,10 +721,12 @@ export class ChatView extends ItemView {
     this.userRequestedStop = false;
     this.stopping = false;
     this.currentPlaceholderId = undefined;
+    this.currentStreamState = undefined;
+    this.currentStreamSession = undefined;
 
     if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
-      this.state.update(placeholderId, {
+      state.update(placeholderId, {
         content: `**Error:** ${msg}`,
         status: "error",
       });
@@ -435,7 +734,7 @@ export class ChatView extends ItemView {
     } else if (cancelled) {
       // User clicked Stop before any delta arrived. Freeze placeholder
       // as interrupted with whatever (if anything) was streamed.
-      this.state.interruptStreaming(placeholderId);
+      state.interruptStreaming(placeholderId);
     } else {
       // Normal completion. Prefer the SDK's final content over the
       // concatenated deltas (they may differ — e.g. when the model
@@ -451,7 +750,7 @@ export class ChatView extends ItemView {
       // wholesale replace `toolCalls` here, so denied/streamed blocks
       // are preserved verbatim even if the final summary omits them.
       for (const tc of finalToolCalls) {
-        this.state.upsertToolCall(placeholderId, tc);
+        state.upsertToolCall(placeholderId, tc);
       }
       let content = finalContent;
       if (!content && !receivedAnyDelta && finalToolCalls.length === 0) {
@@ -461,13 +760,42 @@ export class ChatView extends ItemView {
       // we streamed rather than blanking the message.
       if (!content && receivedAnyDelta) {
         // Just flip status; ChatState already holds the streamed text.
-        this.state.update(placeholderId, {
+        state.update(placeholderId, {
           status: "complete",
         });
       } else {
-        this.state.update(placeholderId, {
+        state.update(placeholderId, {
           content,
           status: "complete",
+        });
+      }
+    }
+
+    // v0.3 Phase 4 (FR-007): land the final assistant message in the
+    // persisted store. We snapshot from `state` (the originating
+    // runtime), so a mid-stream conversation switch can't redirect
+    // the write to the wrong row. `ConversationsStore` debounces, so
+    // this single replace coalesces with the earlier pending-append.
+    if (convId) {
+      const finalMsg = state
+        .getMessages()
+        .find((m) => m.id === placeholderId);
+      if (finalMsg) {
+        const status: PersistedMessage["status"] =
+          finalMsg.status === "complete"
+            ? "complete"
+            : finalMsg.status === "error"
+              ? "error"
+              : "interrupted";
+        // Filter out non-persisted tool-call outcomes (e.g. the
+        // transient `pending_approval` pseudo-state used while a
+        // prompt is awaiting the user). Only terminal outcomes
+        // belong in the persisted shape.
+        const persistedToolCalls = toPersistedToolCalls(finalMsg.toolCalls);
+        this.manager.persistMessageReplace(convId, placeholderId, {
+          content: finalMsg.content,
+          status,
+          toolCalls: persistedToolCalls,
         });
       }
     }
@@ -520,36 +848,52 @@ export class ChatView extends ItemView {
    * the user sees the reason (e.g. file has been modified since).
    */
   private async handleUndoClick(undoId: string): Promise<void> {
-    if (!this.undoJournal) {
-      new Notice("Undo is not available in this build.");
-      return;
-    }
-    const entry = this.undoJournal.get(undoId);
-    if (!entry) {
-      new Notice("Cannot undo: no journal entry for this action.");
-      return;
-    }
-    const outcome = await this.undoJournal.undo(entry.id);
-    if (!outcome.ok) {
-      new Notice(outcome.reason ?? "Undo failed.");
-      return;
-    }
+    const result = await runUndoFlow(undoId, {
+      journal: this.undoJournal,
+      confirm: (title, body, ctaLabel) =>
+        confirmDestructive(this.app, title, body, ctaLabel),
+      notify: (m) => {
+        new Notice(m);
+      },
+    });
+    if (result.result !== "success") return;
+    const undoneId = result.entry.id;
     const messages = this.state.getMessages();
     for (const m of messages) {
-      const hit = m.toolCalls?.find((c) => c.undoId === entry.id);
+      const hit = m.toolCalls?.find((c) => c.undoId === undoneId);
       if (hit) {
         this.state.upsertToolCall(m.id, {
           id: hit.id,
           kind: hit.kind,
           outcome: "completed",
-          undoId: entry.id,
+          undoId: undoneId,
           undone: true,
         });
+        // CONS-1 / FR-013: also persist the updated `toolCalls[].undone`
+        // flag so a restart sees the entry as reverted instead of
+        // re-rendering the Undo button. Without this write the
+        // ConversationsStore.markUndone (which flips the journal entry)
+        // and the rendered tool-call block fall out of sync on reload.
+        const convId = this.boundConversationId;
+        if (convId) {
+          const updated = this.state
+            .getMessages()
+            .find((mm) => mm.id === m.id);
+          const persistedToolCalls = toPersistedToolCalls(updated?.toolCalls);
+          if (persistedToolCalls) {
+            this.manager.persistMessageReplace(convId, m.id, {
+              toolCalls: persistedToolCalls,
+            });
+          }
+        }
         break;
       }
     }
   }
 }
+
+// divergenceConfirmMessage moved to ./undoFlow.ts (Phase 6 refactor for
+// unit-testability).
 
 /**
  * Pull the undoId from a write-tool result. Our handlers return a
@@ -568,5 +912,42 @@ function extractUndoId(raw: string | undefined): string | undefined {
     // Result wasn't JSON; that's expected for many built-in tools.
   }
   return undefined;
+}
+
+/**
+ * Map ChatState `ToolCall[]` → `PersistedMessage["toolCalls"]`. Drops
+ * the transient `pending_approval` outcome (only terminal outcomes
+ * belong on disk). Used by the streaming send-completion writer AND by
+ * the Undo flow's persistence write so cross-restart Undo state stays
+ * in sync with the journal entry's `undone` flag (CONS-1, FR-013).
+ */
+function toPersistedToolCalls(
+  toolCalls: import("../domain/types").ToolCall[] | undefined,
+): PersistedMessage["toolCalls"] | undefined {
+  if (!toolCalls) return undefined;
+  return toolCalls
+    .filter(
+      (tc) =>
+        tc.outcome === "completed" ||
+        tc.outcome === "errored" ||
+        tc.outcome === "approved" ||
+        tc.outcome === "denied",
+    )
+    .map((tc) => ({
+      id: tc.id,
+      kind: tc.kind,
+      name: tc.name,
+      source: tc.source,
+      outcome: tc.outcome as
+        | "completed"
+        | "errored"
+        | "approved"
+        | "denied",
+      detail: tc.detail,
+      argsPreview: tc.argsPreview,
+      resultContent: tc.resultContent,
+      undoId: tc.undoId,
+      undone: tc.undone,
+    }));
 }
 

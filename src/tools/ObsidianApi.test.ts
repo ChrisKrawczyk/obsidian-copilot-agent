@@ -317,6 +317,141 @@ describe("ObsidianApi.getFileCache", () => {
   });
 });
 
+// ---------------------------------------------------------------------
+// v0.3 Phase 2: listAllTags / findFilesByTag wrappers
+// ---------------------------------------------------------------------
+
+describe("ObsidianApi.listAllTags (v0.3 Phase 2)", () => {
+  test("preserves `this` when calling native getTags()", () => {
+    let calledWithThis: unknown = "uninit";
+    const metadataCache = {
+      getTags(this: unknown): Record<string, number> {
+        calledWithThis = this;
+        if (this !== metadataCache) {
+          throw new TypeError("native getTags invoked without metadataCache as `this`");
+        }
+        return { "#project": 3 };
+      },
+    };
+    const api = new ObsidianApi({
+      vault: { adapter: { getBasePath: () => tmpRoot } } as unknown as AppLike["vault"],
+      metadataCache: metadataCache as unknown as AppLike["metadataCache"],
+    });
+    const r = api.listAllTags();
+    expect(r.ok).toBe(true);
+    expect(calledWithThis).toBe(metadataCache);
+  });
+
+  test("falls back to scanning getFileCache when getTags is absent", () => {
+    const file: TFileLike = { path: "a.md", extension: "md" };
+    const cache: FileCacheLike = {
+      tags: [{ tag: "#project" }, { tag: "#work" }],
+    };
+    const api = new ObsidianApi({
+      vault: {
+        adapter: { getBasePath: () => tmpRoot },
+        getMarkdownFiles: () => [file],
+      } as unknown as AppLike["vault"],
+      metadataCache: {
+        getFileCache: () => cache,
+      },
+    });
+    const r = api.listAllTags();
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value).toEqual({ "#project": 1, "#work": 1 });
+    }
+  });
+
+  test("returns metadata-cache-not-ready when neither path is available", () => {
+    const api = new ObsidianApi({
+      vault: { adapter: { getBasePath: () => tmpRoot } } as unknown as AppLike["vault"],
+    });
+    const r = api.listAllTags();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
+  });
+
+  test("normalises keys missing the leading # (defensive)", () => {
+    const metadataCache = {
+      getTags: () => ({ project: 2, "#work": 3 }),
+    };
+    const api = new ObsidianApi({
+      vault: { adapter: { getBasePath: () => tmpRoot } } as unknown as AppLike["vault"],
+      metadataCache: metadataCache as unknown as AppLike["metadataCache"],
+    });
+    const r = api.listAllTags();
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value).toEqual({ "#project": 2, "#work": 3 });
+    }
+  });
+});
+
+describe("ObsidianApi.findFilesByTag (v0.3 Phase 2)", () => {
+  test("returns markdown files whose cache reports the tag", () => {
+    const f1: TFileLike = { path: "a.md", extension: "md" };
+    const f2: TFileLike = { path: "b.md", extension: "md" };
+    const f3: TFileLike = { path: "c.md", extension: "md" };
+    const caches = new Map<string, FileCacheLike>([
+      ["a.md", { tags: [{ tag: "#project" }] }],
+      ["b.md", { frontmatter: { tags: ["project"] } }],
+      ["c.md", { tags: [{ tag: "#other" }] }],
+    ]);
+    const api = new ObsidianApi({
+      vault: {
+        adapter: { getBasePath: () => tmpRoot },
+        getMarkdownFiles: () => [f1, f2, f3],
+      } as unknown as AppLike["vault"],
+      metadataCache: {
+        getFileCache: (file) => caches.get(file.path) ?? null,
+      },
+    });
+    const r = api.findFilesByTag("project");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.map((f) => f.path).sort()).toEqual(["a.md", "b.md"]);
+    }
+  });
+
+  test("preserves `this` when calling native getFileCache (regression)", () => {
+    const file: TFileLike = { path: "n.md", extension: "md" };
+    const metadataCache = {
+      getFileCache(this: unknown, _f: TFileLike): FileCacheLike | null {
+        if (this !== metadataCache) {
+          throw new TypeError("native getFileCache invoked without metadataCache as `this`");
+        }
+        return { tags: [{ tag: "#project" }] };
+      },
+    };
+    const api = new ObsidianApi({
+      vault: {
+        adapter: { getBasePath: () => tmpRoot },
+        getMarkdownFiles: () => [file],
+      } as unknown as AppLike["vault"],
+      metadataCache: metadataCache as unknown as AppLike["metadataCache"],
+    });
+    const r = api.findFilesByTag("project");
+    expect(r.ok).toBe(true);
+  });
+
+  test("returns invalid-path on empty / hash-only input", () => {
+    const api = new ObsidianApi({
+      vault: {
+        adapter: { getBasePath: () => tmpRoot },
+        getMarkdownFiles: () => [],
+      } as unknown as AppLike["vault"],
+      metadataCache: { getFileCache: () => null },
+    });
+    const r1 = api.findFilesByTag("");
+    const r2 = api.findFilesByTag("#");
+    expect(r1.ok).toBe(false);
+    expect(r2.ok).toBe(false);
+    if (!r1.ok) expect(r1.reason).toBe("invalid-path");
+    if (!r2.ok) expect(r2.reason).toBe("invalid-path");
+  });
+});
+
 describe("ObsidianApi.getVaultTree", () => {
   test("returns root + children at default depth=2", () => {
     const files: FixtureFile[] = [

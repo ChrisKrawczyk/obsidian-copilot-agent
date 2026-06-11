@@ -233,7 +233,11 @@ export interface AgentSession {
   resolveApproval(toolCallId: string, choice: ApprovalChoice): void;
 }
 
-const SDK_TIMEOUT_MS = 60_000;
+const SDK_IDLE_TIMEOUT_MS = 180_000;
+// SDK ceiling: passed as the second arg to session.sendAndWait so the
+// SDK's own (wall-clock, non-idle-aware) timeout doesn't fire before
+// our idle watchdog. Set high; our bumpIdleTimer is the actual guard.
+const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
 
 export class CopilotAgentSession implements AgentSession {
@@ -291,6 +295,12 @@ export class CopilotAgentSession implements AgentSession {
   private currentStreamPush:
     | ((ev: StreamEvent) => void)
     | null = null;
+  /**
+   * Set during sendMessageStreaming. Resets the idle timeout when called.
+   * handlePermission calls it on permission requests so that long-running
+   * approval flows don't trip the idle watchdog.
+   */
+  private bumpIdleTimer: (() => void) | null = null;
   /**
    * Set of tool names we registered as custom tools, used to classify
    * tool sources (`custom` vs `builtin`/`mcp`) in the chat UI.
@@ -405,20 +415,28 @@ export class CopilotAgentSession implements AgentSession {
     }
     this.toolCallsThisTurn = [];
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        this.session?.abort?.();
-      } catch (e) {
-        console.warn("[AgentSession] abort on timeout failed", e);
-      }
-    }, SDK_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bumpIdleTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        try {
+          this.session?.abort?.();
+        } catch (e) {
+          console.warn("[AgentSession] abort on timeout failed", e);
+        }
+      }, SDK_IDLE_TIMEOUT_MS);
+    };
+    bumpIdleTimer();
+    // sendMessage (non-streaming) has no intermediate activity hooks
+    // so the idle timer here behaves as a wall-clock budget. The
+    // streaming path resets it on each delta / tool event.
     try {
       const outgoing = this.wrapWithPreamble(text);
-      const resp = await this.session.sendAndWait(outgoing);
+      const resp = await this.session.sendAndWait(outgoing, SDK_HARD_CEILING_MS);
       if (timedOut) {
         throw new Error(
-          `Model did not respond within ${SDK_TIMEOUT_MS / 1000}s`,
+          `Model went idle for over ${SDK_IDLE_TIMEOUT_MS / 1000}s`,
         );
       }
       return {
@@ -435,7 +453,7 @@ export class CopilotAgentSession implements AgentSession {
       }
       throw err;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -500,6 +518,7 @@ export class CopilotAgentSession implements AgentSession {
         unsubDelta = session.on("assistant.message_delta", (event) => {
           const delta = event?.data?.deltaContent;
           if (typeof delta === "string" && delta.length > 0) {
+            bumpIdleTimer();
             push({ type: "delta", text: delta });
           }
         });
@@ -510,6 +529,7 @@ export class CopilotAgentSession implements AgentSession {
         unsubToolStart = session.on("tool.execution_start", (event) => {
           const d = event?.data;
           if (!d || typeof d.toolCallId !== "string") return;
+          bumpIdleTimer();
           const source = classifyToolSource(
             d.mcpServerName ? "mcp" : undefined,
             d.toolName,
@@ -547,6 +567,7 @@ export class CopilotAgentSession implements AgentSession {
         unsubToolComplete = session.on("tool.execution_complete", (event) => {
           const d = event?.data;
           if (!d || typeof d.toolCallId !== "string") return;
+          bumpIdleTimer();
           const existing = this.toolCallsThisTurn.find(
             (c) => c.id === d.toolCallId,
           );
@@ -597,12 +618,20 @@ export class CopilotAgentSession implements AgentSession {
     };
 
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      this.cancelCurrent().catch((e) =>
-        console.warn("[AgentSession] abort on timeout failed", e),
-      );
-    }, SDK_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bumpIdleTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        this.cancelCurrent().catch((e) =>
+          console.warn("[AgentSession] abort on timeout failed", e),
+        );
+      }, SDK_IDLE_TIMEOUT_MS);
+    };
+    bumpIdleTimer();
+    // Expose to handlePermission so the idle timer also resets when
+    // the SDK asks for permission (an explicit sign of model activity).
+    this.bumpIdleTimer = bumpIdleTimer;
 
     let done = false;
     let settled = false; // sendAndWait has resolved or rejected
@@ -621,7 +650,7 @@ export class CopilotAgentSession implements AgentSession {
     // the queue draining loop below.
     const outgoing = this.wrapWithPreamble(text);
     session
-      .sendAndWait(outgoing)
+      .sendAndWait(outgoing, SDK_HARD_CEILING_MS)
       .then(
         (resp) => {
           settled = true;
@@ -636,7 +665,7 @@ export class CopilotAgentSession implements AgentSession {
           // silently swallowed as a user cancellation.
           if (timedOut) {
             failure = new Error(
-              `Model did not respond within ${SDK_TIMEOUT_MS / 1000}s`,
+              `Model went idle for over ${SDK_IDLE_TIMEOUT_MS / 1000}s`,
             );
           } else if (isAbortError(err)) {
             // User-initiated cancel (or any other abort path) — end
@@ -689,7 +718,8 @@ export class CopilotAgentSession implements AgentSession {
         toolCalls: this.toolCallsThisTurn,
       };
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      this.bumpIdleTimer = null;
       acceptingDeltas = false;
       cleanupSubscription();
       this.currentStreamPush = null;
@@ -1025,6 +1055,10 @@ export class CopilotAgentSession implements AgentSession {
   private async handlePermission(
     request: SdkPermissionRequest,
   ): Promise<SdkPermissionResult> {
+    // Permission requests are clear evidence of model activity; reset
+    // the streaming idle watchdog so a long approval prompt doesn't
+    // trip the timeout.
+    this.bumpIdleTimer?.();
     const normalised: PermissionRequest = {
       kind: request.kind ?? "(unknown)",
       toolName: request.toolName,
@@ -1598,7 +1632,7 @@ export interface SdkToolExecutionCompleteEvent {
 }
 
 export interface SdkSession {
-  sendAndWait: (prompt: string) => Promise<unknown>;
+  sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;
   /**

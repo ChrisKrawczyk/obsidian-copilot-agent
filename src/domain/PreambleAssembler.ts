@@ -1,4 +1,4 @@
-import { ALL_VAULT_TOOL_ENTRIES } from "./vaultToolManifest";
+import { ALL_VAULT_TOOL_ENTRIES, V01_RAW_FS_TOOL_NAMES } from "./vaultToolManifest";
 
 /**
  * Phase 2: Vault-aware preamble assembler.
@@ -27,6 +27,14 @@ export interface PreambleInput {
   todayInTimezone: string;
   /** Body to emit verbatim when mode = `custom`. Supports placeholders. */
   customBody?: string;
+  /**
+   * v0.3 Phase 1: when true, the inventory block omits the six v0.1
+   * raw-FS tools so the preamble matches the gated SDK manifest.
+   * Defaults to `false` (full inventory) for back-compat with v0.2
+   * callers and tests. Per FR-015 this is captured at plugin startup
+   * by `main.ts` and frozen for the plugin's lifetime.
+   */
+  excludeRawFs?: boolean;
 }
 
 /** Placeholders the custom-mode body may reference. */
@@ -51,9 +59,18 @@ export const MAX_DEFAULT_PREAMBLE_BYTES = 8 * 1024;
 /**
  * Vault tool inventory block — one bullet per tool. Generated from the
  * shared manifest so adding/removing a tool there updates the preamble
- * in lockstep.
+ * in lockstep. This is the FULL (un-gated) inventory; v0.3 Phase 1
+ * additionally exposes a gated variant via {@link buildToolInventoryBlockGated}
+ * for use when `exposeRawFsTools` is OFF.
  */
-export const VAULT_TOOL_INVENTORY_BLOCK = buildToolInventoryBlock();
+export const VAULT_TOOL_INVENTORY_BLOCK = buildToolInventoryBlock(false);
+
+/**
+ * v0.3 Phase 1: gated inventory block omitting the six v0.1 raw-FS
+ * tools. Used when the "Expose v0.1 raw-filesystem tools" setting is
+ * OFF so the preamble inventory matches the SDK tools list.
+ */
+export const VAULT_TOOL_INVENTORY_BLOCK_GATED = buildToolInventoryBlock(true);
 
 /**
  * Authoring-conventions block (FR-006a/b/c): backlinks, tags, tasks.
@@ -76,6 +93,10 @@ const PREAMBLE_MARKER = "<!-- copilot-agent: vault-aware preamble (v0.2) -->";
 export function assemblePreamble(input: PreambleInput): string {
   if (input.mode === "none") return "";
 
+  const inventoryBlock = input.excludeRawFs
+    ? VAULT_TOOL_INVENTORY_BLOCK_GATED
+    : VAULT_TOOL_INVENTORY_BLOCK;
+
   if (input.mode === "custom") {
     const body = input.customBody ?? "";
     return body
@@ -84,7 +105,7 @@ export function assemblePreamble(input: PreambleInput): string {
       .replaceAll(PREAMBLE_PLACEHOLDERS.VAULT_TODAY, input.todayInTimezone)
       .replaceAll(
         PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY,
-        VAULT_TOOL_INVENTORY_BLOCK,
+        inventoryBlock,
       )
       .replaceAll(
         PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS,
@@ -100,19 +121,40 @@ export function assemblePreamble(input: PreambleInput): string {
     `- Timezone: ${input.timezone}`,
     `- Today: ${input.todayInTimezone}`,
     "",
-    VAULT_TOOL_INVENTORY_BLOCK,
+    inventoryBlock,
     "",
     AUTHORING_CONVENTIONS_BLOCK,
   ].join("\n");
 }
 
-function buildToolInventoryBlock(): string {
-  const header =
+function buildToolInventoryBlock(excludeRawFs: boolean): string {
+  const headerCommon =
     "## Vault tools\n" +
-    "Prefer these vault-specific tools over generic shell discovery. Read-only tools (marked R/O) require no approval; mutating tools route through the user's safety policy.";
-  const lines = ALL_VAULT_TOOL_ENTRIES.map((entry) => {
+    "Always reach for vault-specific tools FIRST — they understand " +
+    "Obsidian's metadata cache, daily notes, wikilinks, and the user's " +
+    "safety policy. Read-only tools (marked R/O) require no approval; " +
+    "mutating tools route through the user's safety policy.";
+  const fallbackNote = excludeRawFs
+    ? ""
+    : "\nThe `view`, `read_file`, `search_content`, `create_file`, " +
+      "`edit_file`, and `delete_file` tools are GENERIC filesystem " +
+      "fallbacks. Only use them when no vault-aware tool fits the " +
+      "task (for example, reading a non-markdown file or operating " +
+      "outside the indexed note set). Prefer `read_note` over " +
+      "`read_file`, `vault_tree`/`vault_metadata` over `view`, " +
+      "`search_by_tag`/`search_by_name` over `search_content`, and " +
+      "`create_note`/`edit_note` over `create_file`/`edit_file`.";
+  const header = headerCommon + fallbackNote;
+  const rawFsSet = new Set<string>(V01_RAW_FS_TOOL_NAMES);
+  const entries = excludeRawFs
+    ? ALL_VAULT_TOOL_ENTRIES.filter((e) => !rawFsSet.has(e.name))
+    : ALL_VAULT_TOOL_ENTRIES;
+  const lines = entries.map((entry) => {
     const tag = entry.readOnly ? " _(R/O)_" : "";
-    return `- \`${entry.name}\`${tag}: ${entry.hint}`;
+    const fallbackTag = !excludeRawFs && rawFsSet.has(entry.name)
+      ? " _(fallback)_"
+      : "";
+    return `- \`${entry.name}\`${tag}${fallbackTag}: ${entry.hint}`;
   });
   return [header, ...lines].join("\n");
 }
