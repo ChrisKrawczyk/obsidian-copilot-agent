@@ -59,9 +59,12 @@ export interface SafetySettings {
   /**
    * v0.3 Phase 1: gates the six v0.1 raw-filesystem tools (`view`,
    * `read_file`, `search_content`, `create_file`, `edit_file`,
-   * `delete_file`). Default OFF — the model relies on the higher-level
-   * v0.2 vault tools (`read_note`/`edit_note`/etc.) instead. When ON,
-   * the raw-FS tools are exposed with their existing approval policy.
+   * `delete_file`). Default ON — the model is offered both the
+   * higher-level v0.2 vault tools AND the raw-FS tools, with preamble
+   * guidance directing it to prefer vault tools first and treat the
+   * raw-FS tools as a fallback. Users who want a strictly vault-only
+   * agent can turn this OFF; the gated tools are then dropped from
+   * the SDK manifest and the preamble inventory.
    *
    * Per FR-015, toggling this takes effect on the next session start
    * only: `main.ts` snapshots the value at plugin onload and freezes
@@ -76,7 +79,7 @@ export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
   allowlist: [],
   autoApproveBuiltins: {},
   vaultAwareness: { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
-  exposeRawFsTools: false,
+  exposeRawFsTools: true,
 };
 
 /** SDK kinds we surface as built-in toggles in the settings UI. */
@@ -228,6 +231,6 @@ function mergeWithDefaults(
     exposeRawFsTools:
       typeof partial.exposeRawFsTools === "boolean"
         ? partial.exposeRawFsTools
-        : false,
+        : true,
   };
 }

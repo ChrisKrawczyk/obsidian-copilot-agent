@@ -187,10 +187,14 @@ describe("assemblePreamble", () => {
     expect(full).toContain(VAULT_TOOL_INVENTORY_BLOCK);
   });
 
-  it("excludeRawFs=true makes the inventory shorter than the un-gated variant by exactly six entries", () => {
-    const fullLines = VAULT_TOOL_INVENTORY_BLOCK.split("\n").length;
-    const gatedLines = VAULT_TOOL_INVENTORY_BLOCK_GATED.split("\n").length;
-    expect(fullLines - gatedLines).toBe(V01_RAW_FS_TOOL_NAMES.length);
+  it("excludeRawFs=true makes the inventory shorter than the un-gated variant by exactly six tool entries", () => {
+    // Count only bullet lines so the gated header (which has no
+    // "fallback" preamble) doesn't skew the diff.
+    const countBullets = (s: string) =>
+      s.split("\n").filter((l) => l.startsWith("- `")).length;
+    const fullBullets = countBullets(VAULT_TOOL_INVENTORY_BLOCK);
+    const gatedBullets = countBullets(VAULT_TOOL_INVENTORY_BLOCK_GATED);
+    expect(fullBullets - gatedBullets).toBe(V01_RAW_FS_TOOL_NAMES.length);
   });
 
   it("excludeRawFs is honored under custom mode via the VAULT_TOOL_INVENTORY placeholder", () => {
@@ -213,6 +217,29 @@ describe("assemblePreamble", () => {
     );
     expect(VAULT_TOOL_INVENTORY_BLOCK_GATED).not.toMatch(
       /`create_note`\s+_\(R\/O\)_/,
+    );
+  });
+
+  it("default (un-gated) inventory marks raw-FS entries as fallbacks and steers the model to vault tools first", () => {
+    expect(VAULT_TOOL_INVENTORY_BLOCK).toContain("vault-specific tools FIRST");
+    for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
+      // Every raw-FS bullet should carry the (fallback) marker.
+      const re = new RegExp(`\`${rawFs}\`[^\\n]*_\\(fallback\\)_`);
+      expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(re);
+    }
+    // Non-raw-FS tools must NOT be tagged as fallback.
+    expect(VAULT_TOOL_INVENTORY_BLOCK).not.toMatch(
+      /`read_note`[^\n]*_\(fallback\)_/,
+    );
+    expect(VAULT_TOOL_INVENTORY_BLOCK).not.toMatch(
+      /`vault_tree`[^\n]*_\(fallback\)_/,
+    );
+  });
+
+  it("gated inventory has no fallback markers (raw-FS tools are absent, not demoted)", () => {
+    expect(VAULT_TOOL_INVENTORY_BLOCK_GATED).not.toContain("_(fallback)_");
+    expect(VAULT_TOOL_INVENTORY_BLOCK_GATED).not.toContain(
+      "GENERIC filesystem fallbacks",
     );
   });
 

@@ -124,12 +124,14 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName("Expose v0.1 raw-filesystem tools")
         .setDesc(
-          "When OFF (default), the six v0.1 raw-FS tools (view, " +
+          "When ON (default), the six v0.1 raw-FS tools (view, " +
             "read_file, search_content, create_file, edit_file, " +
-            "delete_file) are NOT offered to the model — it relies on " +
-            "the higher-level vault tools (read_note, edit_note, etc.) " +
-            "instead. When ON, the raw-FS tools are offered with their " +
-            "existing approval policy. Takes effect on the next " +
+            "delete_file) are offered to the model as a FALLBACK to " +
+            "the higher-level vault tools (read_note, edit_note, " +
+            "etc.); the preamble tells the model to reach for vault " +
+            "tools first. Turn OFF for a strictly vault-only agent — " +
+            "the raw-FS tools are then dropped from the manifest and " +
+            "the model cannot invoke them. Takes effect on the next " +
             "session start (reload the plugin or restart Obsidian).",
         )
         .addToggle((toggle) =>

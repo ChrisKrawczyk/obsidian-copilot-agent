@@ -46,7 +46,7 @@ const ALL_TOOLS: FakeTool[] = [
 ];
 
 describe("filterRawFsToolsIfGated (v0.3 Phase 1)", () => {
-  it("when exposeRawFsTools=false (default) drops exactly the six raw-FS tools", () => {
+  it("when exposeRawFsTools=false (user opted out) drops exactly the six raw-FS tools", () => {
     const filtered = filterRawFsToolsIfGated(ALL_TOOLS, false);
     const names = filtered.map((t) => t.name);
     for (const rawFs of V01_RAW_FS_TOOL_NAMES) {
@@ -57,7 +57,7 @@ describe("filterRawFsToolsIfGated (v0.3 Phase 1)", () => {
     );
   });
 
-  it("when exposeRawFsTools=true keeps all six raw-FS tools and all vault tools", () => {
+  it("when exposeRawFsTools=true (default) keeps all six raw-FS tools and all vault tools", () => {
     const filtered = filterRawFsToolsIfGated(ALL_TOOLS, true);
     const names = filtered.map((t) => t.name);
     for (const rawFs of V01_RAW_FS_TOOL_NAMES) {

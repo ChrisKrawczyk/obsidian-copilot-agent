@@ -22,49 +22,51 @@ function memoryIo(initial: unknown = null): PluginDataIO & { peek: () => unknown
 }
 
 describe("SafetySettingsStore — exposeRawFsTools (v0.3 Phase 1)", () => {
-  it("defaults to false on a fresh load with no persisted data", async () => {
+  it("defaults to true on a fresh load with no persisted data (v0.3: opt-out gating)", async () => {
     const io = memoryIo(null);
     const store = new SafetySettingsStore(io);
     const snap = await store.load();
-    expect(snap.exposeRawFsTools).toBe(false);
-    expect(DEFAULT_SAFETY_SETTINGS.exposeRawFsTools).toBe(false);
+    expect(snap.exposeRawFsTools).toBe(true);
+    expect(DEFAULT_SAFETY_SETTINGS.exposeRawFsTools).toBe(true);
   });
 
-  it("defaults to false when the safety subtree omits the field (mergeWithDefaults)", async () => {
+  it("defaults to true when the safety subtree omits the field (mergeWithDefaults)", async () => {
     const io = memoryIo({
       auth: { foo: "bar" },
       safety: {
         defaultMode: "auto-apply-with-undo",
         allowlist: ["Inbox/copilot"],
-        // exposeRawFsTools intentionally omitted
+        // exposeRawFsTools intentionally omitted — pre-v0.3 persisted
+        // blobs (which never wrote this field) should land on the new
+        // opt-out default rather than silently gating the agent.
       },
     });
     const store = new SafetySettingsStore(io);
     const snap = await store.load();
-    expect(snap.exposeRawFsTools).toBe(false);
+    expect(snap.exposeRawFsTools).toBe(true);
     // Other fields still load through mergeWithDefaults.
     expect(snap.defaultMode).toBe("auto-apply-with-undo");
     expect(snap.allowlist).toEqual(["Inbox/copilot"]);
   });
 
-  it("rejects non-boolean exposeRawFsTools values and falls back to false", async () => {
+  it("rejects non-boolean exposeRawFsTools values and falls back to the default (true)", async () => {
     const io = memoryIo({
       safety: { exposeRawFsTools: "yes" },
     });
     const store = new SafetySettingsStore(io);
     const snap = await store.load();
-    expect(snap.exposeRawFsTools).toBe(false);
+    expect(snap.exposeRawFsTools).toBe(true);
   });
 
-  it("persists exposeRawFsTools=true and round-trips through load()", async () => {
+  it("persists exposeRawFsTools=false (user opt-out) and round-trips through load()", async () => {
     const io = memoryIo(null);
     const writer = new SafetySettingsStore(io);
     await writer.load();
-    await writer.setExposeRawFsTools(true);
+    await writer.setExposeRawFsTools(false);
 
     const reader = new SafetySettingsStore(io);
     const snap = await reader.load();
-    expect(snap.exposeRawFsTools).toBe(true);
+    expect(snap.exposeRawFsTools).toBe(false);
   });
 
   it("preserves unrelated top-level keys (auth) when persisting the toggle", async () => {

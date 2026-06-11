@@ -128,16 +128,33 @@ export function assemblePreamble(input: PreambleInput): string {
 }
 
 function buildToolInventoryBlock(excludeRawFs: boolean): string {
-  const header =
+  const headerCommon =
     "## Vault tools\n" +
-    "Prefer these vault-specific tools over generic shell discovery. Read-only tools (marked R/O) require no approval; mutating tools route through the user's safety policy.";
+    "Always reach for vault-specific tools FIRST — they understand " +
+    "Obsidian's metadata cache, daily notes, wikilinks, and the user's " +
+    "safety policy. Read-only tools (marked R/O) require no approval; " +
+    "mutating tools route through the user's safety policy.";
+  const fallbackNote = excludeRawFs
+    ? ""
+    : "\nThe `view`, `read_file`, `search_content`, `create_file`, " +
+      "`edit_file`, and `delete_file` tools are GENERIC filesystem " +
+      "fallbacks. Only use them when no vault-aware tool fits the " +
+      "task (for example, reading a non-markdown file or operating " +
+      "outside the indexed note set). Prefer `read_note` over " +
+      "`read_file`, `vault_tree`/`vault_metadata` over `view`, " +
+      "`search_by_tag`/`search_by_name` over `search_content`, and " +
+      "`create_note`/`edit_note` over `create_file`/`edit_file`.";
+  const header = headerCommon + fallbackNote;
   const rawFsSet = new Set<string>(V01_RAW_FS_TOOL_NAMES);
   const entries = excludeRawFs
     ? ALL_VAULT_TOOL_ENTRIES.filter((e) => !rawFsSet.has(e.name))
     : ALL_VAULT_TOOL_ENTRIES;
   const lines = entries.map((entry) => {
     const tag = entry.readOnly ? " _(R/O)_" : "";
-    return `- \`${entry.name}\`${tag}: ${entry.hint}`;
+    const fallbackTag = !excludeRawFs && rawFsSet.has(entry.name)
+      ? " _(fallback)_"
+      : "";
+    return `- \`${entry.name}\`${tag}${fallbackTag}: ${entry.hint}`;
   });
   return [header, ...lines].join("\n");
 }
