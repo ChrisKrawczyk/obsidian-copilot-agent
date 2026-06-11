@@ -10,6 +10,7 @@ import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
 import type { UndoJournal } from "../domain/UndoJournal";
 import type { ConversationManager } from "../domain/ConversationManager";
+import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
@@ -88,6 +89,11 @@ export class ChatView extends ItemView {
    * `abort()` does not flush in-flight deltas.
    */
   private currentPlaceholderId?: string;
+  /** v0.3 Phase 4: ChatState owning the in-flight stream. Captured
+   *  alongside `currentPlaceholderId` at handleSend so handleStop can
+   *  freeze the right runtime's placeholder even after a mid-stream
+   *  active switch. */
+  private currentStreamState?: ChatState;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private unsubManager?: () => void;
@@ -351,7 +357,8 @@ export class ChatView extends ItemView {
     //      messages. We do this BEFORE awaiting cancelCurrent() so a
     //      slow abort can't leak more text into the visible message.
     if (this.currentPlaceholderId) {
-      this.state.interruptStreaming(this.currentPlaceholderId);
+      const streamState = this.currentStreamState ?? this.state;
+      streamState.interruptStreaming(this.currentPlaceholderId);
     }
     this.sendBtnEl.disabled = true;
     try {
@@ -383,13 +390,57 @@ export class ChatView extends ItemView {
     this.userRequestedStop = false;
     this.setBusy(true);
 
-    this.state.append({ role: "user", content: text });
-    const placeholderId = this.state.append({
+    // v0.3 Phase 4: capture the originating runtime's state + id at
+    // send time. A mid-stream `setActive(other)` switches `this.state`
+    // and `this.agent` to a DIFFERENT runtime — without capture, the
+    // streaming deltas/tool-calls below would silently leak into the
+    // wrong conversation's ChatState (and persist to the wrong row).
+    const state = this.state;
+    const convId = this.boundConversationId;
+    const userMsgId = state.append({ role: "user", content: text });
+    const placeholderId = state.append({
       role: "assistant",
       content: "",
       status: "pending",
     });
     this.currentPlaceholderId = placeholderId;
+    this.currentStreamState = state;
+    // Persist the user message immediately so a crash mid-stream
+    // doesn't lose the prompt. The assistant placeholder is also
+    // persisted as `pending` so the conversation row has a slot for
+    // the final replace at the end of the turn.
+    if (convId) {
+      const userMsg = state
+        .getMessages()
+        .find((m) => m.id === userMsgId);
+      if (userMsg) {
+        // User messages should always be `complete` once appended;
+        // narrow the broader ChatState `MessageStatus` to the persisted
+        // shape. Any unexpected non-terminal value collapses to
+        // `complete` for the persisted form (we already wrote the
+        // canonical user text).
+        const persistedStatus: PersistedMessage["status"] =
+          userMsg.status === "interrupted"
+            ? "interrupted"
+            : userMsg.status === "error"
+              ? "error"
+              : "complete";
+        this.manager.persistMessageAppend(convId, {
+          id: userMsg.id,
+          role: userMsg.role,
+          content: userMsg.content,
+          status: persistedStatus,
+          createdAt: userMsg.createdAt,
+        });
+      }
+      this.manager.persistMessageAppend(convId, {
+        id: placeholderId,
+        role: "assistant",
+        content: "",
+        status: "complete",
+        createdAt: Date.now(),
+      });
+    }
 
     let receivedAnyDelta = false;
     let finalContent = "";
@@ -407,11 +458,11 @@ export class ChatView extends ItemView {
         }
         if (ev.type === "delta") {
           receivedAnyDelta = true;
-          this.state.appendDelta(placeholderId, ev.text);
+          state.appendDelta(placeholderId, ev.text);
         } else if (ev.type === "tool_call_start") {
           // Live tool-call block. We map AgentSession's structural
           // type to the domain ToolCall shape (they share fields).
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -429,7 +480,7 @@ export class ChatView extends ItemView {
           // `"undoId"` field set by createFileImpl/editFileImpl/
           // deleteFileImpl. If absent, undoId stays undefined.
           const undoId = extractUndoId(ev.content);
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: ev.outcome,
@@ -444,7 +495,7 @@ export class ChatView extends ItemView {
           // Pass undefined for fields the prior state may have set
           // (resultContent, detail, undoId, undone) so a same-id
           // re-prompt doesn't render stale post-execution chrome.
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -463,7 +514,7 @@ export class ChatView extends ItemView {
           // overwrite this immediately if execution proceeds.
           const newOutcome =
             ev.choice.kind === "reject" ? "denied" : "approved";
-          this.state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: newOutcome,
@@ -493,10 +544,11 @@ export class ChatView extends ItemView {
     this.userRequestedStop = false;
     this.stopping = false;
     this.currentPlaceholderId = undefined;
+    this.currentStreamState = undefined;
 
     if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
-      this.state.update(placeholderId, {
+      state.update(placeholderId, {
         content: `**Error:** ${msg}`,
         status: "error",
       });
@@ -504,7 +556,7 @@ export class ChatView extends ItemView {
     } else if (cancelled) {
       // User clicked Stop before any delta arrived. Freeze placeholder
       // as interrupted with whatever (if anything) was streamed.
-      this.state.interruptStreaming(placeholderId);
+      state.interruptStreaming(placeholderId);
     } else {
       // Normal completion. Prefer the SDK's final content over the
       // concatenated deltas (they may differ — e.g. when the model
@@ -520,7 +572,7 @@ export class ChatView extends ItemView {
       // wholesale replace `toolCalls` here, so denied/streamed blocks
       // are preserved verbatim even if the final summary omits them.
       for (const tc of finalToolCalls) {
-        this.state.upsertToolCall(placeholderId, tc);
+        state.upsertToolCall(placeholderId, tc);
       }
       let content = finalContent;
       if (!content && !receivedAnyDelta && finalToolCalls.length === 0) {
@@ -530,13 +582,64 @@ export class ChatView extends ItemView {
       // we streamed rather than blanking the message.
       if (!content && receivedAnyDelta) {
         // Just flip status; ChatState already holds the streamed text.
-        this.state.update(placeholderId, {
+        state.update(placeholderId, {
           status: "complete",
         });
       } else {
-        this.state.update(placeholderId, {
+        state.update(placeholderId, {
           content,
           status: "complete",
+        });
+      }
+    }
+
+    // v0.3 Phase 4 (FR-007): land the final assistant message in the
+    // persisted store. We snapshot from `state` (the originating
+    // runtime), so a mid-stream conversation switch can't redirect
+    // the write to the wrong row. `ConversationsStore` debounces, so
+    // this single replace coalesces with the earlier pending-append.
+    if (convId) {
+      const finalMsg = state
+        .getMessages()
+        .find((m) => m.id === placeholderId);
+      if (finalMsg) {
+        const status: PersistedMessage["status"] =
+          finalMsg.status === "complete"
+            ? "complete"
+            : finalMsg.status === "error"
+              ? "error"
+              : "interrupted";
+        // Filter out non-persisted tool-call outcomes (e.g. the
+        // transient `pending_approval` pseudo-state used while a
+        // prompt is awaiting the user). Only terminal outcomes
+        // belong in the persisted shape.
+        const persistedToolCalls = finalMsg.toolCalls
+          ?.filter((tc) =>
+            tc.outcome === "completed" ||
+            tc.outcome === "errored" ||
+            tc.outcome === "approved" ||
+            tc.outcome === "denied",
+          )
+          .map((tc) => ({
+            id: tc.id,
+            kind: tc.kind,
+            name: tc.name,
+            source: tc.source,
+            outcome: tc.outcome as
+              | "completed"
+              | "errored"
+              | "approved"
+              | "denied",
+            detail: tc.detail,
+            argsPreview: tc.argsPreview,
+            resultContent: tc.resultContent,
+            undoId: tc.undoId,
+            undone: tc.undone,
+          }));
+        this.manager.persistMessageReplace(convId, placeholderId, {
+          content: finalMsg.content,
+          status,
+          toolCalls: persistedToolCalls,
         });
       }
     }

@@ -45,6 +45,9 @@ import {
  */
 export default class CopilotAgentPlugin extends Plugin {
   private conversationManager: ConversationManager | null = null;
+  /** Held so `onunload()` can flush pending debounced writes before
+   *  the plugin process is torn down. */
+  private conversationsStore: ConversationsStore | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -92,6 +95,7 @@ export default class CopilotAgentPlugin extends Plugin {
       pluginDataDir,
     });
     void conversationsStore; // Phase 4 wires this into ConversationManager.
+    this.conversationsStore = conversationsStore;
     // v0.3 Phase 1 (FR-014/FR-015 + C2-A): load safety settings BEFORE
     // constructing the agent so the gated-tools decision uses the
     // persisted value, not defaults. The snapshot captured here is
@@ -486,7 +490,19 @@ export default class CopilotAgentPlugin extends Plugin {
   async onunload(): Promise<void> {
     console.log("[copilot-agent] Unloading");
     const manager = this.conversationManager;
+    const store = this.conversationsStore;
     this.conversationManager = null;
+    this.conversationsStore = null;
+    // Flush BEFORE disposing runtimes so any in-flight debounced
+    // conversation/undo writes land. dispose only cancels SDK streams;
+    // the journal/store deltas are already committed in memory.
+    if (store) {
+      try {
+        await store.flushNow();
+      } catch (err) {
+        console.warn("[copilot-agent] conversationsStore.flushNow threw", err);
+      }
+    }
     if (manager) {
       try {
         await manager.disposeAll();

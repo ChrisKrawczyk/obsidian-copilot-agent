@@ -265,6 +265,43 @@ export class ConversationManager {
     this.emit({ kind: "metadata-changed", id: conv.id });
   }
 
+  /**
+   * v0.3 Phase 4 (FR-007): mirror a newly-appended ChatState message
+   * into the persisted store. ChatView calls this from its send path
+   * with `convId` captured at send time, so a mid-stream active
+   * switch can't redirect persistence to the wrong conversation.
+   * Best-effort: failures are logged, never thrown.
+   */
+  persistMessageAppend(convId: string, msg: PersistedMessage): void {
+    if (!this.store) return;
+    if (!this.conversations.has(convId)) return;
+    try {
+      this.store.appendMessage(convId, msg);
+    } catch (err) {
+      console.error("[ConversationManager] persistMessageAppend failed", err);
+    }
+  }
+
+  /**
+   * Mirror a ChatState message-replace into the store. Used to land
+   * the final assistant content + status at the end of a streaming
+   * turn (so we don't write on every delta; the debounce inside
+   * `ConversationsStore` coalesces this with the prior append).
+   */
+  persistMessageReplace(
+    convId: string,
+    msgId: string,
+    partial: Partial<PersistedMessage>,
+  ): void {
+    if (!this.store) return;
+    if (!this.conversations.has(convId)) return;
+    try {
+      this.store.replaceMessage(convId, msgId, partial);
+    } catch (err) {
+      console.error("[ConversationManager] persistMessageReplace failed", err);
+    }
+  }
+
   // ---------------- Subscriptions ----------------
 
   subscribe(listener: ConversationListener): () => void {

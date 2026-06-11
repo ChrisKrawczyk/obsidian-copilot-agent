@@ -69,6 +69,22 @@ function makeFakeStore(): {
       e.id === entryId ? { ...e, undone: true } : e,
     );
   });
+  const appendMessageSpy = vi.fn(
+    (convId: string, msg: PersistedMessage) => {
+      const c = state.byId.get(convId);
+      if (!c) return;
+      c.messages = [...c.messages, { ...msg }];
+    },
+  );
+  const replaceMessageSpy = vi.fn(
+    (convId: string, msgId: string, partial: Partial<PersistedMessage>) => {
+      const c = state.byId.get(convId);
+      if (!c) return;
+      c.messages = c.messages.map((m) =>
+        m.id === msgId ? { ...m, ...partial, id: m.id } : m,
+      );
+    },
+  );
 
   // Cast through unknown — the manager only consumes a narrow subset.
   const store = {
@@ -78,6 +94,8 @@ function makeFakeStore(): {
     listConversations,
     recordUndo: recordUndoSpy,
     markUndone: markUndoneSpy,
+    appendMessage: appendMessageSpy,
+    replaceMessage: replaceMessageSpy,
   } as unknown as ConversationsStore;
 
   return {
@@ -526,6 +544,69 @@ describe("ConversationManager — runtime persistence wiring", () => {
       undone: true,
     });
     expect(markUndoneSpy).toHaveBeenCalledWith("conv-1", "u1");
+  });
+});
+
+describe("ConversationManager — message persistence (FR-007)", () => {
+  test("persistMessageAppend forwards to store.appendMessage for known conv", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    state.byId.set("conv-1", persistedConv("conv-1"));
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    m.persistMessageAppend("conv-1", {
+      id: "m1",
+      role: "user",
+      content: "hi",
+      status: "complete",
+      createdAt: 1,
+    });
+    expect(state.byId.get("conv-1")!.messages.map((x) => x.id)).toEqual(["m1"]);
+  });  test("persistMessageAppend is a no-op for unknown conv ids (race-safe)", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    // Removed mid-flight scenario — call must not throw.
+    expect(() =>
+      m.persistMessageAppend("conv-ghost", {
+        id: "x",
+        role: "user",
+        content: "y",
+        status: "complete",
+        createdAt: 1,
+      }),
+    ).not.toThrow();
+  });
+
+  test("persistMessageReplace forwards to store.replaceMessage", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const seed = persistedConv("conv-1", {
+      messages: [
+        {
+          id: "m1",
+          role: "assistant",
+          content: "",
+          status: "complete",
+          createdAt: 1,
+        },
+      ],
+    });
+    state.byId.set("conv-1", seed);
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({ conversations: [seed], activeConversationId: "conv-1" });
+    m.persistMessageReplace("conv-1", "m1", {
+      content: "final",
+      status: "complete",
+    });
+    expect(state.byId.get("conv-1")!.messages[0].content).toBe("final");
   });
 });
 

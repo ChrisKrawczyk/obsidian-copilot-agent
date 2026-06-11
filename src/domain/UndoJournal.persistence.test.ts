@@ -236,4 +236,37 @@ describe("UndoJournal persistence wiring (Phase 4)", () => {
     expect(j.get("undo-seed-3")).toBeDefined();
     expect(j.get("undo-seed-4")).toBeDefined();
   });
+
+  test("hydration advances idCounter so new record() never reuses persisted ids", () => {
+    const { vault } = makeFakeVault();
+    const seed: PersistedUndoEntry[] = [
+      {
+        id: "undo-1",
+        kind: "create",
+        scope: "vault",
+        path: "a.md",
+        after: "x",
+        recordedAt: 1,
+      },
+      {
+        id: "undo-7",
+        kind: "create",
+        scope: "vault",
+        path: "b.md",
+        after: "y",
+        recordedAt: 2,
+      },
+    ];
+    const j = new UndoJournal({ vault, initialEntries: seed });
+    const e = j.record({
+      kind: "create",
+      scope: "vault",
+      path: "c.md",
+      after: "z",
+    });
+    // Counter advances past 7 → first new id is undo-8, not undo-1.
+    expect(e.id).toBe("undo-8");
+    expect(j.get("undo-1")).toBeDefined();
+    expect(j.get("undo-7")).toBeDefined();
+  });
 });

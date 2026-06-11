@@ -290,6 +290,14 @@ export class UndoJournal {
     };
     this.entries.set(p.id, entry);
     this.insertionOrder.push(p.id);
+    // Advance the counter past any persisted id that follows our
+    // `undo-<n>` convention, so the first record() after a hydrate
+    // doesn't reuse an already-taken id and overwrite history.
+    const m = /^undo-(\d+)$/.exec(p.id);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > this.idCounter) this.idCounter = n;
+    }
   }
 
   private safePersist(op: UndoJournalPersistOp, entry: UndoEntry): void {
