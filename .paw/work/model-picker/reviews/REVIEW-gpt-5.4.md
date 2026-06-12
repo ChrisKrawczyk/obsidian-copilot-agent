@@ -48,3 +48,21 @@ The blocking issues are internal consistency and traceability: the default/null 
 - Each story includes at least one acceptance scenario and an independent test.
 - The requested UX areas from the brief are represented in stories/FRs/SCs.
 - Risks are realistic overall and several assumptions are already flagged for CodeResearch.
+
+## Re-Review (v2)
+
+- **Verdict**: **PASS-with-fixes**
+- **Criteria Passed**: **20 / 21** (SpecResearch criteria N/A; no `SpecResearch.md` present)
+- **Findings**: **1**
+
+### Summary
+
+Four of my five prior findings are now addressed, and the other reviewers' must-fixes are also addressed: the default/null contract is reconciled across `FR-007`/`FR-009`/`FR-013`, transcript replay is now a hard `FR-005` requirement with explicit CodeResearch gating if SDK seeding is unavailable, `SC-006` is anchored to `NFR-005`, the document now includes `Overview` and `Objectives`, the SC table includes FR/NFR linkage, `FR-004` defines the confirmation threshold, `NFR-003` no longer hard-codes the v0.3 count, and `FR-018` covers model-list fetch failure.
+
+The remaining issue is that the spec still carries code-shaped artifacts in several normative sections, so I cannot yet mark the "no code artifacts" criterion fully resolved.
+
+### 1) should-fix — Code-shaped artifacts still remain in the spec
+- **Criteria**: User value focus; no code artifacts
+- **Affected sections**: `FR-001`, `FR-006`, `FR-010`, `FR-013`, `FR-014`, `In Scope`
+- **Issue**: The revised draft removed the largest implementation leaks called out previously (`pickModel`, `CopilotAgentSession`, file paths, `liveRuntimes`, API signatures), but it still names internal field/state artifacts such as optional `` `modelId` `` semantics, missing/`null` migration behavior, the literal finalized state `` `interrupted` ``, and persisted-shape wording in normative requirements. Those details are closer to data-structure design than user-observable contract.
+- **Suggestion**: Restate those requirements in behavior-first language (for example, "each conversation stores its selected model," "migrated conversations without a stored selection resolve on first use," "the interrupted turn is visibly finalized") and leave concrete field/state naming to CodeResearch or planning.
