@@ -3,6 +3,34 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.4.0] – 2026-06-12
+
+### Added
+
+- **Per-conversation model picker** in the chat header (FR-001 / FR-002 / FR-003). A dropdown sits next to the connection status pill and shows the model bound to the currently-active conversation; clicking it lists every chat-capable Copilot model your account can reach. Each conversation remembers its own model — switching conversations updates the picker label. The picker uses Obsidian's standard `Menu` widget (the same dropdown style as the conversation picker) so it inherits keyboard accessibility and theme tokens.
+- **Settings → Copilot Agent → Model → Default model** (FR-007). A new dropdown picks the model that new conversations start with. The list mirrors the same chat-capable catalog the chat-header picker uses. The default is honoured at conversation creation time; if it's not in the catalog at the moment you create a conversation, the plugin falls back to a heuristic (gpt-4.1 / gpt-4o / first chat model) and surfaces a one-shot Notice so you can update the setting.
+- **Mid-conversation model swap with history preserved** (FR-005 / FR-008). Picking a different model swaps it on the underlying SDK session in-place — the conversation history is preserved and your next message is answered by the new model. The first swap on a conversation with at least one completed assistant turn opens a confirmation dialog ("Switching to <model>. The conversation history is preserved; …. Continue?"). Identity swaps and swaps on a brand-new conversation skip the dialog. Any pending tool-approval prompts are cancelled when the swap is confirmed (the dialog tells you so).
+- **Recovery flows for catalog failures, empty accounts, and stale models** (FR-010 / FR-016 / FR-018). When the model list can't be fetched at startup the plugin no longer aborts: the chat opens with an inline "Models unavailable" banner above the composer and a **Retry** button that re-runs `listModels()` without a plugin reload. When the account has zero chat-capable models you see "No chat models available." instead. When a conversation's persisted modelId is no longer in the catalog (e.g. a model was deprecated), the picker shows `<id> (unavailable)` as the current selection and an inline banner blocks send until you pick a real model.
+- **Lazy model resolution for migrated conversations** (FR-013). v0.3 conversations open with no bound model id; on first activation in v0.4 the plugin resolves one (configured default → heuristic) and persists it so subsequent opens are stable.
+- **Deferred SDK-session creation** (S1). If the catalog is unavailable at startup the AgentSession defers `createSession()` rather than failing. It subscribes to the catalog and creates the session in-place the moment the catalog reaches the `ready` state — either because Retry succeeds, the token rotates, or you explicitly pick a model from the (still-degraded) picker. No plugin reload required for any of these recoveries.
+- **`canSend()` single-source send gate** (FR-014). All four catalog/model blocked states (`unavailable-model`, `catalog-error`, `catalog-empty`, `unresolved-model`) plus the existing connection / streaming / pending reasons go through one decision function. The send button, Enter key, and inline banner all derive from the same result, so the user always sees the same reason text in the same precedence order.
+
+### Changed
+
+- **Chat header layout** (FR-015). The connection status pill is now smaller and adjacent to the model picker; the model name is no longer duplicated as `Connected · <model>` because the picker is the canonical model indicator. Status text is just `Connected` while connected.
+- `AgentSession` interface gains `hasPendingApprovals(): boolean` and `hasDeferredSession(): boolean` so the UI can drive the swap-confirmation copy and the inline-error banner without touching internals.
+- `ConversationManager` gains an optional `resolveCreationModelId` resolver (sync, runs at create time AND lazily on first activation for migrated conversations) and an optional `onUnavailableDefault(configuredDefault)` callback so the domain layer can surface a Notice without coupling to the Obsidian SDK.
+- Token rotation now refreshes the model catalog automatically so entitlement changes propagate without a plugin reload.
+
+### Migration
+
+- **Persistence schema v1 → v2 (additive, no destructive migration)**: each persisted conversation gains an optional `modelId: string | null` field. v1 payloads parse cleanly into v2 (the field is missing → treated as v0.3-migrated → lazy-resolved on first activation). No user action required.
+- The "Default model" Settings dropdown starts empty for upgraders; the plugin uses the v0.3 heuristic until you pick one.
+
+### Tests
+
+- 609 → 728 (+119 across 19 commits): per-conversation modelId persistence, the model catalog filter (hard `policy.state === "disabled"` only; soft signal is logged not excluded), the heuristic resolver, the swap orchestration, the model picker view-model/keyboard reducer/confirmation copy, the four canSend blocked states with precedence, the unavailable-id sentinel row, lazy resolution, and the AgentSession deferred-init recovery cycle.
+
 ## [0.3.0] – 2026-06-11
 
 ### Added
