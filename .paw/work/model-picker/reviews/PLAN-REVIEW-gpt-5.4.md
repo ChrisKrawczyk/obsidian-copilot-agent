@@ -40,3 +40,19 @@
 ## Overall Assessment
 
 The plan is strong on coverage, research integration, ordering rationale, and its explicit use of SDK `setModel()` for FR-005. `Phase Candidates` is present, and no phase depends on session recreate-and-reseed semantics contradicted by the research. However, the current phase split is not yet safe enough to ship incrementally, and FR-012’s filtering contract needs tightening before implementation proceeds.
+
+## Re-Review (v2)
+
+**Verdict:** PASS
+
+## Summary
+
+- **Finding 1 (phase shippability under degraded catalog states): RESOLVED.** The plan now states an explicit shippability invariant that Phases 2–4 preserve v0.3 behavior whenever the catalog is `failure`/`empty`, deferring both `createSession()` deferral and degraded-state UX to Phase 5 (`ImplementationPlan.md:9-10`, `ImplementationPlan.md:168-169`, `ImplementationPlan.md:229-230`, `ImplementationPlan.md:279`, `ImplementationPlan.md:342-356`).
+- **Finding 2 (FR-012 filtering concreteness): RESOLVED.** Phase 2 now specifies a concrete exclusion rule — `policy.state === "disabled"`, `disabled === true`, and case-insensitive id keywords `embedding|image|dall-e|whisper|tts` — plus a fixture that explicitly covers those patterns while retaining fail-open behavior for ambiguous ids (`ImplementationPlan.md:163-167`, `ImplementationPlan.md:178-179`).
+- **Finding 3 (NFR-005 baseline regression strategy): RESOLVED.** The new phase-local regression matrix maps each enumerated v0.3 baseline behavior to existing protections and the phases most likely to disturb them, which is the planning detail previously missing (`ImplementationPlan.md:465-480`).
+- **Opus must-fix M2 (schema v1→v2 migration safety): RESOLVED.** Phase 1 now explicitly requires a `schemaVersion === 1` branch in `loadFromRaw()` before the equality check and adds a gating regression test proving v1 payloads upcast to v2 without triggering recovery (`ImplementationPlan.md:111-118`).
+
+## Findings
+
+- No remaining blockers found in the areas previously cited.
+- The revised phase boundaries, migration strategy, filtering rule, and regression mapping are now specific enough for implementation to proceed.
