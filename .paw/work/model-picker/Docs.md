@@ -162,7 +162,7 @@ When `ready` AND the active conv's bound `modelId` is missing from `chatModels`,
 - `modelId === null` ⇒ v0.4 conversation created while the catalog was degraded (resolver returned null); lazy-resolved on first activation OR via deferred-init recovery.
 - `modelId === "<id>"` ⇒ explicit binding; honoured at construction time and survives reload.
 
-Schema-version field is NOT bumped — the change is additive and backward-compatible.
+The conversations subtree schema version is bumped from v1 to v2, but the migration is additive and backward-compatible: v1 payloads upcast by adding `modelId: null`, and v2 also accepts a missing field as unresolved.
 
 ## 7. Lazy resolution (FR-013)
 
