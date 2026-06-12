@@ -115,3 +115,92 @@ describe("SafetySettingsStore — exposeRawFsTools (v0.3 Phase 1)", () => {
     expect(seen).toEqual([true, false]);
   });
 });
+
+// v0.4 (model-picker) Phase 2: defaultModelId persistence. Pinned to
+// the per-conversation modelId metadata in Phase 1: this is the
+// global default applied at NEW conversation creation only — existing
+// conversations are never mutated.
+describe("SafetySettingsStore — defaultModelId (v0.4 Phase 2)", () => {
+  it("defaults to null (Auto sentinel) on a fresh load", async () => {
+    const store = new SafetySettingsStore(memoryIo(null));
+    const snap = await store.load();
+    expect(snap.defaultModelId).toBeNull();
+    expect(DEFAULT_SAFETY_SETTINGS.defaultModelId).toBeNull();
+  });
+
+  it("round-trips a string id through setDefaultModelId + load()", async () => {
+    const io = memoryIo(null);
+    const store = new SafetySettingsStore(io);
+    await store.load();
+    await store.setDefaultModelId("gpt-4.1");
+    expect(store.snapshot().defaultModelId).toBe("gpt-4.1");
+
+    // Reload through a fresh instance to confirm durability.
+    const store2 = new SafetySettingsStore(io);
+    const snap2 = await store2.load();
+    expect(snap2.defaultModelId).toBe("gpt-4.1");
+  });
+
+  it("round-trips the null Auto sentinel verbatim", async () => {
+    const io = memoryIo(null);
+    const store = new SafetySettingsStore(io);
+    await store.load();
+    await store.setDefaultModelId("gpt-4.1");
+    await store.setDefaultModelId(null);
+    expect(store.snapshot().defaultModelId).toBeNull();
+
+    const store2 = new SafetySettingsStore(io);
+    const snap2 = await store2.load();
+    expect(snap2.defaultModelId).toBeNull();
+  });
+
+  it("preserves sibling top-level keys (auth/conversations) on persist", async () => {
+    const io = memoryIo({
+      auth: { token: "tok" },
+      conversations: ["sentinel"],
+      schemaVersion: 2,
+    });
+    const store = new SafetySettingsStore(io);
+    await store.load();
+    await store.setDefaultModelId("gpt-4.1");
+    const persisted = io.peek() as Record<string, unknown>;
+    expect(persisted.auth).toEqual({ token: "tok" });
+    expect(persisted.conversations).toEqual(["sentinel"]);
+    expect(persisted.schemaVersion).toBe(2);
+    expect(
+      (persisted.safety as { defaultModelId: string | null }).defaultModelId,
+    ).toBe("gpt-4.1");
+  });
+
+  it("treats non-string non-null persisted values as null on load (defensive)", async () => {
+    const io = memoryIo({
+      safety: {
+        defaultModelId: 42,
+      },
+    });
+    const store = new SafetySettingsStore(io);
+    const snap = await store.load();
+    expect(snap.defaultModelId).toBeNull();
+  });
+
+  it("treats empty-string persisted value as null (matches Settings dropdown convention)", async () => {
+    const io = memoryIo({
+      safety: {
+        defaultModelId: "",
+      },
+    });
+    const store = new SafetySettingsStore(io);
+    const snap = await store.load();
+    expect(snap.defaultModelId).toBeNull();
+  });
+
+  it("subscribe() fires when defaultModelId changes", async () => {
+    const store = new SafetySettingsStore(memoryIo(null));
+    await store.load();
+    const seen: (string | null)[] = [];
+    store.subscribe((s) => seen.push(s.defaultModelId));
+    await store.setDefaultModelId("gpt-4.1");
+    await store.setDefaultModelId(null);
+    expect(seen).toEqual(["gpt-4.1", null]);
+  });
+});

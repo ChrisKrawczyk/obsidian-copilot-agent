@@ -72,6 +72,20 @@ export interface SafetySettings {
    * the plugin instance. A plugin reload is required to re-snapshot.
    */
   exposeRawFsTools: boolean;
+  /**
+   * v0.4 Phase 2: optional default model id applied to NEW
+   * conversations created after this setting is saved. `null` is the
+   * `Auto (heuristic)` sentinel — the conversation factory falls back
+   * to `resolveHeuristicModelId()` against the live catalog. A non-
+   * null string is resolved against `ModelCatalog.isModelAvailable`
+   * at conversation creation; if unavailable, we fall back to the
+   * heuristic and surface a one-shot Notice (Spec.md Edge Cases:
+   * "Global default unavailable at conversation creation").
+   *
+   * EXISTING conversations are never mutated by changes to this
+   * setting — `modelId` is captured per-conversation at creation time.
+   */
+  defaultModelId: string | null;
 }
 
 export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
@@ -80,6 +94,7 @@ export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
   autoApproveBuiltins: {},
   vaultAwareness: { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
   exposeRawFsTools: true,
+  defaultModelId: null,
 };
 
 /** SDK kinds we surface as built-in toggles in the settings UI. */
@@ -123,6 +138,7 @@ export class SafetySettingsStore {
       autoApproveBuiltins: { ...this.cached.autoApproveBuiltins },
       vaultAwareness: { ...this.cached.vaultAwareness },
       exposeRawFsTools: this.cached.exposeRawFsTools,
+      defaultModelId: this.cached.defaultModelId,
     };
   }
 
@@ -165,6 +181,20 @@ export class SafetySettingsStore {
 
   async setExposeRawFsTools(value: boolean): Promise<void> {
     this.cached = { ...this.cached, exposeRawFsTools: value };
+    await this.persist();
+  }
+
+  /**
+   * v0.4 Phase 2: persist the global default model id. `null` is the
+   * `Auto (heuristic)` sentinel and is always a valid value (no
+   * availability check). A non-null string is stored verbatim; the
+   * SettingsTab is responsible for offering only chat-capable values
+   * but we tolerate any string here so a stale/unavailable value
+   * survives a reload (and is surfaced in the UI as `<id>
+   * (unavailable)`).
+   */
+  async setDefaultModelId(id: string | null): Promise<void> {
+    this.cached = { ...this.cached, defaultModelId: id };
     await this.persist();
   }
 
@@ -232,5 +262,14 @@ function mergeWithDefaults(
       typeof partial.exposeRawFsTools === "boolean"
         ? partial.exposeRawFsTools
         : true,
+    // v0.4: accept null (Auto sentinel) or a non-empty string.
+    // Anything else (number, object, empty string, undefined) → null.
+    defaultModelId:
+      partial.defaultModelId === null
+        ? null
+        : typeof partial.defaultModelId === "string" &&
+            partial.defaultModelId.length > 0
+          ? partial.defaultModelId
+          : null,
   };
 }

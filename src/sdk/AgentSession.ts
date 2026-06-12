@@ -86,6 +86,17 @@ export interface AgentSessionOptions {
   };
   /** Optional: skip listModels and force a specific model id. */
   preferredModel?: string;
+  /**
+   * v0.4 Phase 2: optional shared `ModelCatalog`. When provided and
+   * in `ready` state, `pickModel()` reuses the cached `chatModels`
+   * via `resolveHeuristicModelId()` instead of issuing another
+   * `client.listModels()` round-trip. When absent, `loading`,
+   * `empty`, or `error`, the v0.3 fallback path runs unchanged
+   * (fresh `listModels()` + heuristic). Phase 5 introduces deferred
+   * `createSession()` for the catalog-degraded recovery UX; Phases
+   * 1–4 do not change session-creation timing.
+   */
+  catalog?: import("./ModelCatalog").ModelCatalog;
   /** Optional: forwarded to the SDK CopilotClient as logLevel. */
   logLevel?: "none" | "error" | "warning" | "info" | "debug" | "all";
   /**
@@ -239,6 +250,50 @@ const SDK_IDLE_TIMEOUT_MS = 180_000;
 // our idle watchdog. Set high; our bumpIdleTimer is the actual guard.
 const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
+
+/**
+ * v0.4 (model-picker) Phase 2: pure heuristic resolver extracted from
+ * the historical `AgentSession.pickModel()` body. Used both by the
+ * legacy `pickModel()` adapter (when the catalog is non-ready or
+ * unavailable) and by `ConversationManager.createInternal()` in
+ * Phase 3 to resolve a default modelId at conversation creation.
+ *
+ * Selection order (preserved verbatim from v0.3 to keep
+ * AgentSession's existing happy-path test green):
+ *   1. enabled `gpt-4.1`
+ *   2. enabled `gpt-4o`
+ *   3. first enabled id starting with `gpt-`
+ *   4. first enabled record (or first record overall if none enabled)
+ *
+ * "Enabled" matches the v0.3 rule (no `policy` field, or `policy.state`
+ * is `"enabled"` or `undefined`). When the enabled subset is empty we
+ * fall back to the full input — same as v0.3 — so accounts whose
+ * records carry exotic policy values still resolve.
+ *
+ * Returns `null` only when the input list is itself empty (or every
+ * record lacks a string `id`). Callers translate that into a
+ * user-visible failure (Spec FR-018, Phase 5 inline-error UX).
+ */
+export function resolveHeuristicModelId(
+  models: SdkModelInfo[],
+): string | null {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  const enabled = models.filter(
+    (m) =>
+      !m.policy ||
+      m.policy.state === "enabled" ||
+      m.policy.state === undefined,
+  );
+  const pool = enabled.length > 0 ? enabled : models;
+  if (pool.length === 0) return null;
+  const chosen =
+    pool.find((m) => m.id === "gpt-4.1") ??
+    pool.find((m) => m.id === "gpt-4o") ??
+    pool.find((m) => (m.id ?? "").startsWith("gpt-")) ??
+    pool[0];
+  const id = chosen.id ?? pool[0].id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
 
 export class CopilotAgentSession implements AgentSession {
   private initPromise: Promise<void> | null = null;
@@ -1019,6 +1074,22 @@ export class CopilotAgentSession implements AgentSession {
     preferred: string | undefined,
   ): Promise<string> {
     if (preferred) return preferred;
+    // v0.4 Phase 2: when a shared catalog is wired in and ready,
+    // resolve from its cached chat-capable list to avoid a duplicate
+    // listModels() round-trip per session creation. Any non-ready
+    // state (loading, empty, error, or catalog absent) falls through
+    // to the v0.3 path so phase shippability is preserved.
+    const catalog = this.opts.catalog;
+    if (catalog) {
+      const state = catalog.getState();
+      if (state.kind === "ready") {
+        const resolved = resolveHeuristicModelId(state.chatModels);
+        if (resolved !== null) return resolved;
+        // chatModels was non-empty per the `ready` invariant but the
+        // resolver returned null (every record lacked a usable id) —
+        // fall through to listModels() rather than hard-failing here.
+      }
+    }
     if (typeof client.listModels !== "function") {
       return "gpt-4.1";
     }
@@ -1032,24 +1103,13 @@ export class CopilotAgentSession implements AgentSession {
         }`,
       );
     }
-    const enabled = models.filter(
-      (m) =>
-        !m.policy ||
-        m.policy.state === "enabled" ||
-        m.policy.state === undefined,
-    );
-    const pool = enabled.length > 0 ? enabled : models;
-    if (pool.length === 0) {
+    const resolved = resolveHeuristicModelId(models);
+    if (resolved === null) {
       throw new Error(
         "[AgentSession] No Copilot models available for this account.",
       );
     }
-    const chosen =
-      pool.find((m) => m.id === "gpt-4.1") ??
-      pool.find((m) => m.id === "gpt-4o") ??
-      pool.find((m) => (m.id ?? "").startsWith("gpt-")) ??
-      pool[0];
-    return chosen.id ?? pool[0].id ?? "gpt-4.1";
+    return resolved;
   }
 
   private async handlePermission(
