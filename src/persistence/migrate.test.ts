@@ -169,3 +169,116 @@ function emptyState() {
     activeConversationId: null,
   };
 }
+
+/**
+ * v0.4 (model-picker) Phase 1 regression suite. Properties under test
+ * are explicit Phase 1 acceptance gates from ImplementationPlan.md:
+ *
+ *   - Existing v0.3 (schemaVersion: 1) blobs do NOT enter the
+ *     recovery path on first v0.4 load (which would wipe user data).
+ *   - Each migrated conversation has `modelId === null`, signalling
+ *     "not yet resolved" so a later phase's lazy resolver can fill it.
+ *   - The output blob carries CURRENT_SCHEMA_VERSION so subsequent
+ *     loads validate as v2 directly.
+ *   - The v2 path round-trips `modelId` (string / null / missing) and
+ *     rejects structurally-invalid values into recovery.
+ */
+describe("migrate — v0.4 v1 → v2 upcast (GATING)", () => {
+  it("upcasts a v0.3 (schemaVersion=1) blob to v2 without recovery", () => {
+    const v1Blob = {
+      schemaVersion: 1,
+      conversations: [
+        {
+          id: "c1",
+          name: "Project",
+          createdAt: 10,
+          lastActiveAt: 20,
+          messages: [],
+          undoEntries: [],
+        },
+        {
+          id: "c2",
+          name: "Notes",
+          createdAt: 5,
+          lastActiveAt: 6,
+          archived: true,
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    };
+
+    const r = migrate(v1Blob);
+
+    expect(r.recovered).toBe(false);
+    expect(r.malformed).toBeUndefined();
+    expect(r.state.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(r.state.activeConversationId).toBe("c1");
+    expect(r.state.conversations).toHaveLength(2);
+    for (const c of r.state.conversations) {
+      expect(c.modelId).toBeNull();
+    }
+    expect(r.state.conversations[1].archived).toBe(true);
+  });
+
+  it("rejects a v1 blob whose conversations array is malformed", () => {
+    const r = migrate({
+      schemaVersion: 1,
+      conversations: "not-an-array",
+      activeConversationId: null,
+    });
+    expect(r.recovered).toBe(true);
+    expect(r.state.conversations).toEqual([]);
+  });
+});
+
+describe("migrate — v0.4 modelId round-trip", () => {
+  function v2Blob(extra: Record<string, unknown>) {
+    return {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          messages: [],
+          undoEntries: [],
+          ...extra,
+        },
+      ],
+      activeConversationId: null,
+    };
+  }
+
+  it("preserves a string modelId verbatim", () => {
+    const r = migrate(v2Blob({ modelId: "gpt-4.1" }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBe("gpt-4.1");
+  });
+
+  it("preserves a null modelId verbatim", () => {
+    const r = migrate(v2Blob({ modelId: null }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBeNull();
+  });
+
+  it("treats a missing modelId as undefined (key not present)", () => {
+    const r = migrate(v2Blob({}));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBeUndefined();
+  });
+
+  it("rejects a structurally-invalid modelId (number)", () => {
+    expect(migrate(v2Blob({ modelId: 42 })).recovered).toBe(true);
+  });
+
+  it("rejects an empty-string modelId", () => {
+    expect(migrate(v2Blob({ modelId: "" })).recovered).toBe(true);
+  });
+
+  it("rejects a non-string non-null modelId (object)", () => {
+    expect(migrate(v2Blob({ modelId: { id: "x" } })).recovered).toBe(true);
+  });
+});

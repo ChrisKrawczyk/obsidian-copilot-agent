@@ -174,6 +174,111 @@ describe("ConversationsStore — top-level merge preserves sibling keys", () => 
   });
 });
 
+// v0.4 (model-picker) Phase 1: per-conversation modelId must round-
+// trip through the store cleanly and survive a clone (load → snapshot
+// → upsert). These tests pair with migrate.test.ts; together they pin
+// the persistence pipeline end-to-end.
+describe("ConversationsStore — v0.4 modelId round-trip", () => {
+  it("hydrates a string modelId from disk and exposes it via listConversations", async () => {
+    const io = makeIO({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          modelId: "gpt-4.1",
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    });
+    const { store } = makeStore({ io });
+    await store.load();
+    expect(store.listConversations()[0].modelId).toBe("gpt-4.1");
+  });
+
+  it("hydrates a null modelId from disk verbatim (v1-migrated row)", async () => {
+    const io = makeIO({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          modelId: null,
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    });
+    const { store } = makeStore({ io });
+    await store.load();
+    expect(store.listConversations()[0].modelId).toBeNull();
+  });
+
+  it("treats a missing modelId key as undefined (preserves the absence)", async () => {
+    const io = makeIO({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    });
+    const { store } = makeStore({ io });
+    await store.load();
+    expect(store.listConversations()[0].modelId).toBeUndefined();
+  });
+
+  it("upsert persists modelId to disk and survives a subsequent load", async () => {
+    const io = makeIO();
+    const { store } = makeStore({ io });
+    await store.load();
+    store.upsertConversation(newConv("c1", { modelId: "gpt-4.1" }));
+    await store.flushNow();
+    const persisted = (io.blob as { conversations: PersistedConversation[] })
+      .conversations;
+    expect(persisted[0].modelId).toBe("gpt-4.1");
+
+    // Reload through a fresh store instance to confirm durability.
+    const { store: store2 } = makeStore({ io });
+    await store2.load();
+    expect(store2.listConversations()[0].modelId).toBe("gpt-4.1");
+  });
+
+  it("v0.3 (schemaVersion=1) blob loads without recovery and exposes modelId=null", async () => {
+    const io = makeIO({
+      schemaVersion: 1,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    });
+    const { store } = makeStore({ io });
+    const r = await store.load();
+    expect(r.recovered).toBe(false);
+    expect(store.listConversations()[0].modelId).toBeNull();
+  });
+});
+
 describe("ConversationsStore — debounce + flushNow", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

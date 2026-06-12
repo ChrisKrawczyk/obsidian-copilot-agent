@@ -5,17 +5,25 @@
  *
  *   migrate(raw) returns:
  *     - { state, recovered: false } when `raw.schemaVersion` is a known
- *       version and the payload validates per that version's shape.
+ *       version (current or any prior version with a registered
+ *       upcast step) and the payload validates per that version's shape.
  *     - { state: DEFAULT_CONVERSATIONS_STATE, recovered: true } when
- *       `raw.schemaVersion` is missing, unknown, or the payload is
- *       structurally invalid for its declared version. The caller
+ *       `raw.schemaVersion` is missing, unknown (e.g. a future version
+ *       this client cannot read), or the payload is structurally
+ *       invalid for its declared version. The caller
  *       (ConversationsStore.load) writes the malformed subtree to a
  *       sibling backup file and surfaces a Notice.
  *
- * v0.3 only knows `schemaVersion === 1`. Future versions will add
- * stepwise transformers (e.g. v1 → v2) called in sequence; the
- * recovery path is the fallback when a forward-only client meets a
- * future blob it cannot read (downgrade scenario).
+ * Schema versions:
+ *   v1 (v0.3): per-conversation `{id, name, createdAt, lastActiveAt,
+ *              archived?, messages, undoEntries}`.
+ *   v2 (v0.4): adds optional `modelId?: string | null` to each
+ *              conversation. v1 payloads upcast by setting
+ *              `modelId: null` on every conversation; runtime lazy-
+ *              resolves on first activation per FR-013.
+ *
+ * The version-equality recovery path is the fallback when a forward-
+ * only client meets a future blob it cannot read (downgrade scenario).
  */
 
 import {
@@ -43,6 +51,32 @@ export function migrate(raw: unknown): MigrateResult {
   const obj = raw as Record<string, unknown>;
   const version = obj.schemaVersion;
 
+  // v1 → v2 upcast: validate v1 shape, then add `modelId: null` to
+  // each conversation. This branch MUST run BEFORE the version-equality
+  // check below so v1 payloads from v0.3 vaults do not enter the
+  // recovery path (which would wipe user data).
+  if (version === 1) {
+    const validated = validateConversationsArray(obj);
+    if (!validated) {
+      return {
+        state: cloneDefault(),
+        recovered: true,
+        malformed: raw,
+      };
+    }
+    return {
+      state: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversations: validated.conversations.map((c) => ({
+          ...c,
+          modelId: null,
+        })),
+        activeConversationId: validated.activeConversationId,
+      },
+      recovered: false,
+    };
+  }
+
   if (version !== CURRENT_SCHEMA_VERSION) {
     return {
       state: cloneDefault(),
@@ -51,7 +85,7 @@ export function migrate(raw: unknown): MigrateResult {
     };
   }
 
-  const validated = validateV1(obj);
+  const validated = validateConversationsArray(obj);
   if (!validated) {
     return {
       state: cloneDefault(),
@@ -70,7 +104,17 @@ function cloneDefault(): PersistedConversationsState {
   };
 }
 
-function validateV1(obj: Record<string, unknown>): PersistedConversationsState | null {
+/**
+ * Validates the conversations array shape shared by v1 and v2. The
+ * `modelId` field on each conversation is OPTIONAL — both `undefined`
+ * and `null` are accepted (interpreted as "not yet resolved"), and a
+ * non-empty string is the resolved id. A structurally-invalid value
+ * (e.g. number, object) causes the entire payload to be rejected and
+ * sent to recovery, matching the strict-validation policy of v0.3.
+ */
+function validateConversationsArray(
+  obj: Record<string, unknown>,
+): PersistedConversationsState | null {
   const conversationsRaw = obj.conversations;
   if (!Array.isArray(conversationsRaw)) return null;
 
@@ -102,6 +146,18 @@ function validateConversation(raw: unknown): PersistedConversation | null {
   if (!Array.isArray(c.messages)) return null;
   if (!Array.isArray(c.undoEntries)) return null;
 
+  // modelId: optional. Accept undefined (missing), null, or a non-empty
+  // string. Anything else (number, object, empty string, etc.) is
+  // treated as structurally invalid and rejects the payload.
+  let modelId: string | null | undefined;
+  if (c.modelId === undefined || c.modelId === null) {
+    modelId = c.modelId === null ? null : undefined;
+  } else if (typeof c.modelId === "string" && c.modelId.length > 0) {
+    modelId = c.modelId;
+  } else {
+    return null;
+  }
+
   const messages: PersistedMessage[] = [];
   for (const m of c.messages) {
     const validated = validateMessage(m);
@@ -115,7 +171,7 @@ function validateConversation(raw: unknown): PersistedConversation | null {
     undoEntries.push(validated);
   }
 
-  return {
+  const out: PersistedConversation = {
     id: c.id,
     name: c.name,
     createdAt: c.createdAt,
@@ -124,6 +180,10 @@ function validateConversation(raw: unknown): PersistedConversation | null {
     messages,
     undoEntries,
   };
+  if (modelId !== undefined) {
+    out.modelId = modelId;
+  }
+  return out;
 }
 
 function validateMessage(raw: unknown): PersistedMessage | null {

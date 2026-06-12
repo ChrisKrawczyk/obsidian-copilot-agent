@@ -547,6 +547,140 @@ describe("ConversationManager — rename / archive / remove", () => {
   });
 });
 
+// v0.4 (model-picker) Phase 1: per-conversation modelId binding lives
+// in metadata only — no runtime swap, no UI yet. These tests pin the
+// persistence contract and the structural guarantee that the undo
+// journal does not capture modelId (it only tracks file actions).
+describe("ConversationManager — setConversationModelId (v0.4 FR-006/FR-013)", () => {
+  test("persists the bound modelId via metadata-only write", () => {
+    const { factory } = makeFakeFactory();
+    const { store, upsertSpy, state } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    upsertSpy.mockClear();
+
+    m.setConversationModelId("conv-1", "gpt-4.1");
+
+    expect(m.get("conv-1")?.modelId).toBe("gpt-4.1");
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    expect(state.byId.get("conv-1")?.modelId).toBe("gpt-4.1");
+  });
+
+  test("emits metadata-changed on a real change", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    const events: ConversationChangeEvent[] = [];
+    m.subscribe((e) => events.push(e));
+
+    m.setConversationModelId("conv-1", "gpt-4.1");
+
+    expect(
+      events.some((e) => e.kind === "metadata-changed" && e.id === "conv-1"),
+    ).toBe(true);
+  });
+
+  test("no-op when the modelId is unchanged (no write, no event)", () => {
+    const { factory } = makeFakeFactory();
+    const { store, upsertSpy } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1", { modelId: "gpt-4.1" })],
+      activeConversationId: "conv-1",
+    });
+    upsertSpy.mockClear();
+    const events: ConversationChangeEvent[] = [];
+    m.subscribe((e) => events.push(e));
+
+    m.setConversationModelId("conv-1", "gpt-4.1");
+
+    expect(upsertSpy).not.toHaveBeenCalled();
+    expect(events.some((e) => e.kind === "metadata-changed")).toBe(false);
+  });
+
+  test("clears the binding when called with null", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1", { modelId: "gpt-4.1" })],
+      activeConversationId: "conv-1",
+    });
+
+    m.setConversationModelId("conv-1", null);
+
+    expect(m.get("conv-1")?.modelId).toBeNull();
+    expect(state.byId.get("conv-1")?.modelId).toBeNull();
+  });
+
+  test("throws on unknown conversation id", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({ conversations: [], activeConversationId: null });
+
+    expect(() => m.setConversationModelId("nope", "gpt-4.1")).toThrow();
+  });
+
+  test("hydrating a v1-migrated conversation (modelId: null) yields modelId=null on the manager", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1", { modelId: null })],
+      activeConversationId: "conv-1",
+    });
+
+    expect(m.get("conv-1")?.modelId).toBeNull();
+  });
+
+  test("modelId is preserved across a recordUndo write (structural: undo entries do NOT capture metadata)", () => {
+    // Phase 1 guards the property that undo entries are pure file-
+    // action snapshots — they do not bundle conversation metadata.
+    // We assert this structurally by:
+    //   1. binding a modelId via setConversationModelId
+    //   2. routing an undo write through the runtime persist adapter
+    //   3. confirming the persisted blob still carries that modelId
+    const { factory, built } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+
+    m.setConversationModelId("conv-1", "gpt-4.1");
+    expect(state.byId.get("conv-1")?.modelId).toBe("gpt-4.1");
+
+    // Materialize the runtime and route an undo entry through its
+    // persist adapter (mirrors what the undo journal does at runtime).
+    m.getActiveRuntime();
+    const adapter = built[0].persistAdapter;
+    expect(adapter).toBeDefined();
+    adapter!.onJournalOp("add", {
+      id: "u1",
+      kind: "modify",
+      scope: "vault",
+      path: "n.md",
+      recordedAt: 999,
+    });
+
+    // The modelId must survive the undo write because metadata is
+    // read from the live conversation, not reconstructed from the
+    // entry payload. If a future refactor accidentally recomputes
+    // metadata from undo entries, this test will fail loudly.
+    expect(state.byId.get("conv-1")?.modelId).toBe("gpt-4.1");
+    expect(state.byId.get("conv-1")?.undoEntries).toHaveLength(1);
+  });
+});
+
 describe("ConversationManager — runtime persistence wiring", () => {
   test("factory receives hydration messages + undo entries from the store", () => {
     const { factory, built } = makeFakeFactory();

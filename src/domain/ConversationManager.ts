@@ -162,6 +162,14 @@ export class ConversationManager {
         lastActiveAt: c.lastActiveAt,
         archived: c.archived === true ? true : undefined,
       };
+      // v0.4: round-trip the per-conversation modelId through hydration.
+      // `undefined` (key absent) and `null` both mean "not yet resolved";
+      // we preserve the distinction so downstream code can tell a v0.3
+      // migration (`null`) from a fresh-without-resolution conversation
+      // (`undefined`). Phase 5 handles both via the lazy resolver.
+      if (c.modelId !== undefined) {
+        meta.modelId = c.modelId;
+      }
       this.conversations.set(c.id, meta);
       // Defensive: ensure the store has a row for every catalog entry
       // (so `setActiveId(meta.id)` further down can't throw). In the
@@ -176,6 +184,7 @@ export class ConversationManager {
             createdAt: c.createdAt,
             lastActiveAt: c.lastActiveAt,
             archived: c.archived === true ? true : undefined,
+            ...(c.modelId !== undefined ? { modelId: c.modelId } : {}),
             messages: c.messages,
             undoEntries: c.undoEntries,
           });
@@ -287,6 +296,39 @@ export class ConversationManager {
     const finalName = this.uniqueName(trimmed, id);
     if (conv.name === finalName) return;
     conv.name = finalName;
+    this.persistMetadataOnly(conv);
+    this.emit({ kind: "metadata-changed", id });
+  }
+
+  /**
+   * Spec v0.4 FR-006/FR-013: bind a model id to a conversation. Used
+   * both for explicit user picks (FR-002, FR-006) and for lazy
+   * resolution of v0.3-migrated conversations on first activation
+   * (FR-013). `null` clears the binding (rare; primarily used by
+   * Phase 5 when persisting "still unresolved" after a failed lazy
+   * resolve).
+   *
+   * Persists via the same metadata-only path as `rename` so messages
+   * and undo entries are preserved verbatim. Emits `metadata-changed`
+   * so the header label re-renders when the bound model differs from
+   * what's currently displayed. No-op if the value is unchanged
+   * (avoids a redundant write + repaint).
+   *
+   * NOTE: this writes ONLY the persisted metadata. Phases 3+ are
+   * responsible for the in-place SDK swap (`AgentSession.swapModel`),
+   * for confirmation gating (FR-004), and for reconciling against the
+   * runtime model catalog. Calling this in isolation will NOT change
+   * the model used by an in-flight session.
+   */
+  setConversationModelId(id: string, modelId: string | null): void {
+    const conv = this.conversations.get(id);
+    if (!conv) {
+      throw new Error(`setConversationModelId: no conversation with id "${id}"`);
+    }
+    const next = modelId === null ? null : modelId;
+    const prev = conv.modelId === undefined ? null : conv.modelId;
+    if (prev === next) return;
+    conv.modelId = next;
     this.persistMetadataOnly(conv);
     this.emit({ kind: "metadata-changed", id });
   }
@@ -637,11 +679,15 @@ export class ConversationManager {
 }
 
 function cloneMeta(c: Conversation): Conversation {
-  return {
+  const out: Conversation = {
     id: c.id,
     name: c.name,
     createdAt: c.createdAt,
     lastActiveAt: c.lastActiveAt,
     archived: c.archived === true ? true : undefined,
   };
+  if (c.modelId !== undefined) {
+    out.modelId = c.modelId;
+  }
+  return out;
 }
