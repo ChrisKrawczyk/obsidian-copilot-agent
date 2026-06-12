@@ -125,10 +125,10 @@ Users cannot:
 | FR-004 | A model swap MUST require explicit user confirmation via a modal dialog if and only if the persisted visible transcript already contains at least one completed assistant turn AND the selected model id is different from the currently-bound model id. Swaps that would impact no prior session context (no assistant turns yet) and identity swaps (same model re-selected) MUST proceed without a dialog. |
 | FR-005 | A confirmed swap MUST take effect at the next user-message boundary by updating the underlying session's bound model in place via the SDK's in-place model-switch capability. The conversation history (both plugin-visible scrollback and SDK-side session history) MUST be preserved across the swap; the underlying session MUST NOT be torn down or recreated solely to effect a model change. |
 | FR-006 | If a swap is confirmed while a turn is streaming, the in-flight turn MUST be interrupted (its placeholder finalized as `interrupted`) before the model swap takes effect on the next user message. |
-| FR-007 | When a new conversation is created, its initial `modelId` MUST be the configured global default (if set and available), or the onload heuristic resolution (if the global default is unset OR currently unavailable). The resolved model id MUST be written to the conversation at creation time so that subsequent changes to the global default do not retroactively affect it. |
+| FR-007 | When a new conversation is created, its initial `modelId` MUST be the configured global default (if set and available), or the onload heuristic resolution (if the global default is unset OR currently unavailable). The resolved model id MUST be written to the conversation at creation time so that subsequent changes to the global default do not retroactively affect it. If the cached SDK model-list is unavailable at creation time, a fresh `listModels()` call is made before falling back to the heuristic resolution. |
 | FR-008 | Settings MUST expose a "Default model for new conversations" control. The control lists chat-capable models from the SDK, plus an "Auto (heuristic)" option that defers to the onload heuristic. |
 | FR-009 | Changing the global default MUST NOT mutate any existing conversation's bound model id. |
-| FR-010 | On plugin load, if a conversation's persisted `modelId` is not in the SDK's current available-models list, the picker MUST surface that id with a "(unavailable)" suffix AND the chat MUST render an inline error: "Model `<id>` is no longer available. Pick a model to continue." |
+| FR-010 | On plugin load, if a conversation's persisted `modelId` is no longer in the chat-capable filtered list (the picker's effective list), the picker MUST surface that id with a "(unavailable)" suffix AND the chat MUST render an inline error: "Model `<id>` is no longer available. Pick a model to continue." |
 | FR-011 | While the inline error from FR-010 is active for the open conversation, send MUST be blocked with the same inline guidance until the user picks an available model. |
 | FR-012 | The picker MUST filter the SDK's model list to chat/completion-capable models. Models with ambiguous capability metadata MUST pass through (fail-open). |
 | FR-013 | Persistence MUST be migration-safe: existing v0.3 conversations missing the `modelId` property MUST treat the property as unresolved and lazily resolve it on first use, at which point the resolved id is written and persisted. Lazy resolution uses the same rule as FR-007 (global default if available, else onload heuristic). |
@@ -177,7 +177,7 @@ Users cannot:
 - The Copilot SDK exposes a way to list available models with capability metadata. CodeResearch confirmed `CopilotClient.listModels()` returns a `ModelInfo[]`. Capability metadata (chat vs embedding vs image) is not explicit in the public type, so FR-012's fail-open clause governs filtering.
 - The SDK supports binding a session to a specified model id at session-creation time (v0.3 already relies on this for the heuristically-picked model). CodeResearch confirmed this via `SessionConfig.model`.
 - The SDK supports in-place model swap on an existing session with history preserved. CodeResearch confirmed this via `CopilotSession.setModel(model, options)` documented as "applies to next message, conversation history preserved." This is the mechanism FR-005 depends on. If a future SDK version removes this capability, FR-005 would need re-specification (no current risk).
-- Per-conversation metadata persistence already supports adding new optional fields without breaking sibling-key preservation (v0.3 established this property).
+- Per-conversation metadata persistence has an established pattern for adding new optional fields (coordinated updates across `PersistedShape`, `migrate.ts`, `Conversation`, and `ConversationManager`); v0.3's sibling-key preservation tests cover top-level keys.
 - Settings persistence already supports adding new fields; the global default field can live in the existing settings store or a sibling store as a planning decision.
 - The chat-capable set is "models the SDK metadata identifies as chat / completion capable." Exact classifier rules are a CodeResearch deliverable but the spec contract is "filter to what users can productively chat with, fail-open on ambiguity."
 
@@ -206,6 +206,11 @@ Users cannot:
 - Conversation export/import.
 - Snapshot compression for large undo payloads.
 - "Show archived" / "Restore archived" picker gestures and the command-palette switch-by-name entry.
+- Reasoning-effort metadata in picker rows.
+- Per-conversation reasoning-effort controls.
+- Soft warning when switching to a smaller-context model.
+- Telemetry on per-conversation model usage.
+- Cross-session pricing/policy display.
 
 ## Risks
 
@@ -218,6 +223,7 @@ Users cannot:
 | Picker UI competes for header real estate with the conversation picker (v0.3) and status indicator. | Placement is a planning decision. Spec contract is "picker reflects and controls the active conversation's bound model and is keyboard-accessible." |
 | Swap during a pending-approval prompt could orphan the approval. | Confirmation dialog surfaces stronger warning copy when pending approvals exist. Implementation cancels approvals before invoking the in-place model swap. |
 | Cached model list goes stale if user's Copilot entitlements change mid-session. | Acknowledged limitation. FR-018's retry affordance plus plugin reload cover the recovery paths. A dedicated "refresh models" affordance is deferred. |
+| If `CopilotSession.setModel()` is ever unavailable or rejects, recreating the session loses SDK-side history (no public seed API per CodeResearch §3). Plugin-visible scrollback is preserved; SDK-side context is not. | Mitigation: surface a one-time warning in the confirmation dialog if/when this fallback path is ever taken; do not silently degrade. |
 
 ## Traceability
 
@@ -231,3 +237,13 @@ Users cannot:
 | Filter picker to chat-capable models | FR-012 | SC-005 |
 | (Cross-cutting baseline preservation) | NFR-005 | SC-006 |
 | (Cross-cutting model-list availability) | FR-016, FR-018, NFR-001 | SC-008 |
+
+## Revision Notes
+
+Spec edits applied from the holistic planning-docs review (consolidated from gpt-5.4, claude-opus-4.7, gemini-3.1-pro-preview):
+
+- **Opus-PDR-3 — FR-010 "available" definition tightened.** Reworded "the SDK's current available-models list does NOT include `<id>`" to "is no longer in the chat-capable filtered list (the picker's effective list)" so the spec aligns with the plan's `isModelAvailable()` semantics over the post-filter catalog.
+- **Opus-PDR-5 — Out of Scope (deferred) extended.** Added five items the implementation plan explicitly defers but the spec previously did not enumerate: reasoning-effort metadata in picker rows; per-conversation reasoning-effort controls; soft warning when switching to a smaller-context model; telemetry on per-conversation model usage; cross-session pricing/policy display. Cross-checked against the plan's "What We're NOT Doing" and "Phase Candidates" sections — all consistent.
+- **GPT-PDR-4 — Assumption on persistence extensibility tightened.** Replaced the overstated claim "already supports adding new optional fields without breaking sibling-key preservation" with the more accurate framing that an established pattern exists (coordinated updates across `PersistedShape`, `migrate.ts`, `Conversation`, `ConversationManager`) and that v0.3's sibling-key preservation tests cover top-level keys only.
+- **Opus-PDR-6 — Transcript-seed gap risk added.** Added a Risks-table row covering the case where `CopilotSession.setModel()` is unavailable or rejects: SDK-side history would be lost on session recreation (no public seed API per CodeResearch §3); mitigation is a one-time warning in the confirmation dialog rather than silent degradation.
+- **Opus-PDR-8 — FR-007 fallback chain made explicit.** Appended the fresh `listModels()` retry step to FR-007 so the fallback chain (default → fresh listModels → heuristic) is unambiguous.
