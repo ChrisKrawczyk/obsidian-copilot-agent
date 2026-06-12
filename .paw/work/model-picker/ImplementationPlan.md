@@ -69,16 +69,16 @@ v0.4 adds per-conversation model selection on top of the v0.3 multi-conversation
 
 <!-- Items deferred-but-worth-listing across the three drafts. -->
 
-- [ ] Manual "Refresh models" command independent of the FR-018 retry path (deferred unless dogfooding shows entitlement-change pain mid-session).
-- [ ] Richer per-row metadata in the picker — provider badges, context-window size, vision/reasoning support — sourced from `ModelInfo.capabilities`.
-- [ ] Per-conversation reasoning-effort controls layered onto model selection.
-- [ ] Soft warning when switching to a materially smaller context-window model.
-- [ ] Persist a `modelCapabilities` snapshot alongside `modelId` so unavailable-id error messages can hint "was a reasoning model".
-- [ ] Curated model allowlist in Settings (Out of Scope — would slot into Phase 2).
-- [ ] Migrate `SafetySettingsStore` into a more general `PluginSettingsStore` (v0.3 deferred candidate carried forward).
-- [ ] Telemetry on swap frequency and unavailable-id incidence.
-- [ ] Surface model id in conversation-list rows in `ConversationPicker`.
-- [ ] Command-palette "Models" entry to open the picker from the keyboard.
+- [x] [skipped] Manual "Refresh models" command independent of the FR-018 retry path (deferred unless dogfooding shows entitlement-change pain mid-session).
+- [x] [skipped] Richer per-row metadata in the picker — provider badges, context-window size, vision/reasoning support — sourced from `ModelInfo.capabilities`.
+- [x] [skipped] Per-conversation reasoning-effort controls layered onto model selection.
+- [x] [skipped] Soft warning when switching to a materially smaller context-window model.
+- [x] [skipped] Persist a `modelCapabilities` snapshot alongside `modelId` so unavailable-id error messages can hint "was a reasoning model".
+- [x] [skipped] Curated model allowlist in Settings (Out of Scope — would slot into Phase 2).
+- [x] [skipped] Migrate `SafetySettingsStore` into a more general `PluginSettingsStore` (v0.3 deferred candidate carried forward).
+- [x] [skipped] Telemetry on swap frequency and unavailable-id incidence.
+- [x] [skipped] Surface model id in conversation-list rows in `ConversationPicker`.
+- [x] [skipped] Command-palette "Models" entry to open the picker from the keyboard.
 
 ## Phase Ordering Rationale
 
