@@ -29,6 +29,10 @@ interface FakeHandles {
   disconnectCalls: number;
   abortCalls: number;
   sendCalls: string[];
+  /** v0.4 Phase 3: setModel call log (each entry is the new model id). */
+  setModelCalls: string[];
+  /** Override setModel to throw / behave abnormally. */
+  setModelImpl: ((id: string) => Promise<void> | void) | null;
   /** Override what sendAndWait returns. */
   setSendResponse: (resp: unknown) => void;
   /** Override what listModels returns. */
@@ -50,6 +54,8 @@ function makeFakeSdk(): FakeHandles {
     disconnectCalls: 0,
     abortCalls: 0,
     sendCalls: [],
+    setModelCalls: [],
+    setModelImpl: null,
     setSendResponse: () => {},
     setModels: () => {},
   };
@@ -76,6 +82,12 @@ function makeFakeSdk(): FakeHandles {
     },
     disconnect: async () => {
       handles.disconnectCalls += 1;
+    },
+    setModel: async (id: string) => {
+      handles.setModelCalls.push(id);
+      if (handles.setModelImpl) {
+        await handles.setModelImpl(id);
+      }
     },
   };
 
@@ -1091,6 +1103,93 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       expect(h.sendCalls[0]).toContain("STREAM-PREAMBLE");
       expect(h.sendCalls[0]).toContain("hello-stream");
       await agent.dispose();
+    });
+  });
+
+  // v0.4 Phase 3 (FR-005): swapModel — in-place model swap.
+  describe("swapModel", () => {
+    test("identity no-op when newId === selectedModel does NOT call setModel", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      expect(agent.getModel()).toBe("gpt-4.1");
+      await agent.swapModel("gpt-4.1");
+      expect(h.setModelCalls).toEqual([]);
+      expect(agent.getModel()).toBe("gpt-4.1");
+      await agent.dispose();
+    });
+
+    test("happy path: cancels pending stream + calls SDK setModel + updates selectedModel", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.swapModel("gpt-4o");
+      expect(h.setModelCalls).toEqual(["gpt-4o"]);
+      // cancelCurrent flows through to session.abort.
+      expect(h.abortCalls).toBe(1);
+      expect(agent.getModel()).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("selectedModel is only updated AFTER setModel resolves (rejection leaves state unchanged)", async () => {
+      const h = makeFakeSdk();
+      h.setModelImpl = async () => {
+        throw new Error("SDK rejected model");
+      };
+      const agent = makeAgent(h);
+      await agent.init();
+      const before = agent.getModel();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        "SDK rejected model",
+      );
+      expect(agent.getModel()).toBe(before);
+      await agent.dispose();
+    });
+
+    test("pre-init swap records preferred override and seeds next init", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      // swap BEFORE init — no SDK session exists yet.
+      await agent.swapModel("gpt-4o");
+      expect(h.setModelCalls).toEqual([]);
+      expect(agent.getModel()).toBe("gpt-4o");
+      // After init, the preferred override drives pickModel.
+      await agent.init();
+      expect(h.lastCreateSession.model).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("preferred override survives reconnect", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.swapModel("gpt-4o");
+      // Reconnect rebuilds the SDK session via init; the override
+      // should drive pickModel rather than reverting to opts.preferredModel.
+      await agent.reconnect();
+      expect(h.lastCreateSession.model).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("throws when disposed", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.dispose();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        /disposed/i,
+      );
+    });
+
+    test("throws when SDK session lacks setModel", async () => {
+      const h = makeFakeSdk();
+      // Strip setModel after the fake is built so init still succeeds.
+      delete (h.session as { setModel?: unknown }).setModel;
+      const agent = makeAgent(h);
+      await agent.init();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        /setModel/,
+      );
     });
   });
 });

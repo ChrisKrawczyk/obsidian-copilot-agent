@@ -175,6 +175,7 @@ function makeFakeFactory(): {
       session: sessionStub,
       journal: journalStub,
       state: new ChatState(),
+      setModelId: async () => {},
       dispose: async () => {
         rec.disposed = true;
       },
@@ -1012,5 +1013,125 @@ describe("ConversationManager.maybeAutoNameFromFirstMessage (FR-005)", () => {
     expect(m.get(id)?.name).toBe("First message text");
   });
 });
+
+// v0.4 Phase 3 (FR-007): creation-time modelId resolution.
+describe("ConversationManager — creation-time modelId resolution (v0.4 FR-007)", () => {
+  test("when resolveCreationModelId returns a string id, it is persisted on the new conversation", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => ({ modelId: "gpt-4o", configuredDefault: "gpt-4o" }),
+    });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    const id = m.create().id;
+    expect(m.get(id)?.modelId).toBe("gpt-4o");
+    expect(state.byId.get(id)?.modelId).toBe("gpt-4o");
+  });
+
+  test("when resolver returns null, conversation is created without modelId (v0.3 behavior)", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => ({ modelId: null }),
+    });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    const id = m.create().id;
+    expect(m.get(id)?.modelId).toBeNull();
+    expect(state.byId.get(id)?.modelId).toBeNull();
+  });
+
+  test("when no resolver is provided, conversation has undefined modelId (legacy)", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    const id = m.create().id;
+    expect(m.get(id)?.modelId).toBeUndefined();
+    expect(state.byId.get(id)?.modelId).toBeUndefined();
+  });
+
+  test("when defaultWasUnavailable is true, onUnavailableDefault fires once with configured id", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const noticeSpy = vi.fn();
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => ({
+        modelId: "gpt-4o",
+        configuredDefault: "missing-model",
+        defaultWasUnavailable: true,
+      }),
+      onUnavailableDefault: noticeSpy,
+    });
+    m.hydrate({ conversations: [persistedConv("seed")], activeConversationId: "seed" });
+    noticeSpy.mockClear();
+    const id = m.create().id;
+    expect(noticeSpy).toHaveBeenCalledTimes(1);
+    expect(noticeSpy).toHaveBeenCalledWith("missing-model");
+    expect(m.get(id)?.modelId).toBe("gpt-4o");
+  });
+
+  test("when defaultWasUnavailable is true but no configuredDefault, onUnavailableDefault does NOT fire", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const noticeSpy = vi.fn();
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => ({
+        modelId: "gpt-4o",
+        defaultWasUnavailable: true,
+      }),
+      onUnavailableDefault: noticeSpy,
+    });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    m.create();
+    expect(noticeSpy).not.toHaveBeenCalled();
+  });
+
+  test("if the resolver throws, conversation is still created with null modelId", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => {
+        throw new Error("resolver boom");
+      },
+    });
+    m.hydrate({ conversations: [], activeConversationId: null });
+    const id = m.create().id;
+    expect(m.get(id)?.modelId).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  test("existing conversations are unaffected by resolver changes", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    // Hydrate a conversation that already has a modelId.
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: () => ({ modelId: "gpt-4o" }),
+    });
+    m.hydrate({
+      conversations: [persistedConv("c1", { modelId: "claude-3" })],
+      activeConversationId: "c1",
+    });
+    expect(m.get("c1")?.modelId).toBe("claude-3");
+    // Creating a NEW one uses the resolver; existing unchanged.
+    const id = m.create().id;
+    expect(m.get("c1")?.modelId).toBe("claude-3");
+    expect(m.get(id)?.modelId).toBe("gpt-4o");
+  });
+});
+
 
 

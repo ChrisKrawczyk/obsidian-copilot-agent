@@ -129,6 +129,30 @@ export class ChatState {
   }
 
   /**
+   * v0.4 FR-005: id-less variant used by `ConversationRuntime.setModelId`
+   * to freeze whichever assistant message is currently streaming/pending
+   * BEFORE the SDK abort fires during a model swap. Without this, the
+   * abort gets bucketed as `error` by the stream finalizer rather than
+   * as a clean `interrupted`. Returns the id of the message that was
+   * frozen, or `null` if nothing was live.
+   */
+  interruptStreamingMessage(): string | null {
+    const idx = this.messages.findIndex(
+      (m) => m.status === "streaming" || m.status === "pending",
+    );
+    if (idx < 0) return null;
+    const existing = this.messages[idx];
+    this.messages[idx] = {
+      ...existing,
+      status: "interrupted",
+      id: existing.id,
+      createdAt: existing.createdAt,
+    };
+    this.emit();
+    return existing.id;
+  }
+
+  /**
    * Append a tool call to a message's `toolCalls` list, or update an
    * existing one with the same id. Returns true if state mutated.
    * Used by Phase 5 to render live tool-call blocks as the SDK fires

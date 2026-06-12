@@ -236,6 +236,25 @@ export interface AgentSession {
   /** Currently selected model id, or undefined if init hasn't run. */
   getModel(): string | undefined;
   /**
+   * v0.4 FR-005: swap the active model on the underlying SDK session
+   * via `session.setModel()`, preserving conversation history. Cancels
+   * any in-flight stream and pending approvals first so the swap takes
+   * effect cleanly on the next message.
+   *
+   * Behavior:
+   *  - If `newModelId === getModel()`: no-op (identity).
+   *  - If the SDK session has not been created yet (no init run): just
+   *    updates the preferred-model override so the next init/reset
+   *    selects `newModelId`. No network call.
+   *  - Otherwise: cancels pending approvals with reason "model-swap",
+   *    aborts any in-flight turn, then awaits `session.setModel()`.
+   *    `selectedModel` is updated ONLY after the SDK call resolves so a
+   *    rejection leaves state unchanged.
+   *
+   * Throws if disposed or if the SDK does not support `setModel`.
+   */
+  swapModel(newModelId: string): Promise<void>;
+  /**
    * Phase 6: resolve a pending approval prompt with the user's choice.
    * Called by the chat view when the user clicks an approval button.
    * No-op if no approval is pending for this tool-call id (e.g. the
@@ -300,6 +319,14 @@ export class CopilotAgentSession implements AgentSession {
   private client: SdkClient | null = null;
   private session: SdkSession | null = null;
   private selectedModel: string | undefined;
+  /**
+   * v0.4 FR-005: per-instance override of `opts.preferredModel`. Set by
+   * `swapModel()` (mid-life model change) so that subsequent
+   * init/reset cycles converge on the user's most-recent choice rather
+   * than reverting to the construction-time `preferredModel`.
+   * `undefined` means "use opts.preferredModel".
+   */
+  private preferredModelOverride: string | undefined;
   /** Set once `dispose()` runs. Terminal — blocks all future init(). */
   private disposed = false;
   /**
@@ -810,6 +837,74 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   /**
+   * v0.4 FR-005: swap the active model on the underlying SDK session
+   * without losing conversation history. See {@link AgentSession.swapModel}
+   * for the contract.
+   *
+   * Implementation notes:
+   *  - The "interrupt streaming placeholder BEFORE abort" detail
+   *    (mirroring `ChatView.handleStop`) belongs to whichever caller
+   *    owns the visible placeholder state (ChatView for live UI;
+   *    ConversationRuntime.setModelId for orchestration). This method
+   *    is UI-agnostic — it only owns SDK-level cancellation and the
+   *    setModel call.
+   *  - We update `selectedModel` AND `preferredModelOverride` only
+   *    after `session.setModel()` resolves so that a rejection leaves
+   *    the in-memory state matching the SDK's actual state. We also
+   *    update the override so a subsequent reconnect/reset converges
+   *    on the user's choice.
+   */
+  async swapModel(newModelId: string): Promise<void> {
+    if (this.disposed) {
+      throw new Error("AgentSession disposed");
+    }
+    if (typeof newModelId !== "string" || newModelId.length === 0) {
+      throw new Error("swapModel: newModelId must be a non-empty string");
+    }
+    if (this.selectedModel === newModelId) {
+      // Identity no-op. Still record as the override so a future
+      // reconnect/reset doesn't drift back to opts.preferredModel.
+      this.preferredModelOverride = newModelId;
+      return;
+    }
+    const session = this.session;
+    if (!session) {
+      // No SDK session yet (pre-init, post-stopRuntime, or disposed-
+      // and-recreating). Just record the preferred-model override so
+      // the next init/reset resolves to `newModelId`.
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      return;
+    }
+    if (typeof session.setModel !== "function") {
+      throw new Error(
+        "swapModel: underlying SDK session does not support setModel()",
+      );
+    }
+    // Drain pending approvals and abort any in-flight turn first so
+    // the SDK is quiescent when setModel() runs. cancelAllPendingApprovals
+    // is idempotent; cancelCurrent() also calls it under the hood.
+    this.cancelAllPendingApprovals("model-swap");
+    try {
+      await this.cancelCurrent();
+    } catch (e) {
+      console.warn("[AgentSession] swapModel cancelCurrent threw", e);
+    }
+    // Re-check session — cancelCurrent could race with stopRuntime if
+    // a teardown is in flight. If the session is gone now, degrade to
+    // the no-session path above.
+    const live = this.session;
+    if (!live) {
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      return;
+    }
+    await Promise.resolve(live.setModel!(newModelId));
+    this.selectedModel = newModelId;
+    this.preferredModelOverride = newModelId;
+  }
+
+  /**
    * Phase 2: prepend the vault-aware preamble to the FIRST send of the
    * current SDK session. Subsequent sends pass through unchanged. If no
    * preamble callback is configured or it returns null/empty, the text
@@ -880,7 +975,7 @@ export class CopilotAgentSession implements AgentSession {
       await safeCall(() => oldSession.disconnect?.());
     }
     if (!this.selectedModel) {
-      this.selectedModel = await this.pickModel(this.client, this.opts.preferredModel);
+      this.selectedModel = await this.pickModel(this.client, this.preferredModelOverride ?? this.opts.preferredModel);
     }
     const fresh = await this.client.createSession({
       model: this.selectedModel,
@@ -1031,7 +1126,7 @@ export class CopilotAgentSession implements AgentSession {
 
       this.client = client;
 
-      const model = await this.pickModel(client, this.opts.preferredModel);
+      const model = await this.pickModel(client, this.preferredModelOverride ?? this.opts.preferredModel);
       await bailIfStale();
       this.selectedModel = model;
 
@@ -1695,6 +1790,13 @@ export interface SdkSession {
   sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;
+  /**
+   * v0.4 FR-005: swap the active model on this SDK session in place,
+   * preserving conversation history. Applies to subsequent messages.
+   * The SDK guarantees the new model id is validated against the
+   * runtime's installed model list; rejection throws.
+   */
+  setModel?: (modelId: string, options?: unknown) => Promise<unknown> | unknown;
   /**
    * Phase 4/5: subscribe to a specific event type. The SDK returns an
    * unsubscribe function. Modelled structurally so tests can stub it.

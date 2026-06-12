@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
 import {
   CopilotAgentSession,
+  resolveHeuristicModelId,
   type AgentSession,
   type SdkClient,
   type SdkModule,
@@ -341,6 +342,17 @@ export default class CopilotAgentPlugin extends Plugin {
         // per-session listModels() round-trip when the catalog is
         // already `ready`. Catalog-degraded states fall back to v0.3.
         catalog: modelCatalog,
+        // v0.4 Phase 3 (FR-007 + SC-002): seed the per-conversation
+        // model id from persisted metadata so reopening a conversation
+        // re-uses its previously-resolved model rather than re-running
+        // the global default → heuristic chain. `null` (v0.3-migrated)
+        // and `undefined` (fresh-without-resolution) both mean
+        // "AgentSession.pickModel decides at init"; Phase 5 will add
+        // lazy resolution + backfill.
+        preferredModel:
+          typeof metadata.modelId === "string" && metadata.modelId.length > 0
+            ? metadata.modelId
+            : undefined,
         // v0.3 Phase 1: gated tool list captured at plugin onload and
         // frozen via `exposeRawFsToolsAtStartup`. Toggling the setting
         // mid-session does not reach this runtime, nor any future
@@ -420,6 +432,24 @@ export default class CopilotAgentPlugin extends Plugin {
         session,
         journal,
         state,
+        async setModelId(newId, opts) {
+          // v0.4 FR-005: freeze any live streaming placeholder as
+          // `interrupted` BEFORE the SDK abort fires so the stream
+          // finalizer buckets the cancellation as a clean interruption
+          // rather than as `error`. Mirrors ChatView.handleStop().
+          state.interruptStreamingMessage();
+          await session.swapModel(newId);
+          if (opts.persist) {
+            try {
+              conversationManager.setConversationModelId(metadata.id, newId);
+            } catch (err) {
+              console.warn(
+                "[copilot-agent] setConversationModelId after swap failed",
+                err,
+              );
+            }
+          }
+        },
         async dispose() {
           liveRuntimes.delete(liveEntry);
           try {
@@ -437,6 +467,44 @@ export default class CopilotAgentPlugin extends Plugin {
     const conversationManager = new ConversationManager({
       runtimeFactory,
       store: conversationsStore,
+      // v0.4 Phase 3 (FR-007): synchronous resolver that walks the
+      // priority chain at creation time. Returns null when the catalog
+      // is non-ready so AgentSession.pickModel falls back to v0.3
+      // listModels at init (Phase 5 will add lazy backfill).
+      resolveCreationModelId: () => {
+        const configuredDefault =
+          safetySettingsStore.snapshot().defaultModelId;
+        const state = modelCatalog.getState();
+        if (state.kind !== "ready") {
+          return { modelId: null, configuredDefault };
+        }
+        if (
+          typeof configuredDefault === "string" &&
+          configuredDefault.length > 0
+        ) {
+          if (modelCatalog.isModelAvailable(configuredDefault)) {
+            return { modelId: configuredDefault, configuredDefault };
+          }
+          // Configured default not in chatModels → fall through to
+          // heuristic, then surface a one-shot Notice.
+          const heuristic = resolveHeuristicModelId(state.chatModels);
+          return {
+            modelId: heuristic,
+            configuredDefault,
+            defaultWasUnavailable: true,
+          };
+        }
+        return {
+          modelId: resolveHeuristicModelId(state.chatModels),
+          configuredDefault: null,
+        };
+      },
+      onUnavailableDefault: (configuredDefault) => {
+        new Notice(
+          `Configured default model "${configuredDefault}" is not available. Falling back to a recommended model.`,
+          6000,
+        );
+      },
     });
     this.conversationManager = conversationManager;
 

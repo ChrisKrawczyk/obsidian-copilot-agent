@@ -38,6 +38,20 @@ export interface ConversationRuntime {
   readonly session: AgentSession;
   readonly journal: UndoJournal;
   readonly state: ChatState;
+  /**
+   * v0.4 Phase 3: swap the active model on this runtime's session via
+   * `AgentSession.swapModel()`, and (when `persist` is true) mirror
+   * the change into the persisted Conversation metadata via the
+   * manager-supplied callback. The runtime layer also freezes any
+   * live streaming placeholder as `interrupted` BEFORE swap so the
+   * SDK abort gets bucketed cleanly (mirrors `ChatView.handleStop`).
+   *
+   * Throws whatever AgentSession.swapModel throws (disposed, SDK
+   * rejection, etc.). On rejection the persisted metadata is NOT
+   * updated so on-disk state continues to reflect the actual SDK
+   * state.
+   */
+  setModelId(newId: string, opts: { persist: boolean }): Promise<void>;
   /** Cancel any in-flight stream and detach SDK listeners. Called by
    *  `ConversationManager.removeConversation`. */
   dispose(): Promise<void>;

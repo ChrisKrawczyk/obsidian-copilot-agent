@@ -105,6 +105,37 @@ export interface ConversationManagerOptions {
   store?: ConversationsStore;
   /** Now() shim for tests. */
   now?: () => number;
+  /**
+   * v0.4 Phase 3 (FR-007): resolves the model id to assign to a newly
+   * created conversation. The resolver should consult the user's
+   * configured global default first (via SafetySettingsStore) and the
+   * ModelCatalog second, falling back to the heuristic. Returns
+   * `modelId: null` when the catalog is non-ready — the runtime layer
+   * then defers selection to `AgentSession.pickModel` at init (v0.3
+   * codepath). Phase 5 backfills via lazy resolution.
+   *
+   * Returning `defaultWasUnavailable: true` with `configuredDefault`
+   * lets the manager surface a one-shot UI notice via
+   * `onUnavailableDefault` when the user's configured default could
+   * not be honoured even though the catalog was ready.
+   *
+   * Sync (not Promise-returning) to keep `createInternal` synchronous
+   * — both ModelCatalog.getState() and SafetySettingsStore.snapshot()
+   * are sync APIs.
+   */
+  resolveCreationModelId?: () => {
+    modelId: string | null;
+    defaultWasUnavailable?: boolean;
+    configuredDefault?: string | null;
+  };
+  /**
+   * v0.4 Phase 3 (FR-007): called once per `createInternal` invocation
+   * when the user's configured default model was unavailable in the
+   * catalog and the manager fell back to the heuristic. Used by main.ts
+   * to surface an Obsidian Notice without coupling the domain layer
+   * to the Obsidian SDK.
+   */
+  onUnavailableDefault?: (configuredDefault: string) => void;
 }
 
 export type ConversationChangeEvent =
@@ -126,6 +157,12 @@ export class ConversationManager {
   private readonly runtimeFactory: ConversationRuntimeFactory;
   private readonly store?: ConversationsStore;
   private readonly now: () => number;
+  private readonly resolveCreationModelId?: () => {
+    modelId: string | null;
+    defaultWasUnavailable?: boolean;
+    configuredDefault?: string | null;
+  };
+  private readonly onUnavailableDefault?: (configuredDefault: string) => void;
   private readonly conversations = new Map<string, Conversation>();
   private readonly runtimes = new Map<string, ConversationRuntime>();
   private readonly listeners = new Set<ConversationListener>();
@@ -136,6 +173,8 @@ export class ConversationManager {
     this.runtimeFactory = opts.runtimeFactory;
     this.store = opts.store;
     this.now = opts.now ?? (() => Date.now());
+    this.resolveCreationModelId = opts.resolveCreationModelId;
+    this.onUnavailableDefault = opts.onUnavailableDefault;
   }
 
   // ---------------- Hydration ----------------
@@ -585,12 +624,48 @@ export class ConversationManager {
     this.idCounter += 1;
     const id = `conv-${this.idCounter}`;
     const ts = this.now();
+    // v0.4 Phase 3 (FR-007): resolve modelId at creation. The resolver
+    // walks the priority chain: configured default → catalog heuristic
+    // → null (= "let AgentSession.pickModel decide at init"). When the
+    // configured default existed but was unavailable in the catalog,
+    // surface a one-shot Notice via the manager-supplied callback.
+    let resolvedModelId: string | null | undefined;
+    if (this.resolveCreationModelId) {
+      try {
+        const result = this.resolveCreationModelId();
+        resolvedModelId = result.modelId;
+        if (
+          result.defaultWasUnavailable &&
+          typeof result.configuredDefault === "string" &&
+          result.configuredDefault.length > 0 &&
+          this.onUnavailableDefault
+        ) {
+          try {
+            this.onUnavailableDefault(result.configuredDefault);
+          } catch (err) {
+            console.warn(
+              "[ConversationManager] onUnavailableDefault threw",
+              err,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[ConversationManager] resolveCreationModelId threw — falling back to null",
+          err,
+        );
+        resolvedModelId = null;
+      }
+    }
     const meta: Conversation = {
       id,
       name: finalName,
       createdAt: ts,
       lastActiveAt: ts,
     };
+    if (resolvedModelId !== undefined) {
+      meta.modelId = resolvedModelId;
+    }
     this.conversations.set(id, meta);
     // Invariant: every Conversation tracked by the manager exists in
     // the store too. Without this upsert, calling
