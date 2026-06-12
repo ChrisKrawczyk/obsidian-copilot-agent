@@ -498,14 +498,7 @@ export class ChatView extends ItemView {
       newModelId;
 
     if (needsConfirm) {
-      const hasPending =
-        typeof (this.agent as { hasPendingApprovals?: () => boolean })
-          ?.hasPendingApprovals === "function"
-          ? Boolean(
-              (this.agent as { hasPendingApprovals?: () => boolean })
-                .hasPendingApprovals?.(),
-            )
-          : false;
+      const hasPending = this.agent?.hasPendingApprovals() ?? false;
       const body = buildSwapConfirmCopy(newLabel, hasPending);
       const ok = await confirmDestructive(
         this.app,
@@ -585,9 +578,10 @@ export class ChatView extends ItemView {
         this.statusEl.removeClass("copilot-agent-status-error");
         break;
       case "connected":
-        this.statusEl.setText(
-          state.model ? `Connected · ${state.model}` : "Connected",
-        );
+        // FR-015: the ModelPicker is the canonical model indicator. The
+        // status pill only carries auth/connection state, so we omit
+        // `state.model` here to avoid duplicating the model name.
+        this.statusEl.setText("Connected");
         this.statusEl.removeClass("copilot-agent-status-error");
         break;
       case "error":

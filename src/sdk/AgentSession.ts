@@ -261,6 +261,13 @@ export interface AgentSession {
    * prompt was already auto-rejected during cleanup).
    */
   resolveApproval(toolCallId: string, choice: ApprovalChoice): void;
+  /**
+   * v0.4: does this session currently have any tool-approval prompts
+   * awaiting user response? Consumed by the model-picker confirmation
+   * copy so the user knows pending approvals will be cancelled by
+   * `swapModel()` if they confirm the switch.
+   */
+  hasPendingApprovals(): boolean;
 }
 
 const SDK_IDLE_TIMEOUT_MS = 180_000;
@@ -1512,6 +1519,16 @@ export class CopilotAgentSession implements AgentSession {
    *   - setToken / reconnect (token rotation)
    *   - dispose (plugin unload)
    */
+  /**
+   * Public probe: does this session currently have any tool-approval prompts
+   * awaiting user response? Consumed by the v0.4 model-picker confirmation
+   * copy (`buildSwapConfirmCopy`) so the user knows the pending approvals
+   * will be cancelled by `swapModel()` if they confirm the switch.
+   */
+  public hasPendingApprovals(): boolean {
+    return this.pendingApprovals.size > 0;
+  }
+
   private cancelAllPendingApprovals(reason: string): void {
     if (this.pendingApprovals.size === 0) return;
     const reject: ApprovalChoice = { kind: "reject", reason };
