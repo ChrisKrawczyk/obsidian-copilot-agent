@@ -106,8 +106,10 @@ export class ModelPicker {
     const menu = new Menu();
     for (const row of rows) {
       menu.addItem((mi) => {
-        const suffix = row.unavailable ? "" : ""; // label already includes suffix
-        mi.setTitle(row.label + suffix);
+        // `row.label` already includes the "(unavailable)" suffix when
+        // applicable (see buildModelPickerViewModel) — no need to
+        // append anything here.
+        mi.setTitle(row.label);
         mi.setChecked(row.isCurrent);
         if (row.unavailable) {
           // Sentinel row: cannot be re-selected (it's not a real
