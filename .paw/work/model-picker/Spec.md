@@ -4,7 +4,7 @@
 
 v0.4 of the obsidian-copilot-agent plugin gives each conversation its own model selection. Today the plugin picks one model at plugin onload via a static heuristic and uses it for every conversation, with no in-app affordance to change it. Users on GitHub Copilot Enterprise have access to many chat models (GPT family, Claude family, Gemini family, etc.) and want to route prompts to different models per conversation.
 
-This release introduces a model picker in the chat header that reflects and controls the active conversation's bound model, persists the selection alongside other conversation metadata, and adds a configurable global default in Settings for new conversations. Mid-conversation swaps are supported and require explicit user confirmation when prior context would be impacted, because a swap recreates the underlying session and the new model must be seeded with the prior transcript to maintain conversational continuity.
+This release introduces a model picker in the chat header that reflects and controls the active conversation's bound model, persists the selection alongside other conversation metadata, and adds a configurable global default in Settings for new conversations. Mid-conversation swaps are supported via the SDK's in-place model-switch capability, which preserves the underlying session and conversation history; the next user message is dispatched to the newly bound model. A confirmation dialog is shown before mid-conversation swaps to set user expectations that subsequent responses may differ in style, latency, and capability profile.
 
 The change is additive to v0.3 (multi-conversation persistence): the persisted shape grows one optional per-conversation field, and the existing chat header gains one new control. All v0.3 behaviors (streaming, Stop, approvals, token rotation, archive flow, Undo journal, raw-FS gating, vault-aware preamble) MUST remain intact.
 
@@ -59,19 +59,19 @@ Users cannot:
 ### P1 — Mid-conversation swap with confirmation
 
 **As an** Obsidian user mid-way through a conversation,
-**I want** a confirmation dialog when I switch models so I understand session context will reset,
-**so that** I'm not surprised by behavior changes from the new model.
+**I want** a confirmation dialog when I switch models so I understand subsequent responses will come from a different model,
+**so that** I'm not surprised by behavior, latency, or capability differences from the new model.
 
 **Acceptance Scenarios:**
 
-1. **Given** an in-flight conversation that already contains at least one assistant turn, **When** I select a different model from the picker, **Then** a confirmation dialog explains "Switching models will reset session context — the new model will be re-seeded with the visible transcript before your next message. Continue?"
-2. **Given** the confirmation dialog appears, **When** I cancel, **Then** the picker reverts to the previously bound model AND no session reset occurs.
-3. **Given** I confirm the swap, **When** the next message is sent, **Then** the session is recreated bound to the new model AND the persisted visible transcript is supplied as initial context to the new session before the new user message is dispatched.
+1. **Given** an in-flight conversation that already contains at least one assistant turn, **When** I select a different model from the picker, **Then** a confirmation dialog explains "Switching to `<new-model>`. The conversation history is preserved; your next message will be answered by `<new-model>`. Continue?"
+2. **Given** the confirmation dialog appears, **When** I cancel, **Then** the picker reverts to the previously bound model AND no model swap occurs.
+3. **Given** I confirm the swap, **When** the next message is sent, **Then** the underlying session's bound model is updated in place (via the SDK's in-place switch capability, preserving conversation history) AND the next user message is dispatched to the new model.
 4. **Given** a swap is confirmed while a turn is streaming, **Then** the in-flight turn is interrupted, its placeholder is finalized as `interrupted`, and the swap takes effect for the next user message.
-5. **Given** a conversation with zero assistant turns (freshly created, no responses yet), **When** I select a different model, **Then** no confirmation dialog appears AND the swap is applied immediately (there is no prior session context to lose).
-6. **Given** I open the picker and re-select the currently-bound model, **Then** no confirmation dialog appears AND no session reset occurs (identity swap is a no-op).
+5. **Given** a conversation with zero assistant turns (freshly created, no responses yet), **When** I select a different model, **Then** no confirmation dialog appears AND the swap is applied immediately.
+6. **Given** I open the picker and re-select the currently-bound model, **Then** no confirmation dialog appears AND no swap occurs (identity swap is a no-op).
 
-**Independent Test**: Start a conversation, send one message, receive one assistant turn. Select a different model. Observe the confirmation dialog. Cancel — picker reverts. Reselect, confirm — verify the next response comes from the new model and the prior visible transcript was supplied to the new session.
+**Independent Test**: Start a conversation, send one message, receive one assistant turn. Select a different model. Observe the confirmation dialog. Cancel — picker reverts. Reselect, confirm — verify the next response comes from the new model and the prior visible transcript is preserved end-to-end.
 
 ### P2 — Global default model in Settings
 
@@ -123,8 +123,8 @@ Users cannot:
 | FR-002 | The chat header MUST surface a model picker that reflects the active conversation's bound model id. |
 | FR-003 | Selecting a model in the picker MUST update the active conversation's bound model id and persist it under the same durability guarantee the plugin uses for other per-conversation metadata changes (e.g., rename). |
 | FR-004 | A model swap MUST require explicit user confirmation via a modal dialog if and only if the persisted visible transcript already contains at least one completed assistant turn AND the selected model id is different from the currently-bound model id. Swaps that would impact no prior session context (no assistant turns yet) and identity swaps (same model re-selected) MUST proceed without a dialog. |
-| FR-005 | A confirmed swap MUST take effect at the next user-message boundary: the bound model id is updated, the underlying session is reset, the persisted visible transcript is supplied as initial context to the new session, and only then is the user's next message dispatched. |
-| FR-006 | If a swap is confirmed while a turn is streaming, the in-flight turn MUST be interrupted (its placeholder finalized as `interrupted`) before the swap takes effect. |
+| FR-005 | A confirmed swap MUST take effect at the next user-message boundary by updating the underlying session's bound model in place via the SDK's in-place model-switch capability. The conversation history (both plugin-visible scrollback and SDK-side session history) MUST be preserved across the swap; the underlying session MUST NOT be torn down or recreated solely to effect a model change. |
+| FR-006 | If a swap is confirmed while a turn is streaming, the in-flight turn MUST be interrupted (its placeholder finalized as `interrupted`) before the model swap takes effect on the next user message. |
 | FR-007 | When a new conversation is created, its initial `modelId` MUST be the configured global default (if set and available), or the onload heuristic resolution (if the global default is unset OR currently unavailable). The resolved model id MUST be written to the conversation at creation time so that subsequent changes to the global default do not retroactively affect it. |
 | FR-008 | Settings MUST expose a "Default model for new conversations" control. The control lists chat-capable models from the SDK, plus an "Auto (heuristic)" option that defers to the onload heuristic. |
 | FR-009 | Changing the global default MUST NOT mutate any existing conversation's bound model id. |
@@ -145,7 +145,7 @@ Users cannot:
 | NFR-001 | Opening the picker MUST render synchronously from a cached model list (no SDK round-trip on click). The model list is fetched at plugin onload and cached for the session, with refresh available via FR-018's retry affordance and via user-initiated plugin reload. |
 | NFR-002 | Switching the active conversation MUST update the picker selection within one render frame (≤ 16 ms) — same budget as the existing v0.3 conversation switch. |
 | NFR-003 | v0.4 MUST NOT cause any previously-passing v0.3 test to fail. New behaviors are covered by additive tests. |
-| NFR-004 | The model swap path MUST NOT leak runtime sessions: every swap MUST dispose the prior session before constructing the replacement. The implementation MUST be verifiable via the plugin's existing live-session bookkeeping. |
+| NFR-004 | The model swap path MUST NOT leak runtime sessions. Because swaps use the SDK's in-place model-switch capability (FR-005), no session replacement occurs and the existing live-session bookkeeping continues to track exactly one runtime per conversation across model changes. If implementation circumstances ever require a session recreate, the prior session MUST be disposed before the replacement is constructed. |
 | NFR-005 | All v0.3 baseline behaviors MUST remain intact and observable end-to-end: streaming, Stop control, approval prompts (with persistence across plugin reload), token rotation, multi-conversation soft-cap / archive flow, Undo journal (cross-restart + content-divergence detection), raw-FS gating policy, and the vault-aware preamble. |
 
 ## Success Criteria
@@ -158,7 +158,7 @@ Users cannot:
 | SC-004 | A persisted conversation with an unavailable model id surfaces the inline error AND blocks send AND unblocks once the user picks an available replacement. | FR-010, FR-011 |
 | SC-005 | The picker shows only chat-capable models when the SDK's model metadata distinguishes them; ambiguous metadata models still appear. | FR-012 |
 | SC-006 | All v0.3 baseline behaviors remain green (see NFR-005 enumeration). | NFR-005 |
-| SC-007 | A confirmed mid-conversation swap correctly interrupts any in-flight stream, recreates the underlying session bound to the new model, and supplies the persisted visible transcript as initial context for the new session before the next user message. | FR-004, FR-005, FR-006 |
+| SC-007 | A confirmed mid-conversation swap correctly interrupts any in-flight stream, applies the new model binding to the existing session in place, and the next user message is answered by the new model with the prior conversation history preserved end-to-end. | FR-004, FR-005, FR-006 |
 | SC-008 | If the onload model-list fetch fails, the user sees a retry affordance and a blocked-send state; a successful retry restores the picker without reload. The empty-list and failure cases are visually distinguishable. | FR-016, FR-018 |
 
 ## Edge Cases
@@ -170,13 +170,13 @@ Users cannot:
 - **Migrated v0.3 conversation lazy-resolves to currently-unavailable default**: When a `null` `modelId` is encountered and the global default is also unavailable, the onload heuristic resolves the id; if THAT id is also unavailable (degenerate SDK state), FR-010's inline error fires.
 - **Undo journal interaction**: The Undo journal restores conversation TRANSCRIPT state only. A model swap that occurred between snapshot and undo is NOT reverted by Undo — the conversation's currently-bound model persists across undo operations. The Undo UI MAY note this if it is otherwise confusing.
 - **Model-list fetch failure vs empty-list**: Failure (FR-018) and empty (FR-016) are distinct states with distinct UX: failure shows a retry affordance, empty shows "No chat models available" with no retry.
-- **Swap during pending approval**: If the conversation has an outstanding approval prompt when the user confirms a swap, the approval is cancelled before the session is reset. The user is informed via the confirmation dialog copy when pending approvals exist.
+- **Swap during pending approval**: If the conversation has an outstanding approval prompt when the user confirms a swap, the approval is cancelled before the in-place model swap is invoked. The user is informed via the confirmation dialog copy when pending approvals exist.
 
 ## Assumptions
 
-- The Copilot SDK exposes a way to list available models with capability metadata sufficient to distinguish chat / completion from embedding / image. Specific shape will be confirmed in CodeResearch. If metadata is missing or insufficient, FR-012's fail-open clause covers the ambiguity.
-- The SDK supports binding a session to a specified model id at session-creation time (v0.3 already relies on this for the heuristically-picked model).
-- The SDK supports seeding a new session with prior conversation history (either via an explicit history/messages parameter at creation, or via a structured first prompt). This is a blocking CodeResearch question for FR-005. If neither mechanism exists, the spec contract for FR-005 becomes a degraded variant: the new session starts WITHOUT prior transcript context, a Notice surfaces this clearly to the user, and the spec is updated to reflect the constraint before planning proceeds.
+- The Copilot SDK exposes a way to list available models with capability metadata. CodeResearch confirmed `CopilotClient.listModels()` returns a `ModelInfo[]`. Capability metadata (chat vs embedding vs image) is not explicit in the public type, so FR-012's fail-open clause governs filtering.
+- The SDK supports binding a session to a specified model id at session-creation time (v0.3 already relies on this for the heuristically-picked model). CodeResearch confirmed this via `SessionConfig.model`.
+- The SDK supports in-place model swap on an existing session with history preserved. CodeResearch confirmed this via `CopilotSession.setModel(model, options)` documented as "applies to next message, conversation history preserved." This is the mechanism FR-005 depends on. If a future SDK version removes this capability, FR-005 would need re-specification (no current risk).
 - Per-conversation metadata persistence already supports adding new optional fields without breaking sibling-key preservation (v0.3 established this property).
 - Settings persistence already supports adding new fields; the global default field can live in the existing settings store or a sibling store as a planning decision.
 - The chat-capable set is "models the SDK metadata identifies as chat / completion capable." Exact classifier rules are a CodeResearch deliverable but the spec contract is "filter to what users can productively chat with, fail-open on ambiguity."
@@ -189,7 +189,7 @@ Users cannot:
 - Chat-header picker dropdown listing SDK chat-capable models, including the "(unavailable)" suffix path.
 - Settings field for global default model with "Auto (heuristic)" option.
 - Confirmation dialog before mid-conversation swap with prior session context.
-- Session reset on swap, with persisted-transcript seeding for the new session if the SDK supports it.
+- In-place SDK model swap on the existing session (history preserved) when the user confirms a mid-conversation change.
 - Inline-error / send-blocking flow when the persisted model is unavailable.
 - Retry affordance / send-blocking flow when the onload model-list fetch fails.
 - Migration-safe load of existing v0.3 conversations (treat missing field as unresolved).
@@ -211,13 +211,12 @@ Users cannot:
 
 | Risk | Mitigation |
 |------|------------|
-| SDK does not expose a clean "list available models with capability" API. | Fall back to a hardcoded chat-family allowlist at build time and document the limitation. CodeResearch must confirm SDK shape before planning. |
-| SDK has no mechanism to seed a new session with prior conversation history. | FR-005 degrades to "new session starts without prior context, user is informed via Notice." Spec is updated and re-reviewed before planning if this happens. |
-| Session reset on swap is expensive (model latency + reauth) and surprises users mid-task. | Confirmation dialog (FR-004) sets expectation. Future enhancement: warm a parallel session in the background once a swap is confirmed but before the next user send. Out of scope for v0.4. |
-| Persisted transcript replay exceeds SDK input-token limits for large conversations. | Add a soft trim that retains the most recent turns; surface a Notice when trimming. CodeResearch will determine SDK input limits and recommend the trimming threshold. Planning decides the exact algorithm — spec contract is "user is informed if trimming occurs." |
+| SDK does not expose a clean "list available models with capability" API. | CodeResearch confirmed `listModels()` exists but capability metadata is not explicit. Mitigation: FR-012 fail-open. A hardcoded chat-family allowlist (gpt-*, claude-*, gemini-*) is the planning fallback if observed model lists contain too many non-chat surprises. |
+| In-place SDK model swap behaves unexpectedly under load (e.g., partial application, race with in-flight tool calls). | FR-006 interrupts streaming turns before swap takes effect. Tests must cover swap-during-stream and swap-during-pending-approval paths. |
+| Session reset on conversation creation under a different default is expensive and surprises users (cold-start latency). | One-time at conversation creation only; documented as expected. Future enhancement: warm a session in the background. Out of scope for v0.4. |
 | Recovery flow (FR-010, FR-011) blocks user from a conversation whose model id changed casing or got renamed upstream. | Recovery is permissive: the picker presents the unavailable id at the top of the list, the inline error explains the situation, and one click resumes use. We do not auto-pick because that would silently drop the user's prior choice. |
-| Picker UI competes for header real estate with the conversation picker (v0.3) and status indicator. | Placement is a CodeResearch / planning decision. Spec contract is "picker reflects and controls the active conversation's bound model and is keyboard-accessible." |
-| Swap during a pending-approval prompt could orphan the approval. | Confirmation dialog surfaces stronger warning copy when pending approvals exist. Implementation cancels approvals before disposing the session. |
+| Picker UI competes for header real estate with the conversation picker (v0.3) and status indicator. | Placement is a planning decision. Spec contract is "picker reflects and controls the active conversation's bound model and is keyboard-accessible." |
+| Swap during a pending-approval prompt could orphan the approval. | Confirmation dialog surfaces stronger warning copy when pending approvals exist. Implementation cancels approvals before invoking the in-place model swap. |
 | Cached model list goes stale if user's Copilot entitlements change mid-session. | Acknowledged limitation. FR-018's retry affordance plus plugin reload cover the recovery paths. A dedicated "refresh models" affordance is deferred. |
 
 ## Traceability
