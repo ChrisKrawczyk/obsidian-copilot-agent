@@ -1133,5 +1133,113 @@ describe("ConversationManager — creation-time modelId resolution (v0.4 FR-007)
   });
 });
 
+describe("ConversationManager — lazy modelId resolution on setActive (v0.4 FR-013)", () => {
+  test("v0.3-migrated conv (modelId undefined) → resolver runs on setActive and writes through", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const resolver = vi.fn(() => ({ modelId: "gpt-4o", configuredDefault: null }));
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: resolver,
+    });
+    // Hydrate two convs: one v0.3-migrated (undefined modelId), one
+    // already-resolved. Active starts on the resolved one.
+    const c1 = persistedConv("c1", { modelId: "claude-3" });
+    const c2 = persistedConv("c2");
+    delete (c2 as { modelId?: unknown }).modelId;
+    m.hydrate({
+      conversations: [c1, c2],
+      activeConversationId: "c1",
+    });
+    resolver.mockClear();
+    // Switching to the v0.3-migrated conv should trigger lazy resolve.
+    m.setActive("c2");
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(m.get("c2")?.modelId).toBe("gpt-4o");
+    // Write-through to the store.
+    expect(state.byId.get("c2")?.modelId).toBe("gpt-4o");
+  });
+
+  test("conv with explicit null modelId (created while catalog degraded) → resolver runs on setActive", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const resolver = vi.fn(() => ({ modelId: "gpt-4o", configuredDefault: null }));
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: resolver,
+    });
+    m.hydrate({
+      conversations: [
+        persistedConv("c1", { modelId: "claude-3" }),
+        persistedConv("c2", { modelId: null }),
+      ],
+      activeConversationId: "c1",
+    });
+    resolver.mockClear();
+    m.setActive("c2");
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(m.get("c2")?.modelId).toBe("gpt-4o");
+  });
+
+  test("resolver returns null (catalog still degraded) → conv stays unresolved, no write-through", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const resolver = vi.fn(() => ({ modelId: null, configuredDefault: null }));
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: resolver,
+    });
+    m.hydrate({
+      conversations: [
+        persistedConv("c1", { modelId: "claude-3" }),
+        persistedConv("c2", { modelId: null }),
+      ],
+      activeConversationId: "c1",
+    });
+    m.setActive("c2");
+    expect(m.get("c2")?.modelId).toBeNull();
+    expect(state.byId.get("c2")?.modelId).toBeNull();
+  });
+
+  test("conv with already-bound modelId → resolver NOT called on setActive (idempotent)", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const resolver = vi.fn(() => ({ modelId: "gpt-4o" }));
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: resolver,
+    });
+    m.hydrate({
+      conversations: [
+        persistedConv("c1", { modelId: "claude-3" }),
+        persistedConv("c2", { modelId: "gpt-3.5" }),
+      ],
+      activeConversationId: "c1",
+    });
+    resolver.mockClear();
+    m.setActive("c2");
+    expect(resolver).not.toHaveBeenCalled();
+    expect(m.get("c2")?.modelId).toBe("gpt-3.5");
+  });
+
+  test("no resolver wired → lazy resolution is a silent no-op", () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    const c2 = persistedConv("c2");
+    delete (c2 as { modelId?: unknown }).modelId;
+    m.hydrate({
+      conversations: [persistedConv("c1", { modelId: "claude-3" }), c2],
+      activeConversationId: "c1",
+    });
+    m.setActive("c2");
+    expect(m.get("c2")?.modelId).toBeUndefined();
+  });
+});
+
 
 

@@ -304,12 +304,62 @@ export class ConversationManager {
     const previous = this.activeId;
     this.activeId = id;
     if (this.store) this.store.setActiveId(id);
+    // v0.4 Phase 5 (FR-013): lazy resolution. If the conversation is
+    // v0.3-migrated (`modelId === undefined`) OR was created with a
+    // null modelId (catalog non-ready at create-time), try to resolve
+    // now that the user is opening it. Best-effort: a still-degraded
+    // catalog leaves modelId null and the UI surfaces the FR-010 path.
+    this.maybeLazyResolveModelId(id);
     // SINGLE-1: bump lastActiveAt on the newly-active conversation so
     // the picker order and soft-cap victim selection reflect actual
     // usage. touchActive() emits its own metadata-changed event; the
     // active-changed event below is still needed for runtime rebind.
     this.touchActive();
     this.emit({ kind: "active-changed", previousId: previous, nextId: id });
+  }
+
+  /**
+   * v0.4 Phase 5 (FR-013): if the conversation has no bound model id
+   * (undefined → v0.3-migrated, or explicit null → created while
+   * catalog was degraded), try to resolve one via the same
+   * `resolveCreationModelId` resolver used at create time and persist
+   * it. No-op if the conversation already has a bound id, if no
+   * resolver is wired, or if the resolver returns null (catalog
+   * still degraded — leave unresolved and surface via FR-010 path).
+   */
+  private maybeLazyResolveModelId(id: string): void {
+    if (!this.resolveCreationModelId) return;
+    const conv = this.conversations.get(id);
+    if (!conv) return;
+    if (typeof conv.modelId === "string" && conv.modelId.length > 0) return;
+    let result: ReturnType<NonNullable<typeof this.resolveCreationModelId>>;
+    try {
+      result = this.resolveCreationModelId();
+    } catch (e) {
+      console.warn(
+        "[ConversationManager] lazy modelId resolver threw",
+        e,
+      );
+      return;
+    }
+    if (result.modelId === null) return;
+    // Use the public setter so listeners (and the runtime via the
+    // metadata-changed event) re-pick up the binding.
+    this.setConversationModelId(id, result.modelId);
+    if (
+      result.defaultWasUnavailable &&
+      result.configuredDefault &&
+      this.onUnavailableDefault
+    ) {
+      try {
+        this.onUnavailableDefault(result.configuredDefault);
+      } catch (e) {
+        console.warn(
+          "[ConversationManager] onUnavailableDefault threw (lazy)",
+          e,
+        );
+      }
+    }
   }
 
   /**

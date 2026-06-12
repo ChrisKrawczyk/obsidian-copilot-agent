@@ -1193,3 +1193,136 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     });
   });
 });
+
+// ---------- v0.4 Phase 5 (S1): deferred-init recovery ----------
+
+describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
+  test("catalog non-ready AND per-session listModels throws → init succeeds in deferred state", async () => {
+    const h = makeFakeSdk();
+    // Per-session listModels also throws so pickModel cannot resolve.
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("catalog down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init(); // does NOT throw
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(agent.getModel()).toBeUndefined();
+    // No createSession was called yet — we only saw client.start + ping.
+    expect(h.lastCreateSession.model).toBeUndefined();
+
+    await expect(agent.sendMessage("hi")).rejects.toThrow(/pick a model/i);
+    await agent.dispose();
+  });
+
+  test("catalog non-ready, listModels fails → catalog later transitions to ready → session auto-recovers", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+
+    const { ModelCatalog } = await import("./ModelCatalog");
+    let catalogModelsFn: () => Promise<Array<{ id: string }>> = async () => {
+      throw new Error("catalog down");
+    };
+    const catalogClient = {
+      createSession: () => Promise.reject(new Error("x")),
+      listModels: () => catalogModelsFn(),
+    } as unknown as SdkClient;
+    const catalog = new ModelCatalog(() => catalogClient);
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+
+    // Catalog "recovers" — refresh returns chat models. The agent
+    // subscription should auto-trigger tryRecoverDeferred which
+    // builds the SDK session. Per-session listModels is still
+    // broken (catalog's ready chatModels are used via the resolver).
+    catalogModelsFn = async () => [{ id: "gpt-4o" }];
+    await catalog.refresh();
+    // Allow microtasks queued by the subscriber to drain.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(catalog.getState().kind).toBe("ready");
+    expect(agent.hasDeferredSession()).toBe(false);
+    expect(agent.getModel()).toBe("gpt-4o");
+    expect(h.lastCreateSession.model).toBe("gpt-4o");
+
+    // sendMessage now works.
+    h.setSendResponse({ data: { content: "hello" } });
+    const reply = await agent.sendMessage("ping");
+    expect(reply.content).toBe("hello");
+    await agent.dispose();
+  });
+
+  test("deferred → swapModel(newId) creates the SDK session in-place (user explicit pick path)", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("catalog down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+
+    // User picks an id from the (degraded) picker — this should
+    // still create the session via the explicit preferred id path.
+    await agent.swapModel("gpt-4o");
+    expect(agent.hasDeferredSession()).toBe(false);
+    expect(agent.getModel()).toBe("gpt-4o");
+    expect(h.lastCreateSession.model).toBe("gpt-4o");
+    await agent.dispose();
+  });
+
+  test("hasPendingApprovals on a deferred agent is false (no pending approvals possible)", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(agent.hasPendingApprovals()).toBe(false);
+    await agent.dispose();
+  });
+});

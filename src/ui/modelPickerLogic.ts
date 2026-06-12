@@ -23,6 +23,14 @@ export interface ModelRow {
   label: string;
   /** True iff this is the active conversation's currently-bound model. */
   isCurrent: boolean;
+  /**
+   * Phase 5: a sentinel row prepended when the active conversation's
+   * persisted `modelId` is not in the catalog's chat-capable list.
+   * The picker renders it disabled with an "(unavailable)" suffix +
+   * checkmark so the user understands which conversation-bound id
+   * is missing; selecting any other row clears the inline error.
+   */
+  unavailable?: boolean;
 }
 
 /**
@@ -67,6 +75,23 @@ export function buildModelPickerViewModel(
       .map((m) => makeRow(m, activeConversationModelId ?? null))
       .filter((r) => r.id.length > 0);
     const currentId = activeConversationModelId ?? null;
+    // Phase 5 (FR-010): unavailable-id sentinel row when the active
+    // conv's bound id is non-null and the ready catalog does not
+    // contain it. Prepend so it's visually grouped with the current
+    // selection; mark it as both `isCurrent` and `unavailable` so the
+    // picker can render the checkmark + "(unavailable)" suffix.
+    if (
+      typeof currentId === "string" &&
+      currentId.length > 0 &&
+      !rows.some((r) => r.id === currentId)
+    ) {
+      rows.unshift({
+        id: currentId,
+        label: `${currentId} (unavailable)`,
+        isCurrent: true,
+        unavailable: true,
+      });
+    }
     const currentLabel = currentId
       ? (rows.find((r) => r.id === currentId)?.label ?? currentId)
       : null;
@@ -235,21 +260,122 @@ export interface CanSendSnapshot {
   isConnected: boolean;
   isStreaming: boolean;
   isPending: boolean;
+  /** Phase 5: catalog state for the four catalog-related blocked
+   *  reasons. Optional so Phase 4 callers (and tests of the v0.3
+   *  gate) can omit it without spurious blocked-state returns. */
+  catalogState?: ModelCatalogState;
+  /** Phase 5: active conversation's bound modelId. May be null/
+   *  undefined for v0.3-migrated convs and Phase-5 deferred-init
+   *  cases. Drives both unavailable-model and unresolved-model. */
+  activeModelId?: string | null;
 }
 
 export type CanSendResult =
   | { ok: true }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; kind: SendBlockReason };
 
+// ---------- canSend() (Phase 5: full taxonomy) ----------
+
+/**
+ * Reason taxonomy for blocked sends. The chat view consumes this to
+ * disable the send button AND to drive the inline-error banner copy
+ * + retry affordance. Precedence between catalog-error / catalog-
+ * empty / unavailable-id / unresolved-id is enforced by the
+ * caller-supplied snapshot ordering inside `canSend()` — the spec
+ * (plan §359) defines: `unavailable-id > catalog-error > catalog-
+ * empty > stream-error` for the BANNER, and `canSend()` adopts the
+ * same order so the disabled-reason text matches the visible banner.
+ *
+ * `connection-loss`, `streaming`, `pending` are the v0.3 reasons,
+ * preserved verbatim so the existing block-reason taxonomy stays a
+ * single source of truth.
+ */
+export type SendBlockReason =
+  | "connection-loss"
+  | "streaming"
+  | "pending"
+  /** Catalog non-ready AND no usable persisted modelId. */
+  | "unresolved-model"
+  /** Active conv has a modelId that the ready catalog does NOT contain. */
+  | "unavailable-model"
+  /** Catalog state === "error" (transient list-models failure). */
+  | "catalog-error"
+  /** Catalog state === "empty" (account has zero chat-capable models). */
+  | "catalog-empty";
+
+/**
+ * Phase 5 (FR-014): pure decision function for "is the send surface
+ * allowed to fire right now?". Extends the Phase 4 scaffold with the
+ * four catalog/model blocked states.
+ *
+ * Precedence: connection-loss > streaming > pending > unavailable-
+ * model > catalog-error > catalog-empty > unresolved-model.
+ *
+ * `activeModelId === null` means the active conv has no bound id
+ * (v0.3-migrated or created while catalog was degraded). It blocks
+ * only when the catalog also can't help (non-ready) — otherwise the
+ * resolver / runtime will pick an id on send.
+ */
 export function canSend(s: CanSendSnapshot): CanSendResult {
   if (!s.isConnected) {
-    return { ok: false, reason: "Not connected. Open settings to sign in." };
+    return {
+      ok: false,
+      reason: "Not connected. Open settings to sign in.",
+      kind: "connection-loss",
+    };
   }
   if (s.isStreaming) {
-    return { ok: false, reason: "Send is unavailable while streaming." };
+    return {
+      ok: false,
+      reason: "Send is unavailable while streaming.",
+      kind: "streaming",
+    };
   }
   if (s.isPending) {
-    return { ok: false, reason: "Send is unavailable while a turn is pending." };
+    return {
+      ok: false,
+      reason: "Send is unavailable while a turn is pending.",
+      kind: "pending",
+    };
+  }
+  const cat = s.catalogState;
+  if (cat) {
+    if (
+      cat.kind === "ready" &&
+      typeof s.activeModelId === "string" &&
+      s.activeModelId.length > 0 &&
+      !cat.chatModels.some((m) => m.id === s.activeModelId)
+    ) {
+      return {
+        ok: false,
+        reason: `Model \`${s.activeModelId}\` is no longer available. Pick a model to continue.`,
+        kind: "unavailable-model",
+      };
+    }
+    if (cat.kind === "error") {
+      return {
+        ok: false,
+        reason: `Models unavailable: ${cat.message}`,
+        kind: "catalog-error",
+      };
+    }
+    if (cat.kind === "empty") {
+      return {
+        ok: false,
+        reason: "No chat models available.",
+        kind: "catalog-empty",
+      };
+    }
+    if (
+      cat.kind !== "ready" &&
+      (typeof s.activeModelId !== "string" || s.activeModelId.length === 0)
+    ) {
+      return {
+        ok: false,
+        reason: "No model selected. Pick a model to continue.",
+        kind: "unresolved-model",
+      };
+    }
   }
   return { ok: true };
 }

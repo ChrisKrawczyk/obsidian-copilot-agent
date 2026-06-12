@@ -529,3 +529,28 @@
   background: var(--background-modifier-error-rgb, rgba(255,165,0,0.15));
   color: var(--text-warning, #c97e00);
 }
+
+/* v0.4 Phase 5: inline-error banner above the chat composer.
+ * Shown when canSend() returns one of the four catalog/model
+ * blocked reasons (FR-010 / FR-016 / FR-018). Hidden otherwise. */
+.copilot-agent-inline-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  background: var(--background-modifier-error, rgba(255, 80, 80, 0.12));
+  color: var(--text-error, #c83a3a);
+  font-size: var(--font-ui-small);
+  border: 1px solid var(--background-modifier-error-hover, rgba(200, 58, 58, 0.3));
+}
+.copilot-agent-inline-error-msg {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
+.copilot-agent-inline-error-retry {
+  flex: 0 0 auto;
+  font-size: var(--font-ui-small);
+  padding: 2px 10px;
+}

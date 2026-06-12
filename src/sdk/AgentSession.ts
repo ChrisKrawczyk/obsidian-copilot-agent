@@ -268,6 +268,22 @@ export interface AgentSession {
    * `swapModel()` if they confirm the switch.
    */
   hasPendingApprovals(): boolean;
+  /**
+   * v0.4 Phase 5 (S1 — deferred-init contract): true iff `init()`
+   * resolved successfully but `createSession()` was NOT issued because
+   * the wired `ModelCatalog` was in `empty`/`error` and no
+   * `preferredModel` override was usable. In this state:
+   *   - `sendMessage`/`sendMessageStreaming` reject with a "pick a
+   *     model" error (UI consumes via `canSend()`).
+   *   - `swapModel(newId)` will set the preferred override AND
+   *     immediately attempt session creation if a client is alive.
+   *   - The session subscribes to the catalog and auto-recovers when
+   *     it transitions to `ready` (catalog retry, token rotation, or
+   *     the user picks an id).
+   * Returns false in the healthy path (createSession ran) and after
+   * deferred recovery succeeds.
+   */
+  hasDeferredSession(): boolean;
 }
 
 const SDK_IDLE_TIMEOUT_MS = 180_000;
@@ -447,6 +463,20 @@ export class CopilotAgentSession implements AgentSession {
   private lastFirstSendText: string | null = null;
   private lastFollowupSendText: string | null = null;
 
+  /**
+   * v0.4 Phase 5 (S1): true iff `doInit()` finished without calling
+   * `createSession()` because the wired `ModelCatalog` is non-ready
+   * and no usable `preferredModel` override exists. While this flag
+   * is set the SDK runtime is live (`client !== null`) but `session`
+   * is null. Cleared by `tryRecoverDeferred()` on successful catalog
+   * `ready` transition or by an explicit `swapModel(newId)`. Also
+   * cleared on `stopRuntime()` / `dispose()` so a fresh `init()`
+   * goes through the standard non-deferred path.
+   */
+  private deferredSession = false;
+  /** Unsubscribe handle for the catalog listener (constructor wired). */
+  private unsubCatalog: (() => void) | null = null;
+
   constructor(
     private readonly opts: AgentSessionOptions,
     sdkLoader?: () => Promise<SdkModule>,
@@ -457,10 +487,34 @@ export class CopilotAgentSession implements AgentSession {
     this.customToolNames = new Set(
       (this.toolsList ?? []).map((t) => t.name).filter(Boolean) as string[],
     );
+    // v0.4 Phase 5 (S1): subscribe to the catalog so a `ready`
+    // transition (catalog retry, token rotation, deferred lazy
+    // refresh) drives auto-recovery of a deferred session. We do
+    // NOT trigger a refresh here — main.ts owns refresh sequencing.
+    if (opts.catalog) {
+      this.unsubCatalog = opts.catalog.subscribe((state) => {
+        if (
+          state.kind === "ready" &&
+          this.deferredSession &&
+          !this.disposed
+        ) {
+          void this.tryRecoverDeferred().catch((e) =>
+            console.warn(
+              "[AgentSession] tryRecoverDeferred from catalog notify failed",
+              e,
+            ),
+          );
+        }
+      });
+    }
   }
 
   getModel(): string | undefined {
     return this.selectedModel;
+  }
+
+  hasDeferredSession(): boolean {
+    return this.deferredSession;
   }
 
   init(): Promise<void> {
@@ -498,6 +552,11 @@ export class CopilotAgentSession implements AgentSession {
       // init() already invoked onAuthError if applicable; rethrow so the
       // chat view can show the failure to the user.
       throw err;
+    }
+    if (this.deferredSession) {
+      throw new Error(
+        "Model catalog unavailable — pick a model in the chat header to continue.",
+      );
     }
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
@@ -568,6 +627,11 @@ export class CopilotAgentSession implements AgentSession {
       await this.init();
     } catch (err) {
       throw err;
+    }
+    if (this.deferredSession) {
+      throw new Error(
+        "Model catalog unavailable — pick a model in the chat header to continue.",
+      );
     }
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
@@ -868,10 +932,21 @@ export class CopilotAgentSession implements AgentSession {
     if (typeof newModelId !== "string" || newModelId.length === 0) {
       throw new Error("swapModel: newModelId must be a non-empty string");
     }
-    if (this.selectedModel === newModelId) {
+    if (this.selectedModel === newModelId && !this.deferredSession) {
       // Identity no-op. Still record as the override so a future
       // reconnect/reset doesn't drift back to opts.preferredModel.
       this.preferredModelOverride = newModelId;
+      return;
+    }
+    // v0.4 Phase 5 (S1): deferred recovery path. The runtime is alive
+    // (client !== null) but no session was created because the catalog
+    // was non-ready at init. The user just picked an id — record it
+    // and create the session in-place. No need to cancel anything
+    // (there is no session to be streaming or holding approvals).
+    if (this.deferredSession && this.client) {
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      await this.tryRecoverDeferred(newModelId);
       return;
     }
     const session = this.session;
@@ -999,6 +1074,14 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.unsubCatalog) {
+      try {
+        this.unsubCatalog();
+      } catch {
+        /* listener unsubscribe must not throw */
+      }
+      this.unsubCatalog = null;
+    }
     this.cancelAllPendingApprovals("Agent disposed.");
     await this.stopRuntime();
   }
@@ -1035,6 +1118,7 @@ export class CopilotAgentSession implements AgentSession {
     this.client = null;
     this.initPromise = null;
     this.selectedModel = undefined;
+    this.deferredSession = false;
 
     if (session) {
       await raceWithTimeout(
@@ -1133,7 +1217,29 @@ export class CopilotAgentSession implements AgentSession {
 
       this.client = client;
 
-      const model = await this.pickModel(client, this.preferredModelOverride ?? this.opts.preferredModel);
+      let model: string;
+      try {
+        model = await this.pickModel(
+          client,
+          this.preferredModelOverride ?? this.opts.preferredModel,
+        );
+      } catch (pickErr) {
+        // v0.4 Phase 5 (S1): if a shared catalog is wired and currently
+        // non-ready, DEFER createSession() instead of failing init.
+        // The runtime stays alive; the catalog subscription added in
+        // the constructor will fire `tryRecoverDeferred()` when the
+        // catalog transitions to `ready` (user retry, token rotation,
+        // or background refresh). Without a wired catalog there is no
+        // recovery path, so the original error propagates.
+        const catalog = this.opts.catalog;
+        if (catalog && catalog.getState().kind !== "ready") {
+          await bailIfStale();
+          this.deferredSession = true;
+          this.firstSendOfSession = true;
+          return; // init resolves successfully in deferred state
+        }
+        throw pickErr;
+      }
       await bailIfStale();
       this.selectedModel = model;
 
@@ -1169,6 +1275,66 @@ export class CopilotAgentSession implements AgentSession {
       }
       throw err;
     }
+  }
+
+  /**
+   * v0.4 Phase 5 (S1): create the SDK session for a session that
+   * finished `doInit()` in deferred state. Idempotent and racy-safe:
+   *  - Returns silently if not deferred, no client, already has a
+   *    session, or disposed.
+   *  - If an explicit `preferred` id is passed (e.g. from `swapModel`)
+   *    it's used directly without consulting the catalog. Otherwise
+   *    falls back to `pickModel()` (catalog-then-listModels-then-
+   *    heuristic), which means catalog-`ready` notifications are
+   *    sufficient to drive recovery without the user picking an id.
+   *  - On any failure, leaves `deferredSession === true` so the next
+   *    catalog notify can retry. We only flip the flag on success.
+   *  - Race-safety: if the runtime is torn down or disposed during
+   *    `createSession()`, we disconnect the half-built session and
+   *    leave state untouched.
+   */
+  private async tryRecoverDeferred(preferred?: string): Promise<void> {
+    if (!this.deferredSession || !this.client || this.session || this.disposed) {
+      return;
+    }
+    const client = this.client;
+    const epoch = this.initEpoch;
+    let model: string;
+    try {
+      model = preferred ?? (await this.pickModel(
+        client,
+        this.preferredModelOverride ?? this.opts.preferredModel,
+      ));
+    } catch {
+      // Catalog flipped non-ready between notify and now (or
+      // listModels still failing). Stay deferred; the next catalog
+      // notify will retry.
+      return;
+    }
+    if (this.disposed || this.initEpoch !== epoch) return;
+    let session: SdkSession;
+    try {
+      session = await client.createSession({
+        model,
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
+        streaming: true,
+        tools: this.toolsList,
+        onPermissionRequest: (request: SdkPermissionRequest) =>
+          this.handlePermission(request),
+      });
+    } catch (e) {
+      console.warn("[AgentSession] deferred createSession failed", e);
+      return;
+    }
+    if (this.disposed || this.initEpoch !== epoch || this.session) {
+      await safeCall(() => session.disconnect?.());
+      return;
+    }
+    this.selectedModel = model;
+    this.preferredModelOverride = model;
+    this.session = session;
+    this.firstSendOfSession = true;
+    this.deferredSession = false;
   }
 
   private async pickModel(

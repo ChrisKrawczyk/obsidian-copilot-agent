@@ -332,7 +332,10 @@ describe("modelPickerLogic — canSend (Phase 4 scaffold)", () => {
       isPending: false,
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("Not connected");
+    if (!r.ok) {
+      expect(r.reason).toContain("Not connected");
+      expect(r.kind).toBe("connection-loss");
+    }
   });
   test("streaming → blocked", () => {
     const r = canSend({
@@ -341,7 +344,10 @@ describe("modelPickerLogic — canSend (Phase 4 scaffold)", () => {
       isPending: false,
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("streaming");
+    if (!r.ok) {
+      expect(r.reason).toContain("streaming");
+      expect(r.kind).toBe("streaming");
+    }
   });
   test("pending → blocked", () => {
     const r = canSend({
@@ -350,6 +356,149 @@ describe("modelPickerLogic — canSend (Phase 4 scaffold)", () => {
       isPending: true,
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("pending");
+    if (!r.ok) {
+      expect(r.reason).toContain("pending");
+      expect(r.kind).toBe("pending");
+    }
+  });
+});
+
+describe("modelPickerLogic — canSend (Phase 5: catalog/model blocked states)", () => {
+  test("catalog error + connected → catalog-error reason", () => {
+    const r = canSend({
+      isConnected: true,
+      isStreaming: false,
+      isPending: false,
+      catalogState: { kind: "error", message: "fetch failed" },
+      activeModelId: "gpt-4.1",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.kind).toBe("catalog-error");
+      expect(r.reason).toContain("fetch failed");
+    }
+  });
+
+  test("catalog empty + connected → catalog-empty reason", () => {
+    const r = canSend({
+      isConnected: true,
+      isStreaming: false,
+      isPending: false,
+      catalogState: { kind: "empty" },
+      activeModelId: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.kind).toBe("catalog-empty");
+      expect(r.reason).toContain("No chat models");
+    }
+  });
+
+  test("ready catalog + activeModelId not in catalog → unavailable-model with id in reason", () => {
+    const r = canSend({
+      isConnected: true,
+      isStreaming: false,
+      isPending: false,
+      catalogState: readyCatalog([{ id: "gpt-4o" }]),
+      activeModelId: "gpt-deprecated",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.kind).toBe("unavailable-model");
+      expect(r.reason).toContain("gpt-deprecated");
+    }
+  });
+
+  test("ready catalog + activeModelId in catalog → ok", () => {
+    expect(
+      canSend({
+        isConnected: true,
+        isStreaming: false,
+        isPending: false,
+        catalogState: readyCatalog([{ id: "gpt-4o" }]),
+        activeModelId: "gpt-4o",
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  test("non-ready catalog + no activeModelId → unresolved-model", () => {
+    const r = canSend({
+      isConnected: true,
+      isStreaming: false,
+      isPending: false,
+      catalogState: { kind: "loading" },
+      activeModelId: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe("unresolved-model");
+  });
+
+  test("precedence: streaming wins over catalog-error", () => {
+    const r = canSend({
+      isConnected: true,
+      isStreaming: true,
+      isPending: false,
+      catalogState: { kind: "error", message: "x" },
+      activeModelId: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe("streaming");
+  });
+
+  test("precedence: unavailable-model wins over catalog-error (model takes precedence over catalog-state)", () => {
+    // Ready catalog with the conv-bound id missing — model-unavailable
+    // is selected because the catalog IS ready (no catalog-error fires).
+    const r = canSend({
+      isConnected: true,
+      isStreaming: false,
+      isPending: false,
+      catalogState: readyCatalog([{ id: "gpt-4o" }]),
+      activeModelId: "gpt-deprecated",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe("unavailable-model");
+  });
+});
+
+describe("modelPickerLogic — buildModelPickerViewModel (Phase 5: unavailable-id sentinel)", () => {
+  test("active conv's id not in ready catalog → sentinel row prepended with unavailable flag", () => {
+    const vm = buildModelPickerViewModel(
+      readyCatalog([{ id: "gpt-4o", name: "GPT-4o" }]),
+      "gpt-deprecated",
+    );
+    expect(vm.kind).toBe("ready");
+    if (vm.kind !== "ready") return;
+    expect(vm.rows[0]).toEqual({
+      id: "gpt-deprecated",
+      label: "gpt-deprecated (unavailable)",
+      isCurrent: true,
+      unavailable: true,
+    });
+    // The real models still follow.
+    expect(vm.rows[1].id).toBe("gpt-4o");
+    expect(vm.rows[1].isCurrent).toBe(false);
+    // currentLabel uses the sentinel's label so the picker button shows
+    // "(unavailable)" — making the FR-010 condition visually obvious.
+    expect(vm.currentLabel).toBe("gpt-deprecated (unavailable)");
+  });
+
+  test("active conv's id IS in ready catalog → no sentinel row", () => {
+    const vm = buildModelPickerViewModel(
+      readyCatalog([{ id: "gpt-4o" }, { id: "gpt-4.1" }]),
+      "gpt-4o",
+    );
+    if (vm.kind !== "ready") throw new Error("expected ready");
+    expect(vm.rows.some((r) => r.unavailable)).toBe(false);
+    expect(vm.rows).toHaveLength(2);
+  });
+
+  test("no active modelId + ready catalog → no sentinel row", () => {
+    const vm = buildModelPickerViewModel(
+      readyCatalog([{ id: "gpt-4o" }]),
+      null,
+    );
+    if (vm.kind !== "ready") throw new Error("expected ready");
+    expect(vm.rows).toHaveLength(1);
+    expect(vm.rows[0].unavailable).toBeUndefined();
   });
 });

@@ -106,9 +106,16 @@ export class ModelPicker {
     const menu = new Menu();
     for (const row of rows) {
       menu.addItem((mi) => {
-        mi.setTitle(row.label);
+        const suffix = row.unavailable ? "" : ""; // label already includes suffix
+        mi.setTitle(row.label + suffix);
         mi.setChecked(row.isCurrent);
-        mi.onClick(() => this.callbacks.onSelect(row.id));
+        if (row.unavailable) {
+          // Sentinel row: cannot be re-selected (it's not a real
+          // model). Show it as disabled.
+          mi.setDisabled(true);
+        } else {
+          mi.onClick(() => this.callbacks.onSelect(row.id));
+        }
       });
     }
     const rect = this.buttonEl.getBoundingClientRect();

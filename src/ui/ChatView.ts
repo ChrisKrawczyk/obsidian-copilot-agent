@@ -18,8 +18,10 @@ import { ModelPicker } from "./ModelPicker";
 import {
   buildModelPickerViewModel,
   buildSwapConfirmCopy,
+  canSend,
   isIdentitySwap,
   shouldConfirmSwap,
+  type SendBlockReason,
 } from "./modelPickerLogic";
 import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
@@ -167,6 +169,14 @@ export class ChatView extends ItemView {
    *  between the confirmation `await` and the `setModelId` resolution
    *  so a fast double-click can't fire two swaps. */
   private isSwapInProgress = false;
+  /** v0.4 Phase 5: inline-error banner above the composer. Visible iff
+   *  `canSend()` returns blocked for one of the catalog/model reasons
+   *  (FR-010/FR-016/FR-018) OR if a stream-error message needs to be
+   *  shown (precedence: model > catalog-error > catalog-empty >
+   *  unresolved > stream-error). */
+   private inlineErrorEl?: HTMLElement;
+   private inlineErrorMsgEl?: HTMLElement;
+   private inlineErrorRetryEl?: HTMLButtonElement;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
@@ -339,6 +349,27 @@ export class ChatView extends ItemView {
     });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
+    // v0.4 Phase 5: inline-error banner above the textarea — hidden by
+    // default; shown whenever `canSend()` returns a catalog/model
+    // blocked reason. Built once here; refreshSendGate() toggles
+    // visibility + copy + retry-button presence.
+    this.inlineErrorEl = composer.createDiv({
+      cls: "copilot-agent-inline-error",
+    });
+    this.inlineErrorEl.style.display = "none";
+    this.inlineErrorMsgEl = this.inlineErrorEl.createSpan({
+      cls: "copilot-agent-inline-error-msg",
+    });
+    this.inlineErrorRetryEl = this.inlineErrorEl.createEl("button", {
+      cls: "copilot-agent-inline-error-retry",
+      text: "Retry",
+    });
+    this.inlineErrorRetryEl.style.display = "none";
+    this.inlineErrorRetryEl.addEventListener("click", () => {
+      void this.modelCatalog.refresh().catch((err) =>
+        console.warn("[ChatView] catalog retry failed", err),
+      );
+    });
     this.inputEl = composer.createEl("textarea", {
       cls: "copilot-agent-input",
       attr: { rows: "3", placeholder: "Ask Copilot…" },
@@ -447,6 +478,10 @@ export class ChatView extends ItemView {
       this.refreshModelPicker(),
     );
     this.refreshModelPicker();
+    // refreshModelPicker already calls refreshSendGate; this redundant
+    // call covers the case where the picker is disabled (early-return
+    // in refreshModelPicker) but the gate still needs to evaluate.
+    this.refreshSendGate();
   }
 
   /** v0.4 Phase 4: compute the model picker view model from the
@@ -461,6 +496,59 @@ export class ChatView extends ItemView {
       activeConv?.modelId,
     );
     this.modelPicker.render(vm);
+    this.refreshSendGate();
+  }
+
+  /**
+   * v0.4 Phase 5 (FR-014/FR-010/FR-016/FR-018): re-evaluate `canSend()`
+   * against the current snapshot and reflect the result in (a) the
+   * Send button's disabled state, (b) the inline-error banner above
+   * the composer, (c) the visibility of the inline Retry button.
+   *
+   * Idempotent + cheap — called from every event that could change a
+   * canSend input (catalog, manager, auth, busy state).
+   *
+   * Precedence is owned by `canSend()` (see `modelPickerLogic.ts`);
+   * this method only renders whatever it returns.
+   */
+  private refreshSendGate(): void {
+    if (!this.inlineErrorEl || !this.inlineErrorMsgEl || !this.inlineErrorRetryEl) {
+      return;
+    }
+    const activeId = this.manager.getActiveId();
+    const activeConv = activeId ? this.manager.get(activeId) : null;
+    const result = canSend({
+      isConnected: this.currentAuthKind === "connected",
+      isStreaming: this.streaming,
+      isPending: this.pending,
+      catalogState: this.modelCatalog.getState(),
+      activeModelId: activeConv?.modelId ?? null,
+    });
+    // Connection-loss/streaming/pending have their own well-established
+    // UX surfaces (connectBtn, Stop button, busy spinner). Only the four
+    // catalog/model reasons drive the inline banner.
+    const bannerReasons: ReadonlySet<SendBlockReason> = new Set([
+      "unavailable-model",
+      "catalog-error",
+      "catalog-empty",
+      "unresolved-model",
+    ]);
+    if (!result.ok && bannerReasons.has(result.kind)) {
+      this.inlineErrorEl.style.display = "";
+      this.inlineErrorMsgEl.setText(result.reason);
+      // FR-018: only the catalog-error reason gets a Retry — empty/
+      // unresolved/unavailable are not "transient list-models failures".
+      this.inlineErrorRetryEl.style.display =
+        result.kind === "catalog-error" ? "" : "none";
+    } else {
+      this.inlineErrorEl.style.display = "none";
+    }
+    // Send button: disabled if NOT ok AND we're not in the streaming
+    // state (the streaming state repurposes the button as Stop, owned
+    // by setStreaming()). Don't trample the busy state either.
+    if (!this.pending && !this.streaming) {
+      this.sendBtnEl.disabled = !result.ok;
+    }
   }
 
   /**
@@ -559,7 +647,9 @@ export class ChatView extends ItemView {
     // send pipeline owns `pending`/`streaming`.
     if (!this.pending && !this.streaming) {
       this.inputEl.disabled = !isConnected;
-      this.sendBtnEl.disabled = !isConnected;
+      // Send button disable state is computed by refreshSendGate()
+      // below (which considers catalog state too) — don't overwrite
+      // here.
     }
     if (this.connectBtnEl) {
       this.connectBtnEl.style.display = isConnected ? "none" : "";
@@ -589,6 +679,7 @@ export class ChatView extends ItemView {
         this.statusEl.addClass("copilot-agent-status-error");
         break;
     }
+    this.refreshSendGate();
   }
 
   // ---- send pipeline ----
@@ -644,8 +735,20 @@ export class ChatView extends ItemView {
 
   private async handleSend(): Promise<void> {
     if (this.pending) return;
-    if (this.currentAuthKind !== "connected") {
-      new Notice("Not connected. Open settings to sign in.", 5000);
+    // v0.4 Phase 5 (FR-014): single-source gate. If canSend() says
+    // blocked for any reason (including the four catalog/model
+    // reasons), show the message and bail before touching state.
+    const activeId0 = this.manager.getActiveId();
+    const activeConv0 = activeId0 ? this.manager.get(activeId0) : null;
+    const gate = canSend({
+      isConnected: this.currentAuthKind === "connected",
+      isStreaming: this.streaming,
+      isPending: this.pending,
+      catalogState: this.modelCatalog.getState(),
+      activeModelId: activeConv0?.modelId ?? null,
+    });
+    if (!gate.ok) {
+      new Notice(gate.reason, 5000);
       return;
     }
     // v0.3 Phase 4: ensure we're bound to the latest active runtime
@@ -934,7 +1037,9 @@ export class ChatView extends ItemView {
     // Input stays disabled until the turn fully completes (post-streaming).
     this.inputEl.disabled = busy || gated;
     if (!busy) {
-      this.sendBtnEl.disabled = gated;
+      // Re-evaluate the gate (includes catalog/model reasons) rather
+      // than blindly enabling based on auth alone.
+      this.refreshSendGate();
       this.sendBtnEl.toggleClass("is-loading", false);
     }
   }
@@ -955,6 +1060,7 @@ export class ChatView extends ItemView {
       this.sendBtnEl.toggleClass("mod-cta", true);
       this.sendLabelEl.setText("Send");
       setIcon(this.sendIconEl, "send");
+      this.refreshSendGate();
     }
   }
 
