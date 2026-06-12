@@ -656,6 +656,10 @@ export default class CopilotAgentPlugin extends Plugin {
       // would let a mid-session toggle hide Undo buttons even though
       // the running runtime still has those tools registered.
       getExposeRawFsTools: () => exposeRawFsToolsAtStartup,
+      // v0.4 Phase 4: shared catalog so the chat header's model
+      // picker can read state + subscribe to refresh transitions
+      // without re-listing models per view.
+      modelCatalog,
       openSettings: () => {
         const setting = (this.app as unknown as {
           setting?: {

@@ -2,6 +2,7 @@ import { Plugin } from "obsidian";
 import { ChatView, CHAT_VIEW_TYPE } from "./ChatView";
 import type { AuthController } from "../auth/AuthController";
 import type { ConversationManager } from "../domain/ConversationManager";
+import type { ModelCatalog } from "../sdk/ModelCatalog";
 
 interface ChatViewRegistrationDeps {
   /** v0.3 Phase 4: replaces the old single `agent` + `undoJournal`
@@ -18,6 +19,12 @@ interface ChatViewRegistrationDeps {
    * `SafetySettingsStore`.
    */
   getExposeRawFsTools: () => boolean;
+  /**
+   * v0.4 Phase 4: shared ModelCatalog so the chat header's model
+   * picker can read state + subscribe to refresh transitions without
+   * issuing its own listModels per view.
+   */
+  modelCatalog: ModelCatalog;
 }
 
 export function registerChatView(

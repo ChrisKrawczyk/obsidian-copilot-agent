@@ -14,6 +14,14 @@ import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
 import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
 import { buildPickerItems } from "./conversationPickerLogic";
+import { ModelPicker } from "./ModelPicker";
+import {
+  buildModelPickerViewModel,
+  buildSwapConfirmCopy,
+  isIdentitySwap,
+  shouldConfirmSwap,
+} from "./modelPickerLogic";
+import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
@@ -57,6 +65,12 @@ interface ChatViewDeps {
    * `exposeRawFsToolsAtStartup`.
    */
   getExposeRawFsTools: () => boolean;
+  /**
+   * v0.4 Phase 4: shared ModelCatalog instance so the chat header
+   * model picker can render rows + reflect catalog state transitions
+   * without re-listing models per view open.
+   */
+  modelCatalog: ModelCatalog;
 }
 
 export class ChatView extends ItemView {
@@ -143,6 +157,16 @@ export class ChatView extends ItemView {
    *  visible list/active-name stays in sync without coupling the
    *  picker to the manager directly. */
   private picker?: ConversationPicker;
+  /** v0.4 Phase 4: header model picker. Constructed in onOpen,
+   *  destroyed in onClose. Re-rendered on every catalog state change
+   *  AND every manager `metadata-changed`/`active-changed` event. */
+  private modelPicker?: ModelPicker;
+  private modelCatalog!: ModelCatalog;
+  private unsubModelCatalog?: () => void;
+  /** v0.4 Phase 4: guard against overlapping swap orchestrations. Set
+   *  between the confirmation `await` and the `setModelId` resolution
+   *  so a fast double-click can't fire two swaps. */
+  private isSwapInProgress = false;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
@@ -150,6 +174,7 @@ export class ChatView extends ItemView {
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
     this.getExposeRawFsTools = deps.getExposeRawFsTools;
+    this.modelCatalog = deps.modelCatalog;
     this.bindActiveRuntime();
   }
 
@@ -250,6 +275,13 @@ export class ChatView extends ItemView {
     // visible alongside the title (the original v0.2 layout).
     const titleRow = header.createDiv({ cls: "copilot-agent-header-row" });
     titleRow.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
+    // v0.4 Phase 4 (FR-015): merge the per-conversation model picker
+    // INTO the header row, adjacent to the smaller connection-status
+    // badge. The picker IS the model indicator; the status pill keeps
+    // only the auth/connection state.
+    this.modelPicker = new ModelPicker(titleRow, this.app, {
+      onSelect: (newId) => void this.handleModelPick(newId),
+    });
     this.statusEl = titleRow.createDiv({
       cls: "copilot-agent-status",
       text: "…",
@@ -401,10 +433,105 @@ export class ChatView extends ItemView {
       // v0.3 Phase 5: picker mirrors the manager catalog. Cheap enough
       // to re-render on every event (≤ 20 items per FR-002).
       this.refreshPicker();
+      // v0.4 Phase 4: model picker also depends on conversation state
+      // (active-changed re-binds modelId; metadata-changed reflects
+      // setModelId writes from the picker itself).
+      this.refreshModelPicker();
     });
     // Initial render so the picker reflects whatever the manager
     // already hydrated by the time the view opens.
     this.refreshPicker();
+    // v0.4 Phase 4: subscribe to catalog transitions so the picker
+    // flips from loading → ready (or → degraded) without polling.
+    this.unsubModelCatalog = this.modelCatalog.subscribe(() =>
+      this.refreshModelPicker(),
+    );
+    this.refreshModelPicker();
+  }
+
+  /** v0.4 Phase 4: compute the model picker view model from the
+   *  current catalog state + active conversation's bound modelId,
+   *  then push to the DOM picker. */
+  private refreshModelPicker(): void {
+    if (!this.modelPicker) return;
+    const activeId = this.manager.getActiveId();
+    const activeConv = activeId ? this.manager.get(activeId) : null;
+    const vm = buildModelPickerViewModel(
+      this.modelCatalog.getState(),
+      activeConv?.modelId,
+    );
+    this.modelPicker.render(vm);
+  }
+
+  /**
+   * v0.4 Phase 4 (FR-005 + FR-008): orchestrate a user-initiated
+   * model swap from the picker. Sequence:
+   *   1. Identity → no-op (cheap short-circuit before any I/O).
+   *   2. Zero completed assistant turns → swap immediately, no
+   *      confirmation dialog (the user has not yet received a response
+   *      from the current model so there is nothing to "preserve").
+   *   3. Otherwise show the destructive-style confirmation dialog
+   *      (mirroring the rename/delete UX); on Cancel the picker
+   *      label snaps back via re-render (no state mutated).
+   * Guarded by `isSwapInProgress` against overlapping invocations.
+   */
+  private async handleModelPick(newModelId: string): Promise<void> {
+    if (this.isSwapInProgress) return;
+    this.bindActiveRuntime();
+    const activeId = this.manager.getActiveId();
+    if (!activeId) return;
+    const conv = this.manager.get(activeId);
+    if (!conv) return;
+    if (isIdentitySwap(conv.modelId ?? null, newModelId)) {
+      // Identity — also re-render to make sure the picker label
+      // matches the cached current id (defensive).
+      this.refreshModelPicker();
+      return;
+    }
+    const messages = this.state.getMessages();
+    const needsConfirm = shouldConfirmSwap(messages);
+    // Friendly label for the dialog: prefer catalog label over raw id.
+    const catalogState = this.modelCatalog.getState();
+    const newLabel =
+      (catalogState.kind === "ready" &&
+        catalogState.chatModels.find((m) => m.id === newModelId)?.name) ||
+      newModelId;
+
+    if (needsConfirm) {
+      const hasPending =
+        typeof (this.agent as { hasPendingApprovals?: () => boolean })
+          ?.hasPendingApprovals === "function"
+          ? Boolean(
+              (this.agent as { hasPendingApprovals?: () => boolean })
+                .hasPendingApprovals?.(),
+            )
+          : false;
+      const body = buildSwapConfirmCopy(newLabel, hasPending);
+      const ok = await confirmDestructive(
+        this.app,
+        "Switch model",
+        body,
+        "Switch",
+      );
+      if (!ok) {
+        // User cancelled — re-render so the picker label snaps back to
+        // the unchanged current id. Spec edge case: any in-flight
+        // stream MUST be untouched (we never called swap / cancel).
+        this.refreshModelPicker();
+        return;
+      }
+    }
+
+    this.isSwapInProgress = true;
+    try {
+      const runtime = this.manager.getActiveRuntime();
+      await runtime.setModelId(newModelId, { persist: true });
+    } catch (e) {
+      new Notice(`Switch model failed: ${(e as Error).message}`, 6000);
+    } finally {
+      this.isSwapInProgress = false;
+      this.refreshModelPicker();
+    }
   }
 
   /** Build picker items from the manager's current catalog + active
@@ -423,8 +550,11 @@ export class ChatView extends ItemView {
     this.unsubState?.();
     this.unsubAuth?.();
     this.unsubManager?.();
+    this.unsubModelCatalog?.();
     this.picker?.destroy();
     this.picker = undefined;
+    this.modelPicker?.destroy();
+    this.modelPicker = undefined;
     this.renderer?.dispose();
     this.renderer = undefined;
   }
