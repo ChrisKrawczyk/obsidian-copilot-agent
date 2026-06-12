@@ -6,6 +6,8 @@
 
 v0.4 adds per-conversation model selection on top of the v0.3 multi-conversation baseline. Each conversation persists an optional `modelId`; a chat-header picker reads and writes it; a Settings field controls the prospective default for new conversations; mid-conversation swaps confirm, interrupt any in-flight stream, cancel pending approvals, and apply via `CopilotSession.setModel()` (history preserved, no session teardown). A session-scoped catalog wraps `client.listModels()` with explicit `loading | ready | empty | error` states that drive picker rendering, send-gating, and a single retry affordance. Unavailable persisted ids surface an inline chat error and block send until the user re-picks. The change is strictly additive: every v0.3 baseline behavior (streaming, Stop, approvals, persistence, token rotation, archive, Undo, raw-FS gating, vault-aware preamble) must remain green per NFR-005.
 
+**Phase shippability invariant (degraded-catalog states):** While Phases 2–4 land *without* Phase 5's recovery UX, the plugin MUST behave exactly as v0.3 whenever `ModelCatalog` is in `failure` or `empty` state — i.e., the runtime keeps calling the existing `pickModel()` / `client.listModels()` path at session-creation, no `createSession()` is deferred, and no degraded-state user surface is introduced. The "deferred `createSession()`" contract and every error/empty/unavailable user-facing surface are **introduced in Phase 5**, alongside the UX that recovers from them. This keeps each intermediate phase strictly non-broken (no half-built error states without a retry path).
+
 ## Current State Analysis
 
 - Model selection is one-shot at plugin onload via `CopilotAgentSession.pickModel()` (`src/sdk/AgentSession.ts:1017-1052`): it calls `client.listModels()`, drops `policy.state === "disabled"`, then picks `gpt-4.1 → gpt-4o → first gpt-* → first available`, throwing on empty. The id is never displayed and cannot be changed in-app. Existing assertion at `src/sdk/AgentSession.test.ts:179-189`.
@@ -57,10 +59,10 @@ v0.4 adds per-conversation model selection on top of the v0.3 multi-conversation
 ## Phase Status
 
 - [ ] **Phase 1: Persistence shape + migration for `modelId`** — Add the optional field; propagate through migrate / domain / metadata-flush; lock in with round-trip tests. No UI change; shippable as additive persistence-only.
-- [ ] **Phase 2: `ModelCatalog` + heuristic refactor + Settings default** — Session-scoped cache with `loading | ready | empty | error` states; factor `pickModel()` into a pure resolver shared by onload + `Auto` + lazy resolution; add the Settings default-model row. Shippable: default-model setting works on creation; no mid-conv UI yet.
-- [ ] **Phase 3: `AgentSession.swapModel()` + runtime plumbing** — Wrap `CopilotSession.setModel()` with stream-interrupt + approval-cancel orchestration; expose `ConversationRuntime.setModelId()`; resolve and persist initial `modelId` on conversation creation per FR-007. Shippable: swap is correct via programmatic API; UI lands next.
-- [ ] **Phase 4: Chat-header `ModelPicker` UI** — Pure logic module + Obsidian `Menu`-based DOM shell; integrate confirmation dialog; merge with status pill; keyboard ergonomics; happy-path swap. Shippable: end-user can swap models for any conversation.
-- [ ] **Phase 5: Recovery flows + inline-error + send gating** — Wire unavailable-id detection, retry affordance, empty-list state, inline chat error, and unified `canSend()` gating for all four blocked states; lazy-resolution-on-first-use for migrated v0.3 conversations.
+- [ ] **Phase 2: `ModelCatalog` + heuristic refactor + Settings default** — Session-scoped cache with `loading | ready | empty | error` states; factor `pickModel()` into a pure resolver shared by onload + `Auto` + lazy resolution; add the Settings default-model row. **Shippable: Settings UI lands and the catalog is wired; default-model creation semantics activate in Phase 3.** While shipping with only Phases 1–2 landed, the runtime continues to use v0.3-equivalent behavior — `pickModel()`/`listModels()` is still invoked at session-creation as today.
+- [ ] **Phase 3: `AgentSession.swapModel()` + runtime plumbing** — Wrap `CopilotSession.setModel()` with stream-interrupt + approval-cancel orchestration; expose `ConversationRuntime.setModelId()`; resolve and persist initial `modelId` on conversation creation per FR-007. When the catalog is in `error|empty` state at creation time, fall back to a fresh `client.listModels()` + heuristic resolution (v0.3 behavior preserved); do **not** store `modelId: null` and do **not** defer `createSession()` yet. Shippable: swap is correct via programmatic API; UI lands next.
+- [ ] **Phase 4: Chat-header `ModelPicker` UI** — Pure logic module + Obsidian `Menu`-based DOM shell; integrate confirmation dialog; merge with status pill; keyboard ergonomics; happy-path swap. When the catalog is non-ready, the picker either hides itself entirely or renders a non-interactive current-model label (no error / retry / empty banners yet — those land in Phase 5). Shippable: end-user can swap models for any conversation under healthy-catalog conditions; degraded conditions still behave as v0.3.
+- [ ] **Phase 5: Recovery flows + inline-error + send gating + deferred `createSession()`** — Introduce the deferred-init contract (AgentSession subscribes to catalog; defers SDK `createSession()` until a usable id is available) and wire unavailable-id detection, retry affordance, empty-list state, inline chat error, and unified `canSend()` gating for all four blocked states; lazy-resolution-on-first-use for migrated v0.3 conversations. This is the phase that **introduces** any user-facing degraded surface.
 - [ ] **Phase 6: Documentation** — Produce `.paw/work/model-picker/Docs.md`; update `README.md` and `CHANGELOG.md`.
 
 ## Phase Candidates
@@ -105,14 +107,15 @@ Add `modelId` to the persistence shape and domain mirror with full round-trip du
 
 ### Implementation
 
-- **`PersistedShape.ts`**: Add optional `modelId?: string | null` to `PersistedConversation`. `null` is the explicit "migrated v0.3, not yet resolved" sentinel; missing collapses to `null` on read. Bump `schemaVersion` to `2` in `PersistedConversationsState` to signal "new field landed" to future migrations even though no transformation is required.
-- **`migrate.ts`**: Extend `validateConversation()` to project `modelId` through with `typeof === "string" ? value : null` normalization. Add a no-op v1 → v2 step that seeds `modelId: null` on each conversation. Reject structurally invalid values (numbers, objects) by normalizing to `null`.
+- **`PersistedShape.ts`**: Add optional `modelId?: string | null` to `PersistedConversation`. `null` is the explicit "migrated v0.3, not yet resolved" sentinel; missing collapses to `null` on read. Bump `CURRENT_SCHEMA_VERSION` to `2` in `PersistedConversationsState`.
+- **`migrate.ts`** (structural change, not a no-op): The current `loadFromRaw()` (`src/persistence/migrate.ts:44-46`) treats *any* `obj.schemaVersion !== CURRENT_SCHEMA_VERSION` as a recovery trigger (which sidecars data and resets to defaults). Bumping `CURRENT_SCHEMA_VERSION` without restructuring would wipe every v0.3 vault on first v0.4 load — a catastrophic FR-014 / NFR-005 regression. Restructure `loadFromRaw()` so that **`obj.schemaVersion === 1` is recognized as a known prior version BEFORE the equality check**: each conversation is upcast through `validateConversation()` with `modelId: null` injected, the resulting object is stamped with `schemaVersion: 2`, and `recovered: false` is preserved. Only versions outside the recognized set (≠ 1, ≠ 2) trigger recovery. Also extend `validateConversation()` itself to project `modelId` through with `typeof === "string" ? value : null` normalization (rejects numbers/objects to `null`).
 - **`Conversation.ts`**: Add `modelId: string | null` to the metadata mirror and to `conversationToPersistedMetadata()`. Constructor accepts optional `modelId` defaulting to `null`.
 - **`ConversationManager.ts`**: Update hydration sites (`createInternal()` and persisted-row hydration) to read/write `modelId`. Add `setConversationModelId(convId, modelId)` that uses the existing debounced `persistMetadataOnly()` path — the FR-003 durability hook used by Phases 3–5.
 
 ### Tests
 
-- `migrate.test.ts`: round-trip an in-memory v1 blob (no `modelId` field) → load → verify `modelId === null` on every conversation; verify unknown per-conversation keys are still stripped; verify structurally invalid `modelId` values normalize to `null`.
+- `migrate.test.ts` — **gating test for v1 → v2 upcast (M2)**: a payload with `schemaVersion: 1` plus full v0.3 conversation rows (id, name, createdAt, lastActiveAt, archived, messages, undoEntries) MUST round-trip to a state with `schemaVersion: 2`, `modelId: null` projected onto every conversation, AND `recovered: false`. This test, not the existing recovery test, is the gate that proves the v1 path does not trigger recovery.
+- `migrate.test.ts`: round-trip an in-memory v1 blob (no `modelId` field) → load → verify `modelId === null` on every conversation; verify unknown per-conversation keys are still stripped; verify structurally invalid `modelId` values (numbers, objects, arrays) normalize to `null`; verify a payload with an unrecognized `schemaVersion` (e.g., `99`) still triggers recovery.
 - `ConversationsStore.test.ts`: round-trip a v2 blob with mixed `modelId` values (string, null, missing) → equality after write/re-read.
 - `ConversationManager.test.ts`: `setConversationModelId()` updates metadata and persists exactly once after debounce; messages and undo entries are untouched; sibling top-level keys (`auth`, `safety`) survive.
 
@@ -154,22 +157,26 @@ Introduce a session-scoped `ModelCatalog`, refactor `pickModel()` into a pure re
 
 - **`src/sdk/ModelCatalog.ts`** (new): Session-scoped wrapper around `client.listModels()`. Public surface:
   - `getState(): { kind: "loading" } | { kind: "ready"; models: ModelInfo[]; chatModels: ModelInfo[] } | { kind: "empty" } | { kind: "error"; message: string }`
-  - `refresh(): Promise<void>` — invoked at onload, on token rotation, and from the FR-018 retry affordance.
+  - `refresh(): Promise<void>` — invoked at onload, on token rotation, and from the FR-018 retry affordance (Phase 5).
   - `subscribe(listener)` — UI re-render hook (picker + send-gating).
   - `isModelAvailable(id: string): boolean` — derived from current `chatModels`.
-  - Pure helper `filterChatCapable(models: ModelInfo[]): ModelInfo[]` that drops `policy.state === "disabled"` and **fails open** for FR-012 (no public modality discriminator exists per CodeResearch §1). Implementation: a positive-signal family-prefix list (`gpt-`, `claude-`, `gemini-`, `o1-`, `o3-`, etc.) used **only** to score known-chat ids; anything not matched **passes through**. The prefix list is never an exclusion gate.
-- **`src/sdk/AgentSession.ts`**: Extract the resolver core (`gpt-4.1 → gpt-4o → first gpt-* → first available`) from `pickModel()` (`:1017-1052`) into an exported pure function `resolveHeuristicModelId(models: ModelInfo[]): string | null`. Keep the existing test at `:179-189` passing via a thin adapter. Decouple `doInit()` (`:967-1007`) from `listModels()`: it accepts an externally-resolved model id (`string` or `null`) and no longer fetches the list itself. If the catalog is in failure/empty state, `doInit()` defers `createSession()` until a usable id arrives.
+  - Pure helper `filterChatCapable(models: ModelInfo[]): ModelInfo[]`. **Concrete exclusion rule for FR-012** (per CodeResearch §1, the SDK exposes no public chat/embedding/image discriminator, so we combine the available negative signals and otherwise fail-open):
+    1. Drop models where `policy.state === "disabled"`.
+    2. Drop models where `disabled === true` is set on the SDK record.
+    3. Drop models whose `id` (case-insensitive substring match) contains any known non-chat keyword: `embedding`, `image`, `dall-e`, `whisper`, `tts`.
+    4. Everything else passes through (fail-open). A family-prefix list (`gpt-`, `claude-`, `gemini-`, `o1-`, `o3-`, etc.) MAY be used as a positive signal for sort-order/scoring, but it is **never** an exclusion gate.
+- **`src/sdk/AgentSession.ts`**: Extract the resolver core (`gpt-4.1 → gpt-4o → first gpt-* → first available`) from `pickModel()` (`:1017-1052`) into an exported pure function `resolveHeuristicModelId(models: ModelInfo[]): string | null`. Keep the existing test at `:179-189` passing via a thin adapter. **`doInit()` keeps its v0.3 signature in this phase** beyond receiving an injected `ModelCatalog` reference — it does NOT switch to "accepts an externally-resolved id" and does NOT defer `createSession()`. When the catalog is in `ready` state, `doInit()` may use the cached `chatModels` and `resolveHeuristicModelId()` to avoid a duplicate `listModels()` round-trip; otherwise it falls back to the existing `pickModel()` / `client.listModels()` path exactly as v0.3 does. The "deferred `createSession()`" contract is introduced in Phase 5 alongside the recovery UX that depends on it.
 - **`SafetySettingsStore.ts`**: Add `defaultModelId: string | null` (`null` is the `Auto (heuristic)` sentinel). Extend `mergeWithDefaults`; preserve top-level sibling keys.
 - **`SettingsTab.ts`**: Add a "Default model for new conversations" row using `addDropdown` (existing pattern at `:76-143`). Populate from `ModelCatalog.getState()`:
   - `ready` → `Auto (heuristic)` plus one row per chat-capable model (display `name`, value `id`).
   - `empty` / `error` → disabled dropdown showing the catalog status; persisted value still visible.
-  - If the persisted `defaultModelId` is no longer in the chat-capable list, prepend a `<id> (unavailable)` row and emit an Obsidian `Notice` once per Settings open (FR-007 acceptance #4).
+  - If the persisted `defaultModelId` is no longer in the chat-capable list, prepend a `<id> (unavailable)` row and emit an Obsidian `Notice` once per Settings open (Spec.md Edge Cases: "Global default unavailable at conversation creation", `Spec.md:169`).
 - **`main.ts`**: Construct `ModelCatalog` at onload, invoke `catalog.refresh()` once, and call `catalog.refresh()` after each token rotation (entitlements may change).
 
 ### Tests
 
-- `ModelCatalog.test.ts` (new): all four state transitions; `filterChatCapable` excludes `policy.state === "disabled"` and **passes through** unknown families (fail-open assertion); empty list → `empty`; thrown error → `error`; subscribe/notify; retry-after-failure repopulates without re-construct.
-- `AgentSession.test.ts`: `resolveHeuristicModelId()` preserves `gpt-4.1 → gpt-4o → first gpt-* → first available` ordering; `doInit()` accepts an externally-provided id and does not call `listModels()`.
+- `ModelCatalog.test.ts` (new): all four state transitions; `filterChatCapable` excludes `policy.state === "disabled"` AND `disabled === true` AND ids matching the non-chat keyword list (`embedding`, `image`, `dall-e`, `whisper`, `tts`); **fixture asserts the exclusion concretely**: stub records `{id: "text-embedding-ada-002"}`, `{id: "dall-e-3"}`, `{id: "whisper-1"}`, `{id: "tts-1"}` MUST be filtered out; a chat record `{id: "gpt-4o"}` MUST pass through; an ambiguous record `{id: "some-future-frobnicator"}` (unknown family, no non-chat keyword) MUST also pass through (fail-open). Empty list → `empty`; thrown error → `error`; subscribe/notify; retry-after-failure repopulates without re-construct.
+- `AgentSession.test.ts`: `resolveHeuristicModelId()` preserves `gpt-4.1 → gpt-4o → first gpt-* → first available` ordering; `doInit()` retains v0.3 behavior when the catalog is in `error|empty` state (still calls `listModels()` and resolves internally, no `createSession()` deferral); when catalog is `ready`, `doInit()` uses cached `chatModels` and does not duplicate the `listModels()` call.
 - `SafetySettingsStore.test.ts`: round-trip `defaultModelId` including the `null` sentinel; sibling keys survive.
 
 ### Validation
@@ -186,8 +193,8 @@ Introduce a session-scoped `ModelCatalog`, refactor `pickModel()` into a pure re
 
 ### Risks & Mitigations
 
-- **Risk**: family-prefix list is mistaken for an exclusion gate, breaking FR-012. **Mitigation**: explicit unit fixture asserting an unknown-family id passes through; inline comment forbidding negative use.
-- **Risk**: decoupling `doInit()` from `pickModel()` subtly changes initialization ordering. **Mitigation**: snapshot the existing happy-path init test and assert byte-for-byte unchanged behavior when an id is provided.
+- **Risk**: family-prefix list is mistaken for an exclusion gate, breaking FR-012. **Mitigation**: explicit unit fixture asserting an unknown-family id passes through; inline comment forbidding negative use; the only negative gates are `policy.state === "disabled"`, `disabled === true`, and the non-chat keyword list (`embedding`, `image`, `dall-e`, `whisper`, `tts`).
+- **Risk**: changing `doInit()`'s relationship to `listModels()` subtly alters initialization ordering. **Mitigation**: snapshot the existing happy-path init test; in this phase `doInit()` retains v0.3 behavior when the catalog is non-ready, so the only observable change at the catalog-`ready` happy path is "id resolved from cache instead of fetched again."
 - **Risk**: settings UI snapshots stale catalog data. **Mitigation**: drive `SettingsTab` from the same `ModelCatalog.subscribe()` channel as the chat header.
 
 ---
@@ -219,8 +226,8 @@ Implement the in-place swap mechanic and the create-time resolution rule. After 
 - **`ConversationManager.createInternal()`**: Resolve `modelId` per FR-007 at creation time:
   - If `settings.defaultModelId` is non-null and present in `catalog.chatModels`, use it.
   - Else compute `resolveHeuristicModelId(catalog.chatModels)`.
-  - If catalog is in failure/empty state, store `modelId: null` and let Phase 5's send-blocking path handle it.
-  - If the configured default was unavailable at resolution, surface a single Obsidian `Notice` (FR-007 acceptance #4).
+  - **If the catalog is in `error|empty` state**, fall back to a fresh `client.listModels()` call (v0.3 path) and run `resolveHeuristicModelId()` against that result. Only if the fallback `listModels()` itself fails or returns empty is `modelId: null` stored — and that path is then handled by Phase 5's lazy resolution + inline-error UX. **Phases 1–4 must not produce a `null` `modelId` under any catalog-degraded condition that v0.3 would have succeeded in.**
+  - If the configured default was unavailable at resolution, surface a single Obsidian `Notice` (Spec.md Edge Cases: "Global default unavailable at conversation creation", `Spec.md:169`).
   - Write the resolved id immediately so prospective-only semantics hold even if the user changes the default before sending the first message.
 - **`main.ts`**: Inject `ModelCatalog` and `SafetySettingsStore` into the runtime factory. When constructing each `AgentSession`, pass the persisted `modelId` as `preferredModel` so the SDK session is created bound to the correct model. `liveRuntimes` invariants — one entry per conversation, no leak across swaps — must hold across the new path.
 
@@ -269,7 +276,7 @@ Land the user-facing picker, including confirmation flow and keyboard ergonomics
 
 ### Implementation
 
-- **`src/ui/ModelPicker.ts`** (new): Mirrors the `ConversationPicker` pattern (`src/ui/ConversationPicker.ts:25-133`). Renders a button with `aria-haspopup="menu"`, current-model label, chevron icon. Opens an Obsidian `Menu` with one row per chat-capable model (checkmark on current id), plus separators and special rows for `<id> (unavailable)`, `Models unavailable — Retry`, or `No chat models available` (the latter two land fully in Phase 5 but the rendering hooks exist here).
+- **`src/ui/ModelPicker.ts`** (new): Mirrors the `ConversationPicker` pattern (`src/ui/ConversationPicker.ts:25-133`). Renders a button with `aria-haspopup="menu"`, current-model label, chevron icon. Opens an Obsidian `Menu` with one row per chat-capable model (checkmark on current id), plus separators. **When the catalog is non-ready in this phase, the picker degrades to v0.3-equivalent presentation**: render a non-interactive label showing the active conversation's bound model id (or hide the picker entirely if no id is resolved) — no error / retry / empty banners, no `<id> (unavailable)` rows. Those degraded surfaces are introduced together in Phase 5; this phase deliberately ships only the healthy-catalog UX so that under degraded conditions the user sees v0.3 behavior.
 - **`src/ui/modelPickerLogic.ts`** (new, pure): Pure reducer mapping `(catalogState, activeConversation, settingsDefault) → PickerViewModel`:
   - Render state: `{ kind: "disabled-empty" } | { kind: "disabled-error", message, retryable: true } | { kind: "ready", rows, currentId, unavailableId? }`.
   - Keyboard reducer: open/close, arrow navigation, Enter to select, Escape to dismiss — mirrors `decideKeydownAction()` extraction at `src/ui/ChatView.ts:320-348`.
@@ -332,6 +339,11 @@ Wire the four blocked states (unavailable id, catalog failure, catalog empty, un
 
 ### Implementation
 
+- **Deferred `createSession()` contract (introduced in this phase, S1)**: `AgentSession` gains a subscription to `ModelCatalog`. New construction order under degraded conditions:
+  1. If the catalog is `ready` at runtime construction, `AgentSession` resolves an id and calls `createSession()` exactly as Phase 3.
+  2. If the catalog is `error|empty` at runtime construction AND no usable persisted `modelId` exists, `AgentSession` stores `selectedModel = null`, **does not call `createSession()`**, and exposes a `state === "deferred-init"` flag that `canSend()` reads.
+  3. When the catalog transitions `error|empty → ready` (typically after the user clicks the FR-018 retry button or after token rotation) AND the runtime has not yet created an SDK session, `AgentSession` resolves an id (`settings.defaultModelId` if available else heuristic) and constructs the SDK session in-place — no plugin reload. Listeners are notified so the picker re-renders and `canSend()` re-evaluates.
+  4. If the user sends a message while still deferred, send is blocked by `canSend()` (one of the four blocked states in the inline-error banner below).
 - **Inline-error banner** above the chat input (similar shape to existing stream-error rendering at `src/ui/ChatView.ts:727-733`), triggered when:
   - Active `modelId` is non-null AND `!catalog.isModelAvailable(modelId)` → `"Model `<id>` is no longer available. Pick a model to continue."` (FR-010).
   - Catalog state is `error` → `"Models unavailable: <message>"` + inline **Retry** button calling `catalog.refresh()` (FR-018).
@@ -350,6 +362,7 @@ Wire the four blocked states (unavailable id, catalog failure, catalog empty, un
 - `ModelCatalog.test.ts`: `isModelAvailable()` correctness across state transitions; retry-after-failure path.
 - `ConversationManager.test.ts`: lazy resolution of `modelId === null` on first activation uses default-then-heuristic order and writes through; degenerate "catalog not ready" state leaves `modelId === null` and surfaces the FR-010 path.
 - End-to-end: persist a conversation with `modelId: "fake-deprecated"`, reload, verify inline error + send-block + recoverability by selecting a real model. Stub an empty `listModels()` response → picker disabled with "No chat models available"; visually distinct from the failure state (no retry button). Force `listModels()` failure, verify retry state, succeed on retry without reloading the plugin.
+- **Deferred-init regression (S1)**: catalog starts in `error`, runtime is constructed (no SDK `createSession()` issued), `canSend()` returns blocked, user clicks retry, catalog transitions to `ready`, `AgentSession` auto-creates the SDK session, and a subsequent `sendMessage()` succeeds — all without plugin reload. Assert exactly one `createSession()` call across the whole sequence and zero spurious calls before the catalog became ready.
 
 ### Validation
 
@@ -449,6 +462,25 @@ No new code tests; rerun the full verification suite so documented commands rema
 
 ---
 
+## NFR-005 Phase-Local Regression Matrix
+
+Per GPT finding-3, mapping each NFR-005 baseline behavior to the existing v0.3 test/smoke that protects it AND the phase(s) most likely to disturb it. These are the targeted re-runs each phase MUST keep green in addition to the full-suite `npm test`.
+
+| v0.3 baseline behavior | Existing v0.3 protection | Phases most likely to disturb |
+|------------------------|--------------------------|-------------------------------|
+| Streaming (placeholder lifecycle, finalization buckets `complete`/`interrupted`/`error`) | `src/ui/ChatView.test.ts` streaming + finalization cases (cf. `src/ui/ChatView.ts:521-620, 727-805`) | Phase 3 (`swapModel()` interrupts streams), Phase 5 (deferred-init send path) |
+| Stop button (`handleStop()` + `cancelCurrent()`) | `ChatView.test.ts` Stop coverage (cf. `src/ui/ChatView.ts:492-519`) | Phase 3 (swap reuses `cancelCurrent()`), Phase 4 (UI button wiring near picker) |
+| Pending-approval cancellation (`cancelAllPendingApprovals`) | `AgentSession.test.ts` approval-cancel cases (cf. `src/sdk/AgentSession.ts:1351-1367`) | Phase 3 (swap calls bulk-cancel), Phase 4 (modal copy when approvals present) |
+| Token rotation (entitlement refresh + live-runtime iteration) | `main.ts` token-rotation tests (cf. `src/main.ts:373-410`) | Phase 2 (catalog refresh hook), Phase 5 (catalog-driven deferred init re-trigger) |
+| Archive flow (21st conversation; sibling-key preservation) | `ConversationsStore.test.ts` archive tests + `ConversationManager.test.ts` (cf. `src/persistence/ConversationsStore.ts:455-471`) | Phase 1 (schema bump, sibling preservation), Phase 3 (`createInternal` change) |
+| Undo across restart | `UndoJournal` round-trip tests + manual smoke from v0.3 plan | Phase 1 (persisted shape change), Phase 3 (runtime construction order) |
+| Raw-FS gating | `SafetySettingsStore.test.ts` + raw-FS integration tests | Phase 2 (settings store extension) |
+| Vault-aware preamble | Existing preamble tests in `AgentSession.test.ts` | Phase 2 (`doInit()` callsite touched), Phase 5 (deferred-init flow) |
+
+Per-phase obligation: when a phase touches a row's "most likely to disturb" cell, its Validation block runs the named existing test(s) explicitly and they MUST stay green. Whole-suite `npm test` remains the catch-all.
+
+---
+
 ## References
 
 - Spec: `C:\Repos\obsidian-copilot-agent\.paw\work\model-picker\Spec.md`
@@ -472,5 +504,18 @@ No new code tests; rerun the full verification suite so documented commands rema
 - **Lazy resolution moved to Phase 5** rather than Phase 1: Claude's placement; adopted because lazy resolution depends on the catalog and on the inline-error path, both of which only exist in later phases. Phase 1 just stores `null`.
 - **Pure-logic split for the picker (`modelPickerLogic.ts`)**: Adopted from both Claude and GPT-5.4; mirrors the established `chatKeydown.ts` pattern in the repo and keeps the keyboard reducer + render-state derivation testable in node.
 - **`liveRuntimes` invariant testing on swap**: Both top drafts called this out for NFR-004. Adopted as an explicit regression test in Phase 3.
-- **Settings UI rendering of an unavailable persisted default**: Adopted Claude's "preserve and mark as `(unavailable)`" pattern over silently clearing — preserves user intent and matches FR-007 acceptance #4.
+- **Settings UI rendering of an unavailable persisted default**: Adopted Claude's "preserve and mark as `(unavailable)`" pattern over silently clearing — preserves user intent and matches Spec.md Edge Cases (`Spec.md:169`, "Global default unavailable at conversation creation").
 - **Documentation last (Phase 6)**: Consensus across all three drafts.
+
+---
+
+## Revision Notes
+
+Changes applied to address consensus review findings (gpt-5.4 BLOCK; claude-opus-4.7 PASS-with-fixes; gemini-3.1-pro-preview PASS).
+
+- **GPT finding-1 + Opus M1 (must-fix) — Phase shippability under degraded catalog states.** Reworked the Phase Status bullets and added a new "Phase shippability invariant" paragraph in Overview: while Phases 2-4 land without Phase 5 UX, the plugin behaves as v0.3 under rror|empty catalog state (existing `pickModel()`/`listModels()` retained, no deferred `createSession()`, no degraded user surface). Phase 2 no longer changes `doInit()` signature beyond catalog injection; Phase 3 falls back to a fresh `listModels()` + heuristic when the catalog is non-ready instead of storing `modelId: null`; Phase 4 picker degrades to a v0.3-equivalent label/hidden state when the catalog is non-ready; Phase 5 is now the sole introducer of the deferred-init contract and every error/empty/unavailable user surface. Phase 2 shippability claim reworded per Opus M1 to "Settings UI lands and the catalog is wired; default-model creation semantics activate in Phase 3."
+- **Opus M2 (must-fix) — Schema v1→v2 migration safety.** Phase 1 Implementation now spells out the structural restructuring of `loadFromRaw()` (recognize `obj.schemaVersion === 1` BEFORE the equality check, upcast each conversation by adding `modelId: null`, stamp v2, preserve `recovered: false`). A gating regression test was added at the top of Phase 1 Tests: a `schemaVersion: 1` payload with full v0.3 conversation rows MUST round-trip to v2 with `modelId: null` per conversation AND `recovered: false`. Unrecognized versions still trigger recovery.
+- **GPT finding-2 (must-fix) — FR-012 filtering concreteness.** Phase 2 `filterChatCapable` now applies a CONCRETE exclusion rule: drop `policy.state === "disabled"`, drop `disabled === true`, AND drop ids whose substring (case-insensitive) matches the non-chat keyword list `embedding | image | dall-e | whisper | tts`. Family-prefix list is explicitly only a positive sort/score signal, never an exclusion gate. Test fixture added with `text-embedding-ada-002`, `dall-e-3`, `whisper-1`, `tts-1` (must be filtered out), `gpt-4o` (must pass), and `some-future-frobnicator` (ambiguous; must pass through fail-open).
+- **Opus S1 (should-fix) — Deferred-init contract.** Phase 5 Implementation now opens with an explicit "Deferred `createSession()` contract" subsection naming the trigger (catalog `error|empty → ready` transition), the state `AgentSession` exposes while deferred (`state === "deferred-init"`, `canSend()` reads it), and reload-free recovery semantics. Companion automated test added: catalog starts in `error`, runtime constructed (no `createSession()` yet), retry succeeds, `sendMessage()` works without plugin reload; exactly one `createSession()` across the sequence.
+- **Opus S3 (should-fix) — Spurious citations.** Removed both "FR-007 acceptance #4" references in Phase 2 Implementation and Phase 3 Implementation, plus the one in Synthesis Notes; replaced with a direct citation of Spec.md Edge Cases line 169 ("Global default unavailable at conversation creation"). (No "FR-004 acceptance #5" string was present in the plan; nothing to remove there.)
+- **GPT finding-3 (should-fix) — NFR-005 phase-local regression matrix.** Added a new "## NFR-005 Phase-Local Regression Matrix" section between the FR/NFR/SC matrix and References. Each baseline behavior (streaming, Stop, approvals, token rotation, archive flow, Undo, raw-FS gating, vault-aware preamble) is mapped to the existing v0.3 test/smoke that protects it AND the phase(s) most likely to disturb it.
