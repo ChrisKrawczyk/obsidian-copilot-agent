@@ -19,7 +19,8 @@ import type { SdkClient } from "./AgentSession";
  *   2. ModelCatalog state machine: loading → ready/empty/error,
  *      subscribe/notify, retry-after-failure repopulates without
  *      re-construct, identity-swap dedupe, missing-listModels error
- *      surfacing, and null-client (signed-out) handling.
+ *      surfacing, null-client (signed-out) handling, and queued
+ *      follow-up refreshes for token rotation.
  */
 
 function makeClient(
@@ -196,11 +197,36 @@ describe("ModelCatalog — state machine", () => {
     }
   });
 
-  it("dedupes concurrent refresh() callers into one in-flight listModels call", async () => {
+  it("coalesces concurrent refresh() callers into one queued follow-up", async () => {
     const listModels = vi.fn(async () => [{ id: "gpt-4.1" }]);
     const catalog = new ModelCatalog(() => makeClient(listModels));
     await Promise.all([catalog.refresh(), catalog.refresh(), catalog.refresh()]);
+    expect(listModels).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs a follow-up refresh when refresh is requested while another client call is pending", async () => {
+    let releaseFirst!: (models: CatalogModelInfo[]) => void;
+    const first = new Promise<CatalogModelInfo[]>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const listModels = vi
+      .fn<[], Promise<CatalogModelInfo[]>>()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce([{ id: "gpt-4o" }]);
+    const catalog = new ModelCatalog(() => makeClient(listModels));
+
+    const refreshPromise = catalog.refresh();
     expect(listModels).toHaveBeenCalledTimes(1);
+    const overlapping = catalog.refresh();
+    releaseFirst([{ id: "gpt-4.1" }]);
+    await Promise.all([refreshPromise, overlapping]);
+
+    expect(listModels).toHaveBeenCalledTimes(2);
+    const s = catalog.getState();
+    expect(s.kind).toBe("ready");
+    if (s.kind === "ready") {
+      expect(s.chatModels.map((m) => m.id)).toEqual(["gpt-4o"]);
+    }
   });
 
   it("isModelAvailable: true only when ready AND id is in chatModels", async () => {

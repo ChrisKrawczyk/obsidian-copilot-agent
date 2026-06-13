@@ -93,11 +93,14 @@ export class ModelCatalog {
   private state: ModelCatalogState = { kind: "loading" };
   private listeners = new Set<ModelCatalogListener>();
   /**
-   * In-flight refresh promise. We share this across concurrent
-   * refresh() callers so a token-rotation refresh that lands on top
-   * of the onload refresh doesn't fire two listModels round-trips.
+   * In-flight refresh sequence. Concurrent callers attach to this
+   * promise, but a call that arrives mid-flight also marks
+   * `pendingFollowup` so token rotation (which swaps the client
+   * provider's underlying client) gets one fresh pass after the stale
+   * pass settles.
    */
   private inflight: Promise<void> | null = null;
+  private pendingFollowup = false;
 
   constructor(private readonly clientProvider: ModelCatalogClientProvider) {}
 
@@ -126,15 +129,28 @@ export class ModelCatalog {
 
   /**
    * Re-fetch the model list. Concurrent callers share the in-flight
-   * promise; the public `state` always transitions through `loading`
-   * exactly once per refresh cycle.
+   * sequence. If a refresh is requested while another is already
+   * running, queue one follow-up refresh so the request is not lost
+   * behind a stale client captured by the first pass.
    */
   async refresh(): Promise<void> {
-    if (this.inflight) return this.inflight;
-    this.inflight = this.doRefresh().finally(() => {
+    if (this.inflight) {
+      this.pendingFollowup = true;
+      return this.inflight;
+    }
+    this.pendingFollowup = false;
+    this.inflight = this.runRefreshSequence().finally(() => {
       this.inflight = null;
     });
     return this.inflight;
+  }
+
+  private async runRefreshSequence(): Promise<void> {
+    await this.doRefresh();
+    while (this.pendingFollowup) {
+      this.pendingFollowup = false;
+      await this.doRefresh();
+    }
   }
 
   private async doRefresh(): Promise<void> {
