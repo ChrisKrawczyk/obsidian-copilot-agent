@@ -1,8 +1,12 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
 import {
   CopilotAgentSession,
+  resolveHeuristicModelId,
   type AgentSession,
+  type SdkClient,
+  type SdkModule,
 } from "./sdk/AgentSession";
+import { ModelCatalog } from "./sdk/ModelCatalog";
 import {
   resolveCliBinaryPath,
   getAbsolutePluginDir,
@@ -49,6 +53,9 @@ export default class CopilotAgentPlugin extends Plugin {
   /** Held so `onunload()` can flush pending debounced writes before
    *  the plugin process is torn down. */
   private conversationsStore: ConversationsStore | null = null;
+  /** v0.4 Phase 2: disposes the shared CopilotClient backing the
+   *  catalog. Safe to call multiple times; idempotent. */
+  private disposeSharedSdkClient: (() => Promise<void>) | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -200,6 +207,76 @@ export default class CopilotAgentPlugin extends Plugin {
     // by the AuthController via the tokenSink and re-applied to any
     // newly-constructed runtime so it starts authenticated.
     let currentToken: string | null = null;
+
+    // v0.4 (model-picker) Phase 2: shared CopilotClient + ModelCatalog.
+    // This client is independent of per-conversation runtime clients
+    // (each AgentSession constructs its own via doInit()). Its sole
+    // job is to back `ModelCatalog.refresh()` so the Settings UI and
+    // (Phase 4) chat-header picker can list available models without
+    // racing per-conversation init. The catalog reads the live shared
+    // client through a provider closure so token rotations can swap
+    // it without re-constructing the catalog (and losing subscribers).
+    let sharedSdkClient: SdkClient | null = null;
+    let sharedSdkModulePromise: Promise<SdkModule> | null = null;
+    const loadSharedSdk = (): Promise<SdkModule> => {
+      if (!sharedSdkModulePromise) {
+        sharedSdkModulePromise = import("@github/copilot-sdk").then(
+          (m) => m as unknown as SdkModule,
+        );
+      }
+      return sharedSdkModulePromise;
+    };
+    const disposeSharedClient = async (): Promise<void> => {
+      const old = sharedSdkClient;
+      sharedSdkClient = null;
+      if (old) {
+        try {
+          await old.stop?.();
+        } catch (err) {
+          console.warn(
+            "[copilot-agent] shared SDK client stop failed",
+            err,
+          );
+        }
+      }
+    };
+    const rebuildSharedClient = async (token: string | null): Promise<void> => {
+      await disposeSharedClient();
+      if (!token) return;
+      try {
+        const sdk = await loadSharedSdk();
+        const Client = sdk.CopilotClient;
+        if (!Client) throw new Error("SDK lacks CopilotClient");
+        const next = new Client({
+          gitHubToken: token,
+          useLoggedInUser: false,
+          mode: "empty",
+          baseDirectory,
+          connection: { kind: "stdio", path: cliPath },
+          logLevel: "info",
+        }) as SdkClient;
+        // The SDK requires start()+ping() before any RPC (including
+        // listModels). AgentSession does the same handshake for its
+        // per-conversation client; the shared catalog client needs it
+        // too or refresh() fails with "Client not connected".
+        if (typeof next.start === "function") {
+          await next.start();
+        }
+        if (typeof next.ping === "function") {
+          await next.ping();
+        }
+        sharedSdkClient = next;
+      } catch (err) {
+        console.warn(
+          "[copilot-agent] shared SDK client construction failed",
+          err,
+        );
+        sharedSdkClient = null;
+      }
+    };
+    const modelCatalog = new ModelCatalog(() => sharedSdkClient);
+    this.disposeSharedSdkClient = disposeSharedClient;
+
     // Registry of live (instantiated) runtimes — used by the
     // broadcasting tokenSink so token rotations reach every runtime
     // that has actually been built. Lazily-uninstantiated runtimes
@@ -271,6 +348,22 @@ export default class CopilotAgentPlugin extends Plugin {
         decider: denyAll,
         logLevel: "info",
         onAuthError: (err) => controllerRef?.notifyAuthFailure(err),
+        // v0.4 Phase 2: share the catalog with each AgentSession so
+        // pickModel() can hit the cached chatModels list and skip the
+        // per-session listModels() round-trip when the catalog is
+        // already `ready`. Catalog-degraded states fall back to v0.3.
+        catalog: modelCatalog,
+        // v0.4 Phase 3 (FR-007 + SC-002): seed the per-conversation
+        // model id from persisted metadata so reopening a conversation
+        // re-uses its previously-resolved model rather than re-running
+        // the global default → heuristic chain. `null` (v0.3-migrated)
+        // and `undefined` (fresh-without-resolution) both mean
+        // "AgentSession.pickModel decides at init"; Phase 5 will add
+        // lazy resolution + backfill.
+        preferredModel:
+          typeof metadata.modelId === "string" && metadata.modelId.length > 0
+            ? metadata.modelId
+            : undefined,
         // v0.3 Phase 1: gated tool list captured at plugin onload and
         // frozen via `exposeRawFsToolsAtStartup`. Toggling the setting
         // mid-session does not reach this runtime, nor any future
@@ -350,6 +443,24 @@ export default class CopilotAgentPlugin extends Plugin {
         session,
         journal,
         state,
+        async setModelId(newId, opts) {
+          // v0.4 FR-005: freeze any live streaming placeholder as
+          // `interrupted` BEFORE the SDK abort fires so the stream
+          // finalizer buckets the cancellation as a clean interruption
+          // rather than as `error`. Mirrors ChatView.handleStop().
+          state.interruptStreamingMessage();
+          await session.swapModel(newId);
+          if (opts.persist) {
+            try {
+              conversationManager.setConversationModelId(metadata.id, newId);
+            } catch (err) {
+              console.warn(
+                "[copilot-agent] setConversationModelId after swap failed",
+                err,
+              );
+            }
+          }
+        },
         async dispose() {
           liveRuntimes.delete(liveEntry);
           try {
@@ -367,6 +478,44 @@ export default class CopilotAgentPlugin extends Plugin {
     const conversationManager = new ConversationManager({
       runtimeFactory,
       store: conversationsStore,
+      // v0.4 Phase 3 (FR-007): synchronous resolver that walks the
+      // priority chain at creation time. Returns null when the catalog
+      // is non-ready so AgentSession.pickModel falls back to v0.3
+      // listModels at init (Phase 5 will add lazy backfill).
+      resolveCreationModelId: () => {
+        const configuredDefault =
+          safetySettingsStore.snapshot().defaultModelId;
+        const state = modelCatalog.getState();
+        if (state.kind !== "ready") {
+          return { modelId: null, configuredDefault };
+        }
+        if (
+          typeof configuredDefault === "string" &&
+          configuredDefault.length > 0
+        ) {
+          if (modelCatalog.isModelAvailable(configuredDefault)) {
+            return { modelId: configuredDefault, configuredDefault };
+          }
+          // Configured default not in chatModels → fall through to
+          // heuristic, then surface a one-shot Notice.
+          const heuristic = resolveHeuristicModelId(state.chatModels);
+          return {
+            modelId: heuristic,
+            configuredDefault,
+            defaultWasUnavailable: true,
+          };
+        }
+        return {
+          modelId: resolveHeuristicModelId(state.chatModels),
+          configuredDefault: null,
+        };
+      },
+      onUnavailableDefault: (configuredDefault) => {
+        new Notice(
+          `Configured default model "${configuredDefault}" is not available. Falling back to a recommended model.`,
+          6000,
+        );
+      },
     });
     this.conversationManager = conversationManager;
 
@@ -384,6 +533,15 @@ export default class CopilotAgentPlugin extends Plugin {
             console.warn("[copilot-agent] session.setToken broadcast", err);
           }
         }
+        // v0.4 Phase 2: rebuild the shared catalog client whenever
+        // the token rotates (entitlements may have changed). We don't
+        // await the refresh — Settings UI subscribes to catalog state
+        // and re-renders on its own; failures stay scoped to the
+        // catalog's `error` state and don't break auth.
+        await rebuildSharedClient(token);
+        void modelCatalog.refresh().catch((err) => {
+          console.warn("[copilot-agent] modelCatalog.refresh failed", err);
+        });
       },
       reconnect: async () => {
         // Reconnect every live session; only one can stream at a time
@@ -467,6 +625,18 @@ export default class CopilotAgentPlugin extends Plugin {
           );
         }
         await controller.hydrate();
+        // v0.4 Phase 2: kick the catalog after auth hydrate so the
+        // Settings UI shows real models the moment it opens. The
+        // tokenSink also fires `setToken` on every rotation which
+        // re-runs this; the explicit call here covers the case where
+        // hydrate finds a persisted token and pushes it directly
+        // without going through the sink.
+        if (currentToken) {
+          await rebuildSharedClient(currentToken);
+          void modelCatalog.refresh().catch((err) => {
+            console.warn("[copilot-agent] modelCatalog.refresh failed", err);
+          });
+        }
       } catch (e) {
         console.error("[copilot-agent] hydrate failed", e);
         new Notice(
@@ -484,6 +654,7 @@ export default class CopilotAgentPlugin extends Plugin {
       controller,
       tokenStore,
       safetySettingsStore,
+      modelCatalog,
     );
     this.addSettingTab(settingsTab);
 
@@ -496,6 +667,10 @@ export default class CopilotAgentPlugin extends Plugin {
       // would let a mid-session toggle hide Undo buttons even though
       // the running runtime still has those tools registered.
       getExposeRawFsTools: () => exposeRawFsToolsAtStartup,
+      // v0.4 Phase 4: shared catalog so the chat header's model
+      // picker can read state + subscribe to refresh transitions
+      // without re-listing models per view.
+      modelCatalog,
       openSettings: () => {
         const setting = (this.app as unknown as {
           setting?: {
@@ -539,12 +714,27 @@ export default class CopilotAgentPlugin extends Plugin {
     console.log("[copilot-agent] Unloading");
     const manager = this.conversationManager;
     const store = this.conversationsStore;
+    const disposeShared = this.disposeSharedSdkClient;
     this.conversationManager = null;
     this.conversationsStore = null;
+    this.disposeSharedSdkClient = null;
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.
     await flushThenDispose(store, manager);
+    // v0.4 Phase 2: stop the shared catalog client AFTER the per-
+    // conversation runtimes are torn down so we don't race them on
+    // shutdown.
+    if (disposeShared) {
+      try {
+        await disposeShared();
+      } catch (err) {
+        console.warn(
+          "[copilot-agent] shared SDK client dispose failed",
+          err,
+        );
+      }
+    }
   }
 }
 

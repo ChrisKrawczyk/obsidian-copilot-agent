@@ -66,6 +66,21 @@ export interface PersistedConversation {
   createdAt: number;
   lastActiveAt: number;
   archived?: boolean;
+  /**
+   * v0.4: per-conversation bound model id.
+   * `undefined` (missing key) and `null` both mean "not yet resolved" —
+   * the runtime will lazily resolve this on first activation per FR-013.
+   * A non-null string is the resolved SDK model id (e.g. "gpt-4.1").
+   *
+   * Migration policy: v1 conversations are upcast to v2 by leaving this
+   * field as `null`; lazy resolution writes through on first activation.
+   *
+   * IMPORTANT: this field is per-conversation METADATA, not transcript
+   * state. It is NOT included in `PersistedUndoEntry` snapshots; an
+   * undo that restores transcript state preserves the currently-bound
+   * `modelId`. (Spec.md Edge Cases — Undo journal interaction.)
+   */
+  modelId?: string | null;
   messages: PersistedMessage[];
   /** SF-2: capped at 50 entries on record (oldest evicted first). */
   undoEntries: PersistedUndoEntry[];
@@ -78,7 +93,7 @@ export interface PersistedConversationsState {
   activeConversationId: string | null;
 }
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export const DEFAULT_CONVERSATIONS_STATE: PersistedConversationsState = {
   schemaVersion: CURRENT_SCHEMA_VERSION,

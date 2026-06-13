@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, type Plugin } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting, type Plugin } from "obsidian";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import type { TokenStore } from "../auth/TokenStore";
 import { DeviceFlowModal } from "../ui/DeviceFlowModal";
@@ -15,6 +15,7 @@ import type {
   TaskTargetMode,
   VaultAwarenessMode,
 } from "./VaultAwarenessSettings";
+import type { ModelCatalog, ModelCatalogState } from "../sdk/ModelCatalog";
 
 /**
  * Phase 3 settings. Surfaces the auth state machine + persistence toggle.
@@ -23,6 +24,9 @@ import type {
  */
 export class CopilotAgentSettingTab extends PluginSettingTab {
   private unsubscribe?: () => void;
+  private catalogUnsubscribe?: () => void;
+  private modelDropdownContainer?: HTMLElement;
+  private unavailableNoticeShown = false;
   private connectionDescEl?: HTMLElement;
   private connectionBtnSetting?: Setting;
 
@@ -32,6 +36,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     private readonly authController: AuthController,
     private readonly tokenStore: TokenStore,
     private readonly safetyStore?: SafetySettingsStore,
+    private readonly modelCatalog?: ModelCatalog,
   ) {
     super(app, plugin);
   }
@@ -67,6 +72,11 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           await this.authController.setPersistEnabled(value);
         }),
       );
+
+    // ---- v0.4 Phase 2: default model for new conversations ----
+    if (this.safetyStore && this.modelCatalog) {
+      this.renderDefaultModelSection(containerEl);
+    }
 
     // ---- Phase 6: SafetyPolicy ----
     if (this.safetyStore) {
@@ -321,7 +331,101 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
   hide(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.catalogUnsubscribe?.();
+    this.catalogUnsubscribe = undefined;
+    this.modelDropdownContainer = undefined;
+    this.unavailableNoticeShown = false;
     super.hide?.();
+  }
+
+  private renderDefaultModelSection(containerEl: HTMLElement): void {
+    if (!this.safetyStore || !this.modelCatalog) return;
+    const safetyStore = this.safetyStore;
+    const catalog = this.modelCatalog;
+
+    containerEl.createEl("h3", { text: "Model" });
+
+    // Container we re-render in place when catalog state changes.
+    // Holds exactly one Setting row (the dropdown). Re-running display()
+    // would fight Obsidian's tab-open lifecycle, so we update this
+    // sub-tree directly via a subscription on the catalog.
+    const section = containerEl.createDiv({
+      cls: "copilot-agent-default-model-section",
+    });
+    this.modelDropdownContainer = section;
+
+    const renderRow = () => {
+      if (!this.modelDropdownContainer) return;
+      const host = this.modelDropdownContainer;
+      host.empty();
+      const state = catalog.getState();
+      const persisted = safetyStore.snapshot().defaultModelId;
+
+      const setting = new Setting(host)
+        .setName("Default model for new conversations")
+        .setDesc(describeCatalogStatus(state));
+
+      setting.addDropdown((dd) => {
+        // Auto sentinel — the `null` value rendered as the empty
+        // string. We translate `""` ↔ `null` at the boundary so the
+        // SDK never sees the literal string "" as a model id.
+        dd.addOption("", "Auto (heuristic)");
+
+        let inUnavailableMode = false;
+        if (state.kind === "ready") {
+          for (const m of state.chatModels) {
+            const id = m.id ?? "";
+            if (!id) continue;
+            const label = m.name && m.name.length > 0 ? `${m.name} (${id})` : id;
+            dd.addOption(id, label);
+          }
+          // If the persisted id is no longer in the chat-capable list,
+          // surface it as "<id> (unavailable)" so the user can SEE
+          // their current binding. Auto sentinel (null) bypasses this.
+          if (
+            persisted !== null &&
+            !state.chatModels.some((m) => m.id === persisted)
+          ) {
+            inUnavailableMode = true;
+            dd.addOption(persisted, `${persisted} (unavailable)`);
+            if (!this.unavailableNoticeShown) {
+              this.unavailableNoticeShown = true;
+              new Notice(
+                `Default model "${persisted}" is no longer available. Pick another or switch to Auto.`,
+                6000,
+              );
+            }
+          }
+        } else if (
+          (state.kind === "loading" ||
+            state.kind === "empty" ||
+            state.kind === "error") &&
+          persisted !== null
+        ) {
+          // Catalog is not ready — keep the persisted value visible
+          // so it survives the round-trip even if we can't validate
+          // it right now.
+          dd.addOption(persisted, persisted);
+        }
+
+        dd.setValue(persisted ?? "");
+        if (state.kind !== "ready" && !inUnavailableMode) {
+          dd.selectEl.disabled = true;
+        }
+
+        dd.onChange(async (value) => {
+          const next = value === "" ? null : value;
+          await safetyStore.setDefaultModelId(next);
+          // Re-render so the (unavailable) badge updates without
+          // waiting for the next catalog tick.
+          renderRow();
+        });
+      });
+    };
+
+    renderRow();
+    this.catalogUnsubscribe?.();
+    this.catalogUnsubscribe = catalog.subscribe(() => renderRow());
   }
 
   private renderConnection(state: AuthState): void {
@@ -440,5 +544,25 @@ function builtinDesc(kind: string): string {
       return "Approves reads from files OUTSIDE the active vault. Vault reads are always allowed (Phase 5 read tools).";
     default:
       return "";
+  }
+}
+
+function describeCatalogStatus(state: ModelCatalogState): string {
+  switch (state.kind) {
+    case "loading":
+      return "Loading available models…";
+    case "ready":
+      return (
+        `Auto (heuristic) lets the plugin pick a sensible default per ` +
+        `conversation; pinning a specific model applies it to NEW ` +
+        `conversations only — existing ones keep their bound model.`
+      );
+    case "empty":
+      return (
+        "No models are available for this account. Reconnect or check " +
+          "your Copilot entitlement."
+      );
+    case "error":
+      return `Could not load model list: ${state.message}`;
   }
 }

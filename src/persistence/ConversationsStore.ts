@@ -541,7 +541,7 @@ function snapshotState(s: PersistedConversationsState): PersistedConversationsSt
 }
 
 function cloneConversation(c: PersistedConversation): PersistedConversation {
-  return {
+  const out: PersistedConversation = {
     id: c.id,
     name: c.name,
     createdAt: c.createdAt,
@@ -553,6 +553,14 @@ function cloneConversation(c: PersistedConversation): PersistedConversation {
     })),
     undoEntries: c.undoEntries.map((e) => ({ ...e })),
   };
+  // v0.4: preserve the per-conversation modelId across clones. We
+  // distinguish "absent key" (undefined) from "present and null" so
+  // downstream readers can tell a fresh-without-resolution row from a
+  // v0.3-migrated row.
+  if (c.modelId !== undefined) {
+    out.modelId = c.modelId;
+  }
+  return out;
 }
 
 function findOldestIdx(entries: PersistedUndoEntry[]): number {

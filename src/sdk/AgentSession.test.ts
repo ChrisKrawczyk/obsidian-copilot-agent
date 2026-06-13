@@ -29,6 +29,10 @@ interface FakeHandles {
   disconnectCalls: number;
   abortCalls: number;
   sendCalls: string[];
+  /** v0.4 Phase 3: setModel call log (each entry is the new model id). */
+  setModelCalls: string[];
+  /** Override setModel to throw / behave abnormally. */
+  setModelImpl: ((id: string) => Promise<void> | void) | null;
   /** Override what sendAndWait returns. */
   setSendResponse: (resp: unknown) => void;
   /** Override what listModels returns. */
@@ -50,6 +54,8 @@ function makeFakeSdk(): FakeHandles {
     disconnectCalls: 0,
     abortCalls: 0,
     sendCalls: [],
+    setModelCalls: [],
+    setModelImpl: null,
     setSendResponse: () => {},
     setModels: () => {},
   };
@@ -76,6 +82,12 @@ function makeFakeSdk(): FakeHandles {
     },
     disconnect: async () => {
       handles.disconnectCalls += 1;
+    },
+    setModel: async (id: string) => {
+      handles.setModelCalls.push(id);
+      if (handles.setModelImpl) {
+        await handles.setModelImpl(id);
+      }
     },
   };
 
@@ -119,7 +131,10 @@ function makeFakeSdk(): FakeHandles {
 function makeAgent(
   handles: FakeHandles,
   decider = denyAll,
-  extraOpts: { preamble?: () => string | null } = {},
+  extraOpts: {
+    preamble?: () => string | null;
+    catalog?: import("./ModelCatalog").ModelCatalog;
+  } = {},
 ) {
   return new CopilotAgentSession(
     {
@@ -128,6 +143,7 @@ function makeAgent(
       baseDirectory: "/fake/plugin",
       decider,
       preamble: extraOpts.preamble,
+      catalog: extraOpts.catalog,
     },
     async () => handles.sdk,
   );
@@ -197,6 +213,101 @@ describe("CopilotAgentSession", () => {
     ]);
     const agent = makeAgent(h);
     await agent.init();
+    expect(agent.getModel()).toBe("gpt-4o");
+    await agent.dispose();
+  });
+
+  // v0.4 (model-picker) Phase 2: pure heuristic resolver + catalog
+  // injection. The resolver matches v0.3 ordering verbatim — these
+  // tests pin that contract so phases 3-5 can build on it.
+  test("resolveHeuristicModelId preserves the gpt-4.1 → gpt-4o → gpt-* → first ordering", async () => {
+    const { resolveHeuristicModelId } = await import("./AgentSession");
+    expect(
+      resolveHeuristicModelId([
+        { id: "claude-3-5-sonnet" },
+        { id: "gpt-4.1" },
+        { id: "gpt-4o" },
+      ]),
+    ).toBe("gpt-4.1");
+    expect(
+      resolveHeuristicModelId([{ id: "claude-3-5-sonnet" }, { id: "gpt-4o" }]),
+    ).toBe("gpt-4o");
+    expect(
+      resolveHeuristicModelId([
+        { id: "claude-3-5-sonnet" },
+        { id: "gpt-3.5-turbo" },
+      ]),
+    ).toBe("gpt-3.5-turbo"); // first gpt-* wins
+    expect(resolveHeuristicModelId([{ id: "claude-3-5-sonnet" }])).toBe(
+      "claude-3-5-sonnet",
+    );
+  });
+
+  test("resolveHeuristicModelId returns null on empty / id-less input", async () => {
+    const { resolveHeuristicModelId } = await import("./AgentSession");
+    expect(resolveHeuristicModelId([])).toBeNull();
+    expect(resolveHeuristicModelId([{}])).toBeNull();
+  });
+
+  test("resolveHeuristicModelId falls back to all records when every record is disabled", async () => {
+    const { resolveHeuristicModelId } = await import("./AgentSession");
+    expect(
+      resolveHeuristicModelId([
+        { id: "gpt-4.1", policy: { state: "disabled" } },
+        { id: "gpt-4o", policy: { state: "disabled" } },
+      ]),
+    ).toBe("gpt-4.1");
+  });
+
+  test("doInit uses the catalog's cached chatModels when ready (no listModels call)", async () => {
+    const h = makeFakeSdk();
+    h.setModels([{ id: "gpt-4.1" }, { id: "claude-3-5-sonnet" }]);
+    // Track listModels invocations on the per-session client. The
+    // catalog uses its OWN client (separate from the per-session
+    // client) so we can pin "agent's client.listModels never runs".
+    let perSessionListModelsCalls = 0;
+    const originalListModels = h.client.listModels!;
+    (h.client as { listModels: typeof originalListModels }).listModels =
+      async () => {
+        perSessionListModelsCalls++;
+        return originalListModels();
+      };
+
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalogClient = {
+      createSession: () => Promise.reject(new Error("unused")),
+      listModels: async () => [{ id: "gpt-4o" }, { id: "gpt-4.1" }],
+    } as unknown as SdkClient;
+    const catalog = new ModelCatalog(() => catalogClient);
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("ready");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    // Catalog's chatModels = [gpt-4o, gpt-4.1] → resolver picks gpt-4.1.
+    expect(agent.getModel()).toBe("gpt-4.1");
+    expect(perSessionListModelsCalls).toBe(0);
+    await agent.dispose();
+  });
+
+  test("doInit falls back to client.listModels when catalog is in error state", async () => {
+    const h = makeFakeSdk();
+    h.setModels([{ id: "gpt-4o" }]);
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(() =>
+      ({
+        createSession: () => Promise.reject(new Error("x")),
+        listModels: async () => {
+          throw new Error("catalog down");
+        },
+      }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    // Falls back to per-session listModels → gpt-4o.
     expect(agent.getModel()).toBe("gpt-4o");
     await agent.dispose();
   });
@@ -993,5 +1104,225 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       expect(h.sendCalls[0]).toContain("hello-stream");
       await agent.dispose();
     });
+  });
+
+  // v0.4 Phase 3 (FR-005): swapModel — in-place model swap.
+  describe("swapModel", () => {
+    test("identity no-op when newId === selectedModel does NOT call setModel", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      expect(agent.getModel()).toBe("gpt-4.1");
+      await agent.swapModel("gpt-4.1");
+      expect(h.setModelCalls).toEqual([]);
+      expect(agent.getModel()).toBe("gpt-4.1");
+      await agent.dispose();
+    });
+
+    test("happy path: cancels pending stream + calls SDK setModel + updates selectedModel", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.swapModel("gpt-4o");
+      expect(h.setModelCalls).toEqual(["gpt-4o"]);
+      // cancelCurrent flows through to session.abort.
+      expect(h.abortCalls).toBe(1);
+      expect(agent.getModel()).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("selectedModel is only updated AFTER setModel resolves (rejection leaves state unchanged)", async () => {
+      const h = makeFakeSdk();
+      h.setModelImpl = async () => {
+        throw new Error("SDK rejected model");
+      };
+      const agent = makeAgent(h);
+      await agent.init();
+      const before = agent.getModel();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        "SDK rejected model",
+      );
+      expect(agent.getModel()).toBe(before);
+      await agent.dispose();
+    });
+
+    test("pre-init swap records preferred override and seeds next init", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      // swap BEFORE init — no SDK session exists yet.
+      await agent.swapModel("gpt-4o");
+      expect(h.setModelCalls).toEqual([]);
+      expect(agent.getModel()).toBe("gpt-4o");
+      // After init, the preferred override drives pickModel.
+      await agent.init();
+      expect(h.lastCreateSession.model).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("preferred override survives reconnect", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.swapModel("gpt-4o");
+      // Reconnect rebuilds the SDK session via init; the override
+      // should drive pickModel rather than reverting to opts.preferredModel.
+      await agent.reconnect();
+      expect(h.lastCreateSession.model).toBe("gpt-4o");
+      await agent.dispose();
+    });
+
+    test("throws when disposed", async () => {
+      const h = makeFakeSdk();
+      const agent = makeAgent(h);
+      await agent.init();
+      await agent.dispose();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        /disposed/i,
+      );
+    });
+
+    test("throws when SDK session lacks setModel", async () => {
+      const h = makeFakeSdk();
+      // Strip setModel after the fake is built so init still succeeds.
+      delete (h.session as { setModel?: unknown }).setModel;
+      const agent = makeAgent(h);
+      await agent.init();
+      await expect(agent.swapModel("gpt-4o")).rejects.toThrow(
+        /setModel/,
+      );
+    });
+  });
+});
+
+// ---------- v0.4 Phase 5 (S1): deferred-init recovery ----------
+
+describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
+  test("catalog non-ready AND per-session listModels throws → init succeeds in deferred state", async () => {
+    const h = makeFakeSdk();
+    // Per-session listModels also throws so pickModel cannot resolve.
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("catalog down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init(); // does NOT throw
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(agent.getModel()).toBeUndefined();
+    // No createSession was called yet — we only saw client.start + ping.
+    expect(h.lastCreateSession.model).toBeUndefined();
+
+    await expect(agent.sendMessage("hi")).rejects.toThrow(/pick a model/i);
+    await agent.dispose();
+  });
+
+  test("catalog non-ready, listModels fails → catalog later transitions to ready → session auto-recovers", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+
+    const { ModelCatalog } = await import("./ModelCatalog");
+    let catalogModelsFn: () => Promise<Array<{ id: string }>> = async () => {
+      throw new Error("catalog down");
+    };
+    const catalogClient = {
+      createSession: () => Promise.reject(new Error("x")),
+      listModels: () => catalogModelsFn(),
+    } as unknown as SdkClient;
+    const catalog = new ModelCatalog(() => catalogClient);
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+
+    // Catalog "recovers" — refresh returns chat models. The agent
+    // subscription should auto-trigger tryRecoverDeferred which
+    // builds the SDK session. Per-session listModels is still
+    // broken (catalog's ready chatModels are used via the resolver).
+    catalogModelsFn = async () => [{ id: "gpt-4o" }];
+    await catalog.refresh();
+    // Allow microtasks queued by the subscriber to drain.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(catalog.getState().kind).toBe("ready");
+    expect(agent.hasDeferredSession()).toBe(false);
+    expect(agent.getModel()).toBe("gpt-4o");
+    expect(h.lastCreateSession.model).toBe("gpt-4o");
+
+    // sendMessage now works.
+    h.setSendResponse({ data: { content: "hello" } });
+    const reply = await agent.sendMessage("ping");
+    expect(reply.content).toBe("hello");
+    await agent.dispose();
+  });
+
+  test("deferred → swapModel(newId) creates the SDK session in-place (user explicit pick path)", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("catalog down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+
+    // User picks an id from the (degraded) picker — this should
+    // still create the session via the explicit preferred id path.
+    await agent.swapModel("gpt-4o");
+    expect(agent.hasDeferredSession()).toBe(false);
+    expect(agent.getModel()).toBe("gpt-4o");
+    expect(h.lastCreateSession.model).toBe("gpt-4o");
+    await agent.dispose();
+  });
+
+  test("hasPendingApprovals on a deferred agent is false (no pending approvals possible)", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: async () => {
+            throw new Error("down");
+          },
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    const agent = makeAgent(h, denyAll, { catalog });
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(agent.hasPendingApprovals()).toBe(false);
+    await agent.dispose();
   });
 });

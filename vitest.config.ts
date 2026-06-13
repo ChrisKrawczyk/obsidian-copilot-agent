@@ -1,11 +1,19 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      obsidian: fileURLToPath(
+        new URL("./src/test/obsidianMock.ts", import.meta.url),
+      ),
+    },
+  },
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
-    // Phase 2 keeps tests focused on the domain and adapter layers.
-    // UI tests would require a DOM stub for `obsidian` and are out of
-    // scope here; we lean on manual verification in Obsidian for that.
+    // Most tests stay focused on domain/adapter layers. A tiny
+    // Obsidian alias lets targeted UI orchestration tests import
+    // ChatView without loading Obsidian's desktop runtime.
   },
 });

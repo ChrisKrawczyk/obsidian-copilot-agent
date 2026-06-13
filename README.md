@@ -2,7 +2,20 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.3 — Phase 1–7 complete. Adds multi-conversation support, cross-restart persistence, divergence-aware Undo, three new vault search tools, and an opt-out "raw-FS tools" safety toggle on top of the v0.2 chat UX. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+> **Status:** v0.4 — Phase 1–6 complete. Adds per-conversation model picker with a global default, mid-conversation swap that preserves history, inline recovery banners for catalog failures, lazy resolution for migrated conversations, and deferred SDK-session creation so the plugin recovers from a missing model list without a reload. Builds on v0.3's multi-conversation persistence. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+
+## What's new in v0.4
+
+- **Per-conversation model picker** in the chat header. Pick from any chat-capable Copilot model your account can reach; each conversation remembers its own selection. Switching conversations updates the picker label automatically. The picker uses Obsidian's standard menu so it inherits keyboard accessibility.
+- **Settings → Default model** for newly created conversations. The list mirrors the chat-header picker. If your configured default isn't in the catalog at create time, the plugin falls back to a heuristic and surfaces a one-shot Notice.
+- **Mid-conversation model swap with history preserved.** Picking a different model swaps it on the underlying SDK session in-place. Conversations with at least one completed assistant turn show a confirmation dialog ("history is preserved; pending tool approvals will be cancelled. Continue?"). Identity and brand-new-conversation swaps skip the dialog.
+- **Recovery without plugin reload.** If the model list can't be fetched on startup you see an inline banner with a **Retry** button — no plugin reload required. Empty-account ("No chat models available") and stale-id ("`<id>` (unavailable)") states are visually distinct. The AgentSession defers `createSession()` until the catalog reaches `ready`, so Retry or token rotation drives in-place recovery.
+- **Lazy resolution for v0.3 conversations.** On first activation in v0.4, a v0.3 conversation resolves a model (configured default → heuristic) and persists the binding.
+- **Single-source send gate.** Send button, Enter key, and the inline banner all consume one `canSend()` result so the same reason text appears in the same precedence order across surfaces.
+
+## What is intentionally NOT in v0.4
+
+Embedding/vector models, model-side capability filtering beyond `policy.state === "disabled"`, per-conversation safety overrides, mid-conversation token-budget tracking, archived-conversation restore UI, and anything from the v0.3 "intentionally NOT" list that is not called out above as v0.4 work.
 
 ## What's new in v0.3
 
@@ -16,7 +29,7 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 
 ## What is intentionally NOT in v0.3
 
-MCP integration, extra-vault filesystem roots, model picker UI, mid-session settings reload, tag rename/create, per-vault Daily Notes target override, showing or restoring archived conversations from the picker, conversation export/import, sharing conversations across vaults or syncing through Obsidian Sync, search-by-content fuzzy matching, and cross-conversation tool-call inspection. See `.paw/work/multi-conversation-persistence/Docs.md` § "What is NOT in v0.3" for the full enumeration and `.paw/work/multi-conversation-persistence/ImplementationPlan.md` for deferred candidates.
+MCP integration, extra-vault filesystem roots, mid-session settings reload, tag rename/create, per-vault Daily Notes target override, showing or restoring archived conversations from the picker, conversation export/import, sharing conversations across vaults or syncing through Obsidian Sync, search-by-content fuzzy matching, and cross-conversation tool-call inspection. See `.paw/work/multi-conversation-persistence/Docs.md` § "What is NOT in v0.3" for the full enumeration and `.paw/work/multi-conversation-persistence/ImplementationPlan.md` for deferred candidates.
 
 ## What's new in v0.2
 
@@ -110,7 +123,7 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brings the total to **609** across the v0.2 baseline plus the new domain modules (ConversationManager, ConversationRuntime, UndoJournal cross-restart + persistence, toolGating, formatToday, lifecycle), persistence (ConversationsStore, migrate), tools (SearchTools), UI (ConversationPicker logic, undoFlow, ToolCallBlock suppression, searchResultRenderer), and settings (SafetySettingsStore exposeRawFsTools).
+166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brings it to **728** across the new model catalog, per-conversation modelId persistence, picker view-model + keyboard reducer + confirmation copy, the four `canSend` blocked states with precedence, the unavailable-id sentinel row, lazy resolution, and the AgentSession deferred-init recovery cycle.
 
 ## Reference
 

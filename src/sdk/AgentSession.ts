@@ -86,6 +86,17 @@ export interface AgentSessionOptions {
   };
   /** Optional: skip listModels and force a specific model id. */
   preferredModel?: string;
+  /**
+   * v0.4 Phase 2: optional shared `ModelCatalog`. When provided and
+   * in `ready` state, `pickModel()` reuses the cached `chatModels`
+   * via `resolveHeuristicModelId()` instead of issuing another
+   * `client.listModels()` round-trip. When absent, `loading`,
+   * `empty`, or `error`, the v0.3 fallback path runs unchanged
+   * (fresh `listModels()` + heuristic). Phase 5 introduces deferred
+   * `createSession()` for the catalog-degraded recovery UX; Phases
+   * 1–4 do not change session-creation timing.
+   */
+  catalog?: import("./ModelCatalog").ModelCatalog;
   /** Optional: forwarded to the SDK CopilotClient as logLevel. */
   logLevel?: "none" | "error" | "warning" | "info" | "debug" | "all";
   /**
@@ -225,12 +236,54 @@ export interface AgentSession {
   /** Currently selected model id, or undefined if init hasn't run. */
   getModel(): string | undefined;
   /**
+   * v0.4 FR-005: swap the active model on the underlying SDK session
+   * via `session.setModel()`, preserving conversation history. Cancels
+   * any in-flight stream and pending approvals first so the swap takes
+   * effect cleanly on the next message.
+   *
+   * Behavior:
+   *  - If `newModelId === getModel()`: no-op (identity).
+   *  - If the SDK session has not been created yet (no init run): just
+   *    updates the preferred-model override so the next init/reset
+   *    selects `newModelId`. No network call.
+   *  - Otherwise: cancels pending approvals with reason "model-swap",
+   *    aborts any in-flight turn, then awaits `session.setModel()`.
+   *    `selectedModel` is updated ONLY after the SDK call resolves so a
+   *    rejection leaves state unchanged.
+   *
+   * Throws if disposed or if the SDK does not support `setModel`.
+   */
+  swapModel(newModelId: string): Promise<void>;
+  /**
    * Phase 6: resolve a pending approval prompt with the user's choice.
    * Called by the chat view when the user clicks an approval button.
    * No-op if no approval is pending for this tool-call id (e.g. the
    * prompt was already auto-rejected during cleanup).
    */
   resolveApproval(toolCallId: string, choice: ApprovalChoice): void;
+  /**
+   * v0.4: does this session currently have any tool-approval prompts
+   * awaiting user response? Consumed by the model-picker confirmation
+   * copy so the user knows pending approvals will be cancelled by
+   * `swapModel()` if they confirm the switch.
+   */
+  hasPendingApprovals(): boolean;
+  /**
+   * v0.4 Phase 5 (S1 — deferred-init contract): true iff `init()`
+   * resolved successfully but `createSession()` was NOT issued because
+   * the wired `ModelCatalog` was in `empty`/`error` and no
+   * `preferredModel` override was usable. In this state:
+   *   - `sendMessage`/`sendMessageStreaming` reject with a "pick a
+   *     model" error (UI consumes via `canSend()`).
+   *   - `swapModel(newId)` will set the preferred override AND
+   *     immediately attempt session creation if a client is alive.
+   *   - The session subscribes to the catalog and auto-recovers when
+   *     it transitions to `ready` (catalog retry, token rotation, or
+   *     the user picks an id).
+   * Returns false in the healthy path (createSession ran) and after
+   * deferred recovery succeeds.
+   */
+  hasDeferredSession(): boolean;
 }
 
 const SDK_IDLE_TIMEOUT_MS = 180_000;
@@ -240,11 +293,63 @@ const SDK_IDLE_TIMEOUT_MS = 180_000;
 const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
 
+/**
+ * v0.4 (model-picker) Phase 2: pure heuristic resolver extracted from
+ * the historical `AgentSession.pickModel()` body. Used both by the
+ * legacy `pickModel()` adapter (when the catalog is non-ready or
+ * unavailable) and by `ConversationManager.createInternal()` in
+ * Phase 3 to resolve a default modelId at conversation creation.
+ *
+ * Selection order (preserved verbatim from v0.3 to keep
+ * AgentSession's existing happy-path test green):
+ *   1. enabled `gpt-4.1`
+ *   2. enabled `gpt-4o`
+ *   3. first enabled id starting with `gpt-`
+ *   4. first enabled record (or first record overall if none enabled)
+ *
+ * "Enabled" matches the v0.3 rule (no `policy` field, or `policy.state`
+ * is `"enabled"` or `undefined`). When the enabled subset is empty we
+ * fall back to the full input — same as v0.3 — so accounts whose
+ * records carry exotic policy values still resolve.
+ *
+ * Returns `null` only when the input list is itself empty (or every
+ * record lacks a string `id`). Callers translate that into a
+ * user-visible failure (Spec FR-018, Phase 5 inline-error UX).
+ */
+export function resolveHeuristicModelId(
+  models: SdkModelInfo[],
+): string | null {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  const enabled = models.filter(
+    (m) =>
+      !m.policy ||
+      m.policy.state === "enabled" ||
+      m.policy.state === undefined,
+  );
+  const pool = enabled.length > 0 ? enabled : models;
+  if (pool.length === 0) return null;
+  const chosen =
+    pool.find((m) => m.id === "gpt-4.1") ??
+    pool.find((m) => m.id === "gpt-4o") ??
+    pool.find((m) => (m.id ?? "").startsWith("gpt-")) ??
+    pool[0];
+  const id = chosen.id ?? pool[0].id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
 export class CopilotAgentSession implements AgentSession {
   private initPromise: Promise<void> | null = null;
   private client: SdkClient | null = null;
   private session: SdkSession | null = null;
   private selectedModel: string | undefined;
+  /**
+   * v0.4 FR-005: per-instance override of `opts.preferredModel`. Set by
+   * `swapModel()` (mid-life model change) so that subsequent
+   * init/reset cycles converge on the user's most-recent choice rather
+   * than reverting to the construction-time `preferredModel`.
+   * `undefined` means "use opts.preferredModel".
+   */
+  private preferredModelOverride: string | undefined;
   /** Set once `dispose()` runs. Terminal — blocks all future init(). */
   private disposed = false;
   /**
@@ -358,6 +463,20 @@ export class CopilotAgentSession implements AgentSession {
   private lastFirstSendText: string | null = null;
   private lastFollowupSendText: string | null = null;
 
+  /**
+   * v0.4 Phase 5 (S1): true iff `doInit()` finished without calling
+   * `createSession()` because the wired `ModelCatalog` is non-ready
+   * and no usable `preferredModel` override exists. While this flag
+   * is set the SDK runtime is live (`client !== null`) but `session`
+   * is null. Cleared by `tryRecoverDeferred()` on successful catalog
+   * `ready` transition or by an explicit `swapModel(newId)`. Also
+   * cleared on `stopRuntime()` / `dispose()` so a fresh `init()`
+   * goes through the standard non-deferred path.
+   */
+  private deferredSession = false;
+  /** Unsubscribe handle for the catalog listener (constructor wired). */
+  private unsubCatalog: (() => void) | null = null;
+
   constructor(
     private readonly opts: AgentSessionOptions,
     sdkLoader?: () => Promise<SdkModule>,
@@ -368,10 +487,34 @@ export class CopilotAgentSession implements AgentSession {
     this.customToolNames = new Set(
       (this.toolsList ?? []).map((t) => t.name).filter(Boolean) as string[],
     );
+    // v0.4 Phase 5 (S1): subscribe to the catalog so a `ready`
+    // transition (catalog retry, token rotation, deferred lazy
+    // refresh) drives auto-recovery of a deferred session. We do
+    // NOT trigger a refresh here — main.ts owns refresh sequencing.
+    if (opts.catalog) {
+      this.unsubCatalog = opts.catalog.subscribe((state) => {
+        if (
+          state.kind === "ready" &&
+          this.deferredSession &&
+          !this.disposed
+        ) {
+          void this.tryRecoverDeferred().catch((e) =>
+            console.warn(
+              "[AgentSession] tryRecoverDeferred from catalog notify failed",
+              e,
+            ),
+          );
+        }
+      });
+    }
   }
 
   getModel(): string | undefined {
     return this.selectedModel;
+  }
+
+  hasDeferredSession(): boolean {
+    return this.deferredSession;
   }
 
   init(): Promise<void> {
@@ -409,6 +552,11 @@ export class CopilotAgentSession implements AgentSession {
       // init() already invoked onAuthError if applicable; rethrow so the
       // chat view can show the failure to the user.
       throw err;
+    }
+    if (this.deferredSession) {
+      throw new Error(
+        "Model catalog unavailable — pick a model in the chat header to continue.",
+      );
     }
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
@@ -479,6 +627,11 @@ export class CopilotAgentSession implements AgentSession {
       await this.init();
     } catch (err) {
       throw err;
+    }
+    if (this.deferredSession) {
+      throw new Error(
+        "Model catalog unavailable — pick a model in the chat header to continue.",
+      );
     }
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
@@ -755,6 +908,85 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   /**
+   * v0.4 FR-005: swap the active model on the underlying SDK session
+   * without losing conversation history. See {@link AgentSession.swapModel}
+   * for the contract.
+   *
+   * Implementation notes:
+   *  - The "interrupt streaming placeholder BEFORE abort" detail
+   *    (mirroring `ChatView.handleStop`) belongs to whichever caller
+   *    owns the visible placeholder state (ChatView for live UI;
+   *    ConversationRuntime.setModelId for orchestration). This method
+   *    is UI-agnostic — it only owns SDK-level cancellation and the
+   *    setModel call.
+   *  - We update `selectedModel` AND `preferredModelOverride` only
+   *    after `session.setModel()` resolves so that a rejection leaves
+   *    the in-memory state matching the SDK's actual state. We also
+   *    update the override so a subsequent reconnect/reset converges
+   *    on the user's choice.
+   */
+  async swapModel(newModelId: string): Promise<void> {
+    if (this.disposed) {
+      throw new Error("AgentSession disposed");
+    }
+    if (typeof newModelId !== "string" || newModelId.length === 0) {
+      throw new Error("swapModel: newModelId must be a non-empty string");
+    }
+    if (this.selectedModel === newModelId && !this.deferredSession) {
+      // Identity no-op. Still record as the override so a future
+      // reconnect/reset doesn't drift back to opts.preferredModel.
+      this.preferredModelOverride = newModelId;
+      return;
+    }
+    // v0.4 Phase 5 (S1): deferred recovery path. The runtime is alive
+    // (client !== null) but no session was created because the catalog
+    // was non-ready at init. The user just picked an id — record it
+    // and create the session in-place. No need to cancel anything
+    // (there is no session to be streaming or holding approvals).
+    if (this.deferredSession && this.client) {
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      await this.tryRecoverDeferred(newModelId);
+      return;
+    }
+    const session = this.session;
+    if (!session) {
+      // No SDK session yet (pre-init, post-stopRuntime, or disposed-
+      // and-recreating). Just record the preferred-model override so
+      // the next init/reset resolves to `newModelId`.
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      return;
+    }
+    if (typeof session.setModel !== "function") {
+      throw new Error(
+        "swapModel: underlying SDK session does not support setModel()",
+      );
+    }
+    // Drain pending approvals and abort any in-flight turn first so
+    // the SDK is quiescent when setModel() runs. cancelAllPendingApprovals
+    // is idempotent; cancelCurrent() also calls it under the hood.
+    this.cancelAllPendingApprovals("model-swap");
+    try {
+      await this.cancelCurrent();
+    } catch (e) {
+      console.warn("[AgentSession] swapModel cancelCurrent threw", e);
+    }
+    // Re-check session — cancelCurrent could race with stopRuntime if
+    // a teardown is in flight. If the session is gone now, degrade to
+    // the no-session path above.
+    const live = this.session;
+    if (!live) {
+      this.preferredModelOverride = newModelId;
+      this.selectedModel = newModelId;
+      return;
+    }
+    await Promise.resolve(live.setModel!(newModelId));
+    this.selectedModel = newModelId;
+    this.preferredModelOverride = newModelId;
+  }
+
+  /**
    * Phase 2: prepend the vault-aware preamble to the FIRST send of the
    * current SDK session. Subsequent sends pass through unchanged. If no
    * preamble callback is configured or it returns null/empty, the text
@@ -825,7 +1057,7 @@ export class CopilotAgentSession implements AgentSession {
       await safeCall(() => oldSession.disconnect?.());
     }
     if (!this.selectedModel) {
-      this.selectedModel = await this.pickModel(this.client, this.opts.preferredModel);
+      this.selectedModel = await this.pickModel(this.client, this.preferredModelOverride ?? this.opts.preferredModel);
     }
     const fresh = await this.client.createSession({
       model: this.selectedModel,
@@ -842,6 +1074,14 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.unsubCatalog) {
+      try {
+        this.unsubCatalog();
+      } catch {
+        /* listener unsubscribe must not throw */
+      }
+      this.unsubCatalog = null;
+    }
     this.cancelAllPendingApprovals("Agent disposed.");
     await this.stopRuntime();
   }
@@ -878,6 +1118,7 @@ export class CopilotAgentSession implements AgentSession {
     this.client = null;
     this.initPromise = null;
     this.selectedModel = undefined;
+    this.deferredSession = false;
 
     if (session) {
       await raceWithTimeout(
@@ -976,7 +1217,29 @@ export class CopilotAgentSession implements AgentSession {
 
       this.client = client;
 
-      const model = await this.pickModel(client, this.opts.preferredModel);
+      let model: string;
+      try {
+        model = await this.pickModel(
+          client,
+          this.preferredModelOverride ?? this.opts.preferredModel,
+        );
+      } catch (pickErr) {
+        // v0.4 Phase 5 (S1): if a shared catalog is wired and currently
+        // non-ready, DEFER createSession() instead of failing init.
+        // The runtime stays alive; the catalog subscription added in
+        // the constructor will fire `tryRecoverDeferred()` when the
+        // catalog transitions to `ready` (user retry, token rotation,
+        // or background refresh). Without a wired catalog there is no
+        // recovery path, so the original error propagates.
+        const catalog = this.opts.catalog;
+        if (catalog && catalog.getState().kind !== "ready") {
+          await bailIfStale();
+          this.deferredSession = true;
+          this.firstSendOfSession = true;
+          return; // init resolves successfully in deferred state
+        }
+        throw pickErr;
+      }
       await bailIfStale();
       this.selectedModel = model;
 
@@ -1014,11 +1277,87 @@ export class CopilotAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * v0.4 Phase 5 (S1): create the SDK session for a session that
+   * finished `doInit()` in deferred state. Idempotent and racy-safe:
+   *  - Returns silently if not deferred, no client, already has a
+   *    session, or disposed.
+   *  - If an explicit `preferred` id is passed (e.g. from `swapModel`)
+   *    it's used directly without consulting the catalog. Otherwise
+   *    falls back to `pickModel()` (catalog-then-listModels-then-
+   *    heuristic), which means catalog-`ready` notifications are
+   *    sufficient to drive recovery without the user picking an id.
+   *  - On any failure, leaves `deferredSession === true` so the next
+   *    catalog notify can retry. We only flip the flag on success.
+   *  - Race-safety: if the runtime is torn down or disposed during
+   *    `createSession()`, we disconnect the half-built session and
+   *    leave state untouched.
+   */
+  private async tryRecoverDeferred(preferred?: string): Promise<void> {
+    if (!this.deferredSession || !this.client || this.session || this.disposed) {
+      return;
+    }
+    const client = this.client;
+    const epoch = this.initEpoch;
+    let model: string;
+    try {
+      model = preferred ?? (await this.pickModel(
+        client,
+        this.preferredModelOverride ?? this.opts.preferredModel,
+      ));
+    } catch {
+      // Catalog flipped non-ready between notify and now (or
+      // listModels still failing). Stay deferred; the next catalog
+      // notify will retry.
+      return;
+    }
+    if (this.disposed || this.initEpoch !== epoch) return;
+    let session: SdkSession;
+    try {
+      session = await client.createSession({
+        model,
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
+        streaming: true,
+        tools: this.toolsList,
+        onPermissionRequest: (request: SdkPermissionRequest) =>
+          this.handlePermission(request),
+      });
+    } catch (e) {
+      console.warn("[AgentSession] deferred createSession failed", e);
+      return;
+    }
+    if (this.disposed || this.initEpoch !== epoch || this.session) {
+      await safeCall(() => session.disconnect?.());
+      return;
+    }
+    this.selectedModel = model;
+    this.preferredModelOverride = model;
+    this.session = session;
+    this.firstSendOfSession = true;
+    this.deferredSession = false;
+  }
+
   private async pickModel(
     client: SdkClient,
     preferred: string | undefined,
   ): Promise<string> {
     if (preferred) return preferred;
+    // v0.4 Phase 2: when a shared catalog is wired in and ready,
+    // resolve from its cached chat-capable list to avoid a duplicate
+    // listModels() round-trip per session creation. Any non-ready
+    // state (loading, empty, error, or catalog absent) falls through
+    // to the v0.3 path so phase shippability is preserved.
+    const catalog = this.opts.catalog;
+    if (catalog) {
+      const state = catalog.getState();
+      if (state.kind === "ready") {
+        const resolved = resolveHeuristicModelId(state.chatModels);
+        if (resolved !== null) return resolved;
+        // chatModels was non-empty per the `ready` invariant but the
+        // resolver returned null (every record lacked a usable id) —
+        // fall through to listModels() rather than hard-failing here.
+      }
+    }
     if (typeof client.listModels !== "function") {
       return "gpt-4.1";
     }
@@ -1032,24 +1371,13 @@ export class CopilotAgentSession implements AgentSession {
         }`,
       );
     }
-    const enabled = models.filter(
-      (m) =>
-        !m.policy ||
-        m.policy.state === "enabled" ||
-        m.policy.state === undefined,
-    );
-    const pool = enabled.length > 0 ? enabled : models;
-    if (pool.length === 0) {
+    const resolved = resolveHeuristicModelId(models);
+    if (resolved === null) {
       throw new Error(
         "[AgentSession] No Copilot models available for this account.",
       );
     }
-    const chosen =
-      pool.find((m) => m.id === "gpt-4.1") ??
-      pool.find((m) => m.id === "gpt-4o") ??
-      pool.find((m) => (m.id ?? "").startsWith("gpt-")) ??
-      pool[0];
-    return chosen.id ?? pool[0].id ?? "gpt-4.1";
+    return resolved;
   }
 
   private async handlePermission(
@@ -1357,6 +1685,16 @@ export class CopilotAgentSession implements AgentSession {
    *   - setToken / reconnect (token rotation)
    *   - dispose (plugin unload)
    */
+  /**
+   * Public probe: does this session currently have any tool-approval prompts
+   * awaiting user response? Consumed by the v0.4 model-picker confirmation
+   * copy (`buildSwapConfirmCopy`) so the user knows the pending approvals
+   * will be cancelled by `swapModel()` if they confirm the switch.
+   */
+  public hasPendingApprovals(): boolean {
+    return this.pendingApprovals.size > 0;
+  }
+
   private cancelAllPendingApprovals(reason: string): void {
     if (this.pendingApprovals.size === 0) return;
     const reject: ApprovalChoice = { kind: "reject", reason };
@@ -1635,6 +1973,13 @@ export interface SdkSession {
   sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;
+  /**
+   * v0.4 FR-005: swap the active model on this SDK session in place,
+   * preserving conversation history. Applies to subsequent messages.
+   * The SDK guarantees the new model id is validated against the
+   * runtime's installed model list; rejection throws.
+   */
+  setModel?: (modelId: string, options?: unknown) => Promise<unknown> | unknown;
   /**
    * Phase 4/5: subscribe to a specific event type. The SDK returns an
    * unsubscribe function. Modelled structurally so tests can stub it.

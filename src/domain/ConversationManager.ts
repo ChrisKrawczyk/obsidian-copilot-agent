@@ -105,6 +105,37 @@ export interface ConversationManagerOptions {
   store?: ConversationsStore;
   /** Now() shim for tests. */
   now?: () => number;
+  /**
+   * v0.4 Phase 3 (FR-007): resolves the model id to assign to a newly
+   * created conversation. The resolver should consult the user's
+   * configured global default first (via SafetySettingsStore) and the
+   * ModelCatalog second, falling back to the heuristic. Returns
+   * `modelId: null` when the catalog is non-ready — the runtime layer
+   * then defers selection to `AgentSession.pickModel` at init (v0.3
+   * codepath). Phase 5 backfills via lazy resolution.
+   *
+   * Returning `defaultWasUnavailable: true` with `configuredDefault`
+   * lets the manager surface a one-shot UI notice via
+   * `onUnavailableDefault` when the user's configured default could
+   * not be honoured even though the catalog was ready.
+   *
+   * Sync (not Promise-returning) to keep `createInternal` synchronous
+   * — both ModelCatalog.getState() and SafetySettingsStore.snapshot()
+   * are sync APIs.
+   */
+  resolveCreationModelId?: () => {
+    modelId: string | null;
+    defaultWasUnavailable?: boolean;
+    configuredDefault?: string | null;
+  };
+  /**
+   * v0.4 Phase 3 (FR-007): called once per `createInternal` invocation
+   * when the user's configured default model was unavailable in the
+   * catalog and the manager fell back to the heuristic. Used by main.ts
+   * to surface an Obsidian Notice without coupling the domain layer
+   * to the Obsidian SDK.
+   */
+  onUnavailableDefault?: (configuredDefault: string) => void;
 }
 
 export type ConversationChangeEvent =
@@ -126,6 +157,12 @@ export class ConversationManager {
   private readonly runtimeFactory: ConversationRuntimeFactory;
   private readonly store?: ConversationsStore;
   private readonly now: () => number;
+  private readonly resolveCreationModelId?: () => {
+    modelId: string | null;
+    defaultWasUnavailable?: boolean;
+    configuredDefault?: string | null;
+  };
+  private readonly onUnavailableDefault?: (configuredDefault: string) => void;
   private readonly conversations = new Map<string, Conversation>();
   private readonly runtimes = new Map<string, ConversationRuntime>();
   private readonly listeners = new Set<ConversationListener>();
@@ -136,6 +173,8 @@ export class ConversationManager {
     this.runtimeFactory = opts.runtimeFactory;
     this.store = opts.store;
     this.now = opts.now ?? (() => Date.now());
+    this.resolveCreationModelId = opts.resolveCreationModelId;
+    this.onUnavailableDefault = opts.onUnavailableDefault;
   }
 
   // ---------------- Hydration ----------------
@@ -162,6 +201,14 @@ export class ConversationManager {
         lastActiveAt: c.lastActiveAt,
         archived: c.archived === true ? true : undefined,
       };
+      // v0.4: round-trip the per-conversation modelId through hydration.
+      // `undefined` (key absent) and `null` both mean "not yet resolved";
+      // we preserve the distinction so downstream code can tell a v0.3
+      // migration (`null`) from a fresh-without-resolution conversation
+      // (`undefined`). Phase 5 handles both via the lazy resolver.
+      if (c.modelId !== undefined) {
+        meta.modelId = c.modelId;
+      }
       this.conversations.set(c.id, meta);
       // Defensive: ensure the store has a row for every catalog entry
       // (so `setActiveId(meta.id)` further down can't throw). In the
@@ -176,6 +223,7 @@ export class ConversationManager {
             createdAt: c.createdAt,
             lastActiveAt: c.lastActiveAt,
             archived: c.archived === true ? true : undefined,
+            ...(c.modelId !== undefined ? { modelId: c.modelId } : {}),
             messages: c.messages,
             undoEntries: c.undoEntries,
           });
@@ -208,6 +256,12 @@ export class ConversationManager {
     if (this.store) {
       this.store.setActiveId(resolved);
     }
+    // v0.4 final-review: hydrate restores the active id directly, so
+    // `setActive()` is not called for the initially active migrated
+    // conversation. Run the same lazy model resolver once here so a
+    // v0.3/null `modelId` is backfilled as soon as the catalog can
+    // resolve it.
+    this.maybeLazyResolveModelId(resolved);
     this.emit({ kind: "list-changed" });
     return resolved;
   }
@@ -256,12 +310,62 @@ export class ConversationManager {
     const previous = this.activeId;
     this.activeId = id;
     if (this.store) this.store.setActiveId(id);
+    // v0.4 Phase 5 (FR-013): lazy resolution. If the conversation is
+    // v0.3-migrated (`modelId === undefined`) OR was created with a
+    // null modelId (catalog non-ready at create-time), try to resolve
+    // now that the user is opening it. Best-effort: a still-degraded
+    // catalog leaves modelId null and the UI surfaces the FR-010 path.
+    this.maybeLazyResolveModelId(id);
     // SINGLE-1: bump lastActiveAt on the newly-active conversation so
     // the picker order and soft-cap victim selection reflect actual
     // usage. touchActive() emits its own metadata-changed event; the
     // active-changed event below is still needed for runtime rebind.
     this.touchActive();
     this.emit({ kind: "active-changed", previousId: previous, nextId: id });
+  }
+
+  /**
+   * v0.4 Phase 5 (FR-013): if the conversation has no bound model id
+   * (undefined → v0.3-migrated, or explicit null → created while
+   * catalog was degraded), try to resolve one via the same
+   * `resolveCreationModelId` resolver used at create time and persist
+   * it. No-op if the conversation already has a bound id, if no
+   * resolver is wired, or if the resolver returns null (catalog
+   * still degraded — leave unresolved and surface via FR-010 path).
+   */
+  private maybeLazyResolveModelId(id: string): void {
+    if (!this.resolveCreationModelId) return;
+    const conv = this.conversations.get(id);
+    if (!conv) return;
+    if (typeof conv.modelId === "string" && conv.modelId.length > 0) return;
+    let result: ReturnType<NonNullable<typeof this.resolveCreationModelId>>;
+    try {
+      result = this.resolveCreationModelId();
+    } catch (e) {
+      console.warn(
+        "[ConversationManager] lazy modelId resolver threw",
+        e,
+      );
+      return;
+    }
+    if (result.modelId === null) return;
+    // Use the public setter so listeners (and the runtime via the
+    // metadata-changed event) re-pick up the binding.
+    this.setConversationModelId(id, result.modelId);
+    if (
+      result.defaultWasUnavailable &&
+      result.configuredDefault &&
+      this.onUnavailableDefault
+    ) {
+      try {
+        this.onUnavailableDefault(result.configuredDefault);
+      } catch (e) {
+        console.warn(
+          "[ConversationManager] onUnavailableDefault threw (lazy)",
+          e,
+        );
+      }
+    }
   }
 
   /**
@@ -287,6 +391,39 @@ export class ConversationManager {
     const finalName = this.uniqueName(trimmed, id);
     if (conv.name === finalName) return;
     conv.name = finalName;
+    this.persistMetadataOnly(conv);
+    this.emit({ kind: "metadata-changed", id });
+  }
+
+  /**
+   * Spec v0.4 FR-006/FR-013: bind a model id to a conversation. Used
+   * both for explicit user picks (FR-002, FR-006) and for lazy
+   * resolution of v0.3-migrated conversations on first activation
+   * (FR-013). `null` clears the binding (rare; primarily used by
+   * Phase 5 when persisting "still unresolved" after a failed lazy
+   * resolve).
+   *
+   * Persists via the same metadata-only path as `rename` so messages
+   * and undo entries are preserved verbatim. Emits `metadata-changed`
+   * so the header label re-renders when the bound model differs from
+   * what's currently displayed. No-op if the value is unchanged
+   * (avoids a redundant write + repaint).
+   *
+   * NOTE: this writes ONLY the persisted metadata. Phases 3+ are
+   * responsible for the in-place SDK swap (`AgentSession.swapModel`),
+   * for confirmation gating (FR-004), and for reconciling against the
+   * runtime model catalog. Calling this in isolation will NOT change
+   * the model used by an in-flight session.
+   */
+  setConversationModelId(id: string, modelId: string | null): void {
+    const conv = this.conversations.get(id);
+    if (!conv) {
+      throw new Error(`setConversationModelId: no conversation with id "${id}"`);
+    }
+    const next = modelId === null ? null : modelId;
+    const prev = conv.modelId === undefined ? null : conv.modelId;
+    if (prev === next) return;
+    conv.modelId = next;
     this.persistMetadataOnly(conv);
     this.emit({ kind: "metadata-changed", id });
   }
@@ -543,12 +680,48 @@ export class ConversationManager {
     this.idCounter += 1;
     const id = `conv-${this.idCounter}`;
     const ts = this.now();
+    // v0.4 Phase 3 (FR-007): resolve modelId at creation. The resolver
+    // walks the priority chain: configured default → catalog heuristic
+    // → null (= "let AgentSession.pickModel decide at init"). When the
+    // configured default existed but was unavailable in the catalog,
+    // surface a one-shot Notice via the manager-supplied callback.
+    let resolvedModelId: string | null | undefined;
+    if (this.resolveCreationModelId) {
+      try {
+        const result = this.resolveCreationModelId();
+        resolvedModelId = result.modelId;
+        if (
+          result.defaultWasUnavailable &&
+          typeof result.configuredDefault === "string" &&
+          result.configuredDefault.length > 0 &&
+          this.onUnavailableDefault
+        ) {
+          try {
+            this.onUnavailableDefault(result.configuredDefault);
+          } catch (err) {
+            console.warn(
+              "[ConversationManager] onUnavailableDefault threw",
+              err,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[ConversationManager] resolveCreationModelId threw — falling back to null",
+          err,
+        );
+        resolvedModelId = null;
+      }
+    }
     const meta: Conversation = {
       id,
       name: finalName,
       createdAt: ts,
       lastActiveAt: ts,
     };
+    if (resolvedModelId !== undefined) {
+      meta.modelId = resolvedModelId;
+    }
     this.conversations.set(id, meta);
     // Invariant: every Conversation tracked by the manager exists in
     // the store too. Without this upsert, calling
@@ -637,11 +810,15 @@ export class ConversationManager {
 }
 
 function cloneMeta(c: Conversation): Conversation {
-  return {
+  const out: Conversation = {
     id: c.id,
     name: c.name,
     createdAt: c.createdAt,
     lastActiveAt: c.lastActiveAt,
     archived: c.archived === true ? true : undefined,
   };
+  if (c.modelId !== undefined) {
+    out.modelId = c.modelId;
+  }
+  return out;
 }

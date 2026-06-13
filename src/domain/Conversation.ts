@@ -24,6 +24,18 @@ export interface Conversation {
   lastActiveAt: number;
   /** True when soft-cap eviction archived this conversation. */
   archived?: boolean;
+  /**
+   * v0.4: per-conversation bound model id.
+   * `undefined` (missing key) and `null` both mean "not yet resolved" —
+   * Phase 5 introduces lazy resolution on first activation. A non-null
+   * string is the resolved SDK model id (e.g. "gpt-4.1"). Phase 1
+   * tracks this through the persistence pipeline only; runtime code
+   * (AgentSession swap, picker UI) lands in later phases.
+   *
+   * Purely metadata: NOT included in undo snapshots. Undo restores
+   * transcript state and leaves the currently-bound `modelId` alone.
+   */
+  modelId?: string | null;
 }
 
 /** Snapshot of the per-conversation persisted shape needed for runtime
@@ -44,6 +56,7 @@ export function conversationFromPersisted(
       createdAt: p.createdAt,
       lastActiveAt: p.lastActiveAt,
       archived: p.archived === true ? true : undefined,
+      modelId: p.modelId === undefined ? undefined : p.modelId,
     },
     messages: p.messages,
     undoEntries: p.undoEntries,
@@ -59,5 +72,6 @@ export function conversationToPersistedMetadata(
     createdAt: c.createdAt,
     lastActiveAt: c.lastActiveAt,
     archived: c.archived === true ? true : undefined,
+    modelId: c.modelId === undefined ? undefined : c.modelId,
   };
 }

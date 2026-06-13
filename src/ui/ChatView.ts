@@ -14,6 +14,16 @@ import type { PersistedMessage } from "../persistence/PersistedShape";
 import { decideKeydownAction } from "./chatKeydown";
 import { ConversationPicker, confirmDestructive, promptForText } from "./ConversationPicker";
 import { buildPickerItems } from "./conversationPickerLogic";
+import { ModelPicker } from "./ModelPicker";
+import {
+  buildModelPickerViewModel,
+  buildSwapConfirmCopy,
+  canSend,
+  isIdentitySwap,
+  shouldConfirmSwap,
+  type SendBlockReason,
+} from "./modelPickerLogic";
+import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
@@ -57,6 +67,12 @@ interface ChatViewDeps {
    * `exposeRawFsToolsAtStartup`.
    */
   getExposeRawFsTools: () => boolean;
+  /**
+   * v0.4 Phase 4: shared ModelCatalog instance so the chat header
+   * model picker can render rows + reflect catalog state transitions
+   * without re-listing models per view open.
+   */
+  modelCatalog: ModelCatalog;
 }
 
 export class ChatView extends ItemView {
@@ -143,6 +159,24 @@ export class ChatView extends ItemView {
    *  visible list/active-name stays in sync without coupling the
    *  picker to the manager directly. */
   private picker?: ConversationPicker;
+  /** v0.4 Phase 4: header model picker. Constructed in onOpen,
+   *  destroyed in onClose. Re-rendered on every catalog state change
+   *  AND every manager `metadata-changed`/`active-changed` event. */
+  private modelPicker?: ModelPicker;
+  private modelCatalog!: ModelCatalog;
+  private unsubModelCatalog?: () => void;
+  /** v0.4 Phase 4: guard against overlapping swap orchestrations. Set
+   *  between the confirmation `await` and the `setModelId` resolution
+   *  so a fast double-click can't fire two swaps. */
+  private isSwapInProgress = false;
+  /** v0.4 Phase 5: inline-error banner above the composer. Visible iff
+   *  `canSend()` returns blocked for one of the catalog/model reasons
+   *  (FR-010/FR-016/FR-018) OR if a stream-error message needs to be
+   *  shown (precedence: model > catalog-error > catalog-empty >
+   *  unresolved > stream-error). */
+   private inlineErrorEl?: HTMLElement;
+   private inlineErrorMsgEl?: HTMLElement;
+   private inlineErrorRetryEl?: HTMLButtonElement;
 
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
@@ -150,6 +184,7 @@ export class ChatView extends ItemView {
     this.auth = deps.auth;
     this.openSettings = deps.openSettings;
     this.getExposeRawFsTools = deps.getExposeRawFsTools;
+    this.modelCatalog = deps.modelCatalog;
     this.bindActiveRuntime();
   }
 
@@ -250,6 +285,13 @@ export class ChatView extends ItemView {
     // visible alongside the title (the original v0.2 layout).
     const titleRow = header.createDiv({ cls: "copilot-agent-header-row" });
     titleRow.createEl("div", { text: "Copilot Agent", cls: "copilot-agent-title" });
+    // v0.4 Phase 4 (FR-015): merge the per-conversation model picker
+    // INTO the header row, adjacent to the smaller connection-status
+    // badge. The picker IS the model indicator; the status pill keeps
+    // only the auth/connection state.
+    // Hotfix (post-v0.4): the picker reads better next to the send
+    // button (VS Code Copilot Chat parity), so it lives in the
+    // composer-actions row below the textarea — see further down.
     this.statusEl = titleRow.createDiv({
       cls: "copilot-agent-status",
       text: "…",
@@ -307,6 +349,27 @@ export class ChatView extends ItemView {
     });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
+    // v0.4 Phase 5: inline-error banner above the textarea — hidden by
+    // default; shown whenever `canSend()` returns a catalog/model
+    // blocked reason. Built once here; refreshSendGate() toggles
+    // visibility + copy + retry-button presence.
+    this.inlineErrorEl = composer.createDiv({
+      cls: "copilot-agent-inline-error",
+    });
+    this.inlineErrorEl.style.display = "none";
+    this.inlineErrorMsgEl = this.inlineErrorEl.createSpan({
+      cls: "copilot-agent-inline-error-msg",
+    });
+    this.inlineErrorRetryEl = this.inlineErrorEl.createEl("button", {
+      cls: "copilot-agent-inline-error-retry",
+      text: "Retry",
+    });
+    this.inlineErrorRetryEl.style.display = "none";
+    this.inlineErrorRetryEl.addEventListener("click", () => {
+      void this.modelCatalog.refresh().catch((err) =>
+        console.warn("[ChatView] catalog retry failed", err),
+      );
+    });
     this.inputEl = composer.createEl("textarea", {
       cls: "copilot-agent-input",
       attr: { rows: "3", placeholder: "Ask Copilot…" },
@@ -347,7 +410,16 @@ export class ChatView extends ItemView {
           break;
       }
     });
-    this.sendBtnEl = composer.createEl("button", {
+    // v0.4 hotfix: composer-actions row beneath the textarea, holding
+    // the per-conversation model picker on the left and the send/stop
+    // button on the right (VS Code Copilot Chat parity).
+    const composerActions = composer.createDiv({
+      cls: "copilot-agent-composer-actions",
+    });
+    this.modelPicker = new ModelPicker(composerActions, this.app, {
+      onSelect: (newId) => void this.handleModelPick(newId),
+    });
+    this.sendBtnEl = composerActions.createEl("button", {
       cls: "copilot-agent-send mod-cta",
     });
     this.sendIconEl = this.sendBtnEl.createSpan({
@@ -401,10 +473,169 @@ export class ChatView extends ItemView {
       // v0.3 Phase 5: picker mirrors the manager catalog. Cheap enough
       // to re-render on every event (≤ 20 items per FR-002).
       this.refreshPicker();
+      // v0.4 Phase 4: model picker also depends on conversation state
+      // (active-changed re-binds modelId; metadata-changed reflects
+      // setModelId writes from the picker itself).
+      this.refreshModelPicker();
     });
     // Initial render so the picker reflects whatever the manager
     // already hydrated by the time the view opens.
     this.refreshPicker();
+    // v0.4 Phase 4: subscribe to catalog transitions so the picker
+    // flips from loading → ready (or → degraded) without polling.
+    this.unsubModelCatalog = this.modelCatalog.subscribe(() =>
+      this.refreshModelPicker(),
+    );
+    this.refreshModelPicker();
+    // refreshModelPicker already calls refreshSendGate; this redundant
+    // call covers the case where the picker is disabled (early-return
+    // in refreshModelPicker) but the gate still needs to evaluate.
+    this.refreshSendGate();
+  }
+
+  /** v0.4 Phase 4: compute the model picker view model from the
+   *  current catalog state + active conversation's bound modelId,
+   *  then push to the DOM picker. */
+  private refreshModelPicker(): void {
+    if (!this.modelPicker) return;
+    const activeId = this.manager.getActiveId();
+    const activeConv = activeId ? this.manager.get(activeId) : null;
+    const vm = buildModelPickerViewModel(
+      this.modelCatalog.getState(),
+      activeConv?.modelId,
+    );
+    this.modelPicker.render(vm);
+    this.refreshSendGate();
+  }
+
+  /**
+   * v0.4 Phase 5 (FR-014/FR-010/FR-016/FR-018): re-evaluate `canSend()`
+   * against the current snapshot and reflect the result in (a) the
+   * Send button's disabled state, (b) the inline-error banner above
+   * the composer, (c) the visibility of the inline Retry button.
+   *
+   * Idempotent + cheap — called from every event that could change a
+   * canSend input (catalog, manager, auth, busy state).
+   *
+   * Precedence is owned by `canSend()` (see `modelPickerLogic.ts`);
+   * this method only renders whatever it returns.
+   */
+  private refreshSendGate(): void {
+    if (!this.inlineErrorEl || !this.inlineErrorMsgEl || !this.inlineErrorRetryEl) {
+      return;
+    }
+    const activeId = this.manager.getActiveId();
+    const activeConv = activeId ? this.manager.get(activeId) : null;
+    const result = canSend({
+      isConnected: this.currentAuthKind === "connected",
+      isStreaming: this.streaming,
+      isPending: this.pending,
+      catalogState: this.modelCatalog.getState(),
+      activeModelId: activeConv?.modelId ?? null,
+    });
+    // Connection-loss/streaming/pending have their own well-established
+    // UX surfaces (connectBtn, Stop button, busy spinner). Only the four
+    // catalog/model reasons drive the inline banner.
+    const bannerReasons: ReadonlySet<SendBlockReason> = new Set([
+      "unavailable-model",
+      "catalog-error",
+      "catalog-empty",
+      "unresolved-model",
+    ]);
+    if (!result.ok && bannerReasons.has(result.kind)) {
+      this.inlineErrorEl.style.display = "";
+      this.inlineErrorMsgEl.setText(result.reason);
+      // FR-018: only the catalog-error reason gets a Retry — empty/
+      // unresolved/unavailable are not "transient list-models failures".
+      this.inlineErrorRetryEl.style.display =
+        result.kind === "catalog-error" ? "" : "none";
+    } else {
+      this.inlineErrorEl.style.display = "none";
+    }
+    // Send button: disabled if NOT ok AND we're not in the streaming
+    // state (the streaming state repurposes the button as Stop, owned
+    // by setStreaming()). Don't trample the busy state either.
+    if (!this.pending && !this.streaming) {
+      this.sendBtnEl.disabled = !result.ok;
+    }
+  }
+
+  /**
+   * v0.4 Phase 4 (FR-005 + FR-008): orchestrate a user-initiated
+   * model swap from the picker. Sequence:
+   *   1. Identity → no-op (cheap short-circuit before any I/O).
+   *   2. Zero completed assistant turns → swap immediately, no
+   *      confirmation dialog (the user has not yet received a response
+   *      from the current model so there is nothing to "preserve").
+   *   3. Otherwise show the destructive-style confirmation dialog
+   *      (mirroring the rename/delete UX); on Cancel the picker
+   *      label snaps back via re-render (no state mutated).
+   * Guarded by `isSwapInProgress` against overlapping invocations.
+   */
+  private async handleModelPick(newModelId: string): Promise<void> {
+    if (this.isSwapInProgress) return;
+    this.bindActiveRuntime();
+    const activeId = this.manager.getActiveId();
+    if (!activeId) return;
+    const conv = this.manager.get(activeId);
+    if (!conv) return;
+    const targetConversationId = activeId;
+    const targetRuntime = this.manager.getActiveRuntime();
+    if (isIdentitySwap(conv.modelId ?? null, newModelId)) {
+      // Identity — also re-render to make sure the picker label
+      // matches the cached current id (defensive).
+      this.refreshModelPicker();
+      return;
+    }
+    const messages = this.state.getMessages();
+    const needsConfirm = shouldConfirmSwap(messages);
+    // Friendly label for the dialog: prefer catalog label over raw id.
+    const catalogState = this.modelCatalog.getState();
+    const newLabel =
+      (catalogState.kind === "ready" &&
+        catalogState.chatModels.find((m) => m.id === newModelId)?.name) ||
+      newModelId;
+
+    if (needsConfirm) {
+      const hasPending = this.agent?.hasPendingApprovals() ?? false;
+      const body = buildSwapConfirmCopy(newLabel, hasPending);
+      const ok = await confirmDestructive(
+        this.app,
+        "Switch model",
+        body,
+        "Switch",
+      );
+      if (!ok) {
+        // User cancelled — re-render so the picker label snaps back to
+        // the unchanged current id. Spec edge case: any in-flight
+        // stream MUST be untouched (we never called swap / cancel).
+        this.refreshModelPicker();
+        return;
+      }
+      if (this.manager.getActiveId() !== targetConversationId) {
+        new Notice("Conversation changed; swap cancelled.", 4000);
+        this.refreshModelPicker();
+        return;
+      }
+    }
+
+    this.isSwapInProgress = true;
+    try {
+      if (
+        this.currentPlaceholderId &&
+        this.currentStreamSession === targetRuntime.session
+      ) {
+        this.userRequestedStop = true;
+        const streamState = this.currentStreamState ?? targetRuntime.state;
+        streamState.interruptStreaming(this.currentPlaceholderId);
+      }
+      await targetRuntime.setModelId(newModelId, { persist: true });
+    } catch (e) {
+      new Notice(`Switch model failed: ${(e as Error).message}`, 6000);
+    } finally {
+      this.isSwapInProgress = false;
+      this.refreshModelPicker();
+    }
   }
 
   /** Build picker items from the manager's current catalog + active
@@ -423,8 +654,11 @@ export class ChatView extends ItemView {
     this.unsubState?.();
     this.unsubAuth?.();
     this.unsubManager?.();
+    this.unsubModelCatalog?.();
     this.picker?.destroy();
     this.picker = undefined;
+    this.modelPicker?.destroy();
+    this.modelPicker = undefined;
     this.renderer?.dispose();
     this.renderer = undefined;
   }
@@ -436,7 +670,9 @@ export class ChatView extends ItemView {
     // send pipeline owns `pending`/`streaming`.
     if (!this.pending && !this.streaming) {
       this.inputEl.disabled = !isConnected;
-      this.sendBtnEl.disabled = !isConnected;
+      // Send button disable state is computed by refreshSendGate()
+      // below (which considers catalog state too) — don't overwrite
+      // here.
     }
     if (this.connectBtnEl) {
       this.connectBtnEl.style.display = isConnected ? "none" : "";
@@ -455,9 +691,10 @@ export class ChatView extends ItemView {
         this.statusEl.removeClass("copilot-agent-status-error");
         break;
       case "connected":
-        this.statusEl.setText(
-          state.model ? `Connected · ${state.model}` : "Connected",
-        );
+        // FR-015: the ModelPicker is the canonical model indicator. The
+        // status pill only carries auth/connection state, so we omit
+        // `state.model` here to avoid duplicating the model name.
+        this.statusEl.setText("Connected");
         this.statusEl.removeClass("copilot-agent-status-error");
         break;
       case "error":
@@ -465,6 +702,7 @@ export class ChatView extends ItemView {
         this.statusEl.addClass("copilot-agent-status-error");
         break;
     }
+    this.refreshSendGate();
   }
 
   // ---- send pipeline ----
@@ -520,8 +758,20 @@ export class ChatView extends ItemView {
 
   private async handleSend(): Promise<void> {
     if (this.pending) return;
-    if (this.currentAuthKind !== "connected") {
-      new Notice("Not connected. Open settings to sign in.", 5000);
+    // v0.4 Phase 5 (FR-014): single-source gate. If canSend() says
+    // blocked for any reason (including the four catalog/model
+    // reasons), show the message and bail before touching state.
+    const activeId0 = this.manager.getActiveId();
+    const activeConv0 = activeId0 ? this.manager.get(activeId0) : null;
+    const gate = canSend({
+      isConnected: this.currentAuthKind === "connected",
+      isStreaming: this.streaming,
+      isPending: this.pending,
+      catalogState: this.modelCatalog.getState(),
+      activeModelId: activeConv0?.modelId ?? null,
+    });
+    if (!gate.ok) {
+      new Notice(gate.reason, 5000);
       return;
     }
     // v0.3 Phase 4: ensure we're bound to the latest active runtime
@@ -724,17 +974,19 @@ export class ChatView extends ItemView {
     this.currentStreamState = undefined;
     this.currentStreamSession = undefined;
 
-    if (failure) {
+    if (cancelled) {
+      // User clicked Stop or intentionally switched model mid-stream.
+      // In both cases the SDK may surface an abort error, but the
+      // user intent is a clean interruption and must not show an error
+      // Notice or overwrite the frozen placeholder.
+      state.interruptStreaming(placeholderId);
+    } else if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
       state.update(placeholderId, {
         content: `**Error:** ${msg}`,
         status: "error",
       });
       new Notice(`Copilot Agent error: ${msg}`, 8000);
-    } else if (cancelled) {
-      // User clicked Stop before any delta arrived. Freeze placeholder
-      // as interrupted with whatever (if anything) was streamed.
-      state.interruptStreaming(placeholderId);
     } else {
       // Normal completion. Prefer the SDK's final content over the
       // concatenated deltas (they may differ — e.g. when the model
@@ -810,7 +1062,9 @@ export class ChatView extends ItemView {
     // Input stays disabled until the turn fully completes (post-streaming).
     this.inputEl.disabled = busy || gated;
     if (!busy) {
-      this.sendBtnEl.disabled = gated;
+      // Re-evaluate the gate (includes catalog/model reasons) rather
+      // than blindly enabling based on auth alone.
+      this.refreshSendGate();
       this.sendBtnEl.toggleClass("is-loading", false);
     }
   }
@@ -831,6 +1085,7 @@ export class ChatView extends ItemView {
       this.sendBtnEl.toggleClass("mod-cta", true);
       this.sendLabelEl.setText("Send");
       setIcon(this.sendIconEl, "send");
+      this.refreshSendGate();
     }
   }
 
@@ -950,4 +1205,3 @@ function toPersistedToolCalls(
       undone: tc.undone,
     }));
 }
-

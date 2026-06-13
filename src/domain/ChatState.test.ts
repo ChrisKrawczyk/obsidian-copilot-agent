@@ -229,4 +229,29 @@ describe("ChatState - upsertToolCall (Phase 5)", () => {
       }),
     ).toBe(false);
   });
+
+  // v0.4 FR-005: interruptStreamingMessage — id-less variant used by
+  // ConversationRuntime.setModelId before SDK abort.
+  test("interruptStreamingMessage freezes the first streaming/pending message and returns its id", () => {
+    const s = new ChatState();
+    s.append({ role: "user", content: "u1", status: "complete" });
+    const placeholderId = s.append({
+      role: "assistant",
+      content: "partial",
+      status: "streaming",
+    });
+    const ret = s.interruptStreamingMessage();
+    expect(ret).toBe(placeholderId);
+    const msgs = s.getMessages();
+    expect(msgs[1].status).toBe("interrupted");
+    // Idempotent: second call returns null because nothing is live.
+    expect(s.interruptStreamingMessage()).toBeNull();
+  });
+
+  test("interruptStreamingMessage returns null when nothing is streaming or pending", () => {
+    const s = new ChatState();
+    s.append({ role: "user", content: "u1", status: "complete" });
+    s.append({ role: "assistant", content: "a1", status: "complete" });
+    expect(s.interruptStreamingMessage()).toBeNull();
+  });
 });
