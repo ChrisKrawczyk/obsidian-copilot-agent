@@ -258,8 +258,15 @@
   font-size: var(--font-ui-small);
 }
 
+.copilot-agent-composer-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .copilot-agent-send {
-  align-self: flex-end;
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -540,14 +547,16 @@
   padding: 6px 10px;
   margin-bottom: 6px;
   border-radius: 6px;
-  background: var(--background-modifier-error, rgba(255, 80, 80, 0.12));
-  color: var(--text-error, #c83a3a);
+  background: var(--background-secondary);
+  color: var(--text-normal);
   font-size: var(--font-ui-small);
-  border: 1px solid var(--background-modifier-error-hover, rgba(200, 58, 58, 0.3));
+  border: 1px solid var(--text-error, #c83a3a);
+  border-left-width: 3px;
 }
 .copilot-agent-inline-error-msg {
   flex: 1 1 auto;
   word-break: break-word;
+  color: var(--text-normal);
 }
 .copilot-agent-inline-error-retry {
   flex: 0 0 auto;
