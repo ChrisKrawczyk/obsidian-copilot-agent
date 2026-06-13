@@ -289,9 +289,9 @@ export class ChatView extends ItemView {
     // INTO the header row, adjacent to the smaller connection-status
     // badge. The picker IS the model indicator; the status pill keeps
     // only the auth/connection state.
-    this.modelPicker = new ModelPicker(titleRow, this.app, {
-      onSelect: (newId) => void this.handleModelPick(newId),
-    });
+    // Hotfix (post-v0.4): the picker reads better next to the send
+    // button (VS Code Copilot Chat parity), so it lives in the
+    // composer-actions row below the textarea — see further down.
     this.statusEl = titleRow.createDiv({
       cls: "copilot-agent-status",
       text: "…",
@@ -410,7 +410,16 @@ export class ChatView extends ItemView {
           break;
       }
     });
-    this.sendBtnEl = composer.createEl("button", {
+    // v0.4 hotfix: composer-actions row beneath the textarea, holding
+    // the per-conversation model picker on the left and the send/stop
+    // button on the right (VS Code Copilot Chat parity).
+    const composerActions = composer.createDiv({
+      cls: "copilot-agent-composer-actions",
+    });
+    this.modelPicker = new ModelPicker(composerActions, this.app, {
+      onSelect: (newId) => void this.handleModelPick(newId),
+    });
+    this.sendBtnEl = composerActions.createEl("button", {
       cls: "copilot-agent-send mod-cta",
     });
     this.sendIconEl = this.sendBtnEl.createSpan({
