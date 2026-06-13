@@ -247,7 +247,7 @@ export default class CopilotAgentPlugin extends Plugin {
         const sdk = await loadSharedSdk();
         const Client = sdk.CopilotClient;
         if (!Client) throw new Error("SDK lacks CopilotClient");
-        sharedSdkClient = new Client({
+        const next = new Client({
           gitHubToken: token,
           useLoggedInUser: false,
           mode: "empty",
@@ -255,6 +255,17 @@ export default class CopilotAgentPlugin extends Plugin {
           connection: { kind: "stdio", path: cliPath },
           logLevel: "info",
         }) as SdkClient;
+        // The SDK requires start()+ping() before any RPC (including
+        // listModels). AgentSession does the same handshake for its
+        // per-conversation client; the shared catalog client needs it
+        // too or refresh() fails with "Client not connected".
+        if (typeof next.start === "function") {
+          await next.start();
+        }
+        if (typeof next.ping === "function") {
+          await next.ping();
+        }
+        sharedSdkClient = next;
       } catch (err) {
         console.warn(
           "[copilot-agent] shared SDK client construction failed",
