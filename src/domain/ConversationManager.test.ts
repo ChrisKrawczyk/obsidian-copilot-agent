@@ -1134,6 +1134,28 @@ describe("ConversationManager — creation-time modelId resolution (v0.4 FR-007)
 });
 
 describe("ConversationManager — lazy modelId resolution on setActive (v0.4 FR-013)", () => {
+  test("initially active hydrated conv with no modelId resolves during hydrate", () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const resolver = vi.fn(() => ({ modelId: "gpt-4o", configuredDefault: null }));
+    const c1 = persistedConv("c1");
+    delete (c1 as { modelId?: unknown }).modelId;
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      resolveCreationModelId: resolver,
+    });
+
+    m.hydrate({
+      conversations: [c1, persistedConv("c2", { modelId: "claude-3" })],
+      activeConversationId: "c1",
+    });
+
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(m.get("c1")?.modelId).toBe("gpt-4o");
+    expect(state.byId.get("c1")?.modelId).toBe("gpt-4o");
+  });
+
   test("v0.3-migrated conv (modelId undefined) → resolver runs on setActive and writes through", () => {
     const { factory } = makeFakeFactory();
     const { store, state } = makeFakeStore();
@@ -1240,6 +1262,5 @@ describe("ConversationManager — lazy modelId resolution on setActive (v0.4 FR-
     expect(m.get("c2")?.modelId).toBeUndefined();
   });
 });
-
 
 

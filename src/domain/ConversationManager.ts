@@ -256,6 +256,12 @@ export class ConversationManager {
     if (this.store) {
       this.store.setActiveId(resolved);
     }
+    // v0.4 final-review: hydrate restores the active id directly, so
+    // `setActive()` is not called for the initially active migrated
+    // conversation. Run the same lazy model resolver once here so a
+    // v0.3/null `modelId` is backfilled as soon as the catalog can
+    // resolve it.
+    this.maybeLazyResolveModelId(resolved);
     this.emit({ kind: "list-changed" });
     return resolved;
   }
