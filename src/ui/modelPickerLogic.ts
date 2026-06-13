@@ -1,14 +1,15 @@
 // v0.4 Phase 4: pure (DOM-free) helpers for ModelPicker.
 //
 // Extracted into its own module so we can unit-test render-state /
-// keyboard / identity-swap / confirmation-derivation logic in node
-// (per vitest.config.ts), without dragging Obsidian's DOM into the
-// test environment. Mirrors the pattern used for
+// identity-swap / confirmation-derivation logic in node (per
+// vitest.config.ts), without dragging Obsidian's DOM into the test
+// environment. Mirrors the pattern used for
 // `src/ui/conversationPickerLogic.ts` and `src/ui/chatKeydown.ts`.
 //
 // Anything that produces or mutates HTML lives in `ModelPicker.ts`;
-// anything that decides what items to show, whether to confirm, or
-// what keyboard action to take, lives here.
+// anything that decides what items to show or whether to confirm
+// lives here. Keyboard accessibility is owned by Obsidian's native
+// Menu widget in `ModelPicker.ts`.
 
 import type {
   CatalogModelInfo,
@@ -147,82 +148,6 @@ export function shouldConfirmSwap(messages: readonly Message[]): boolean {
   return messages.some(
     (m) => m.role === "assistant" && m.status === "complete",
   );
-}
-
-// ---------- Keyboard reducer ----------
-
-/** Snapshot of the picker's keyboard state at a keydown moment. */
-export interface PickerKeydownSnapshot {
-  /** `KeyboardEvent.key`. */
-  key: string;
-  /** True iff the picker menu is currently open. */
-  isOpen: boolean;
-  /** Number of selectable rows in the menu (drives arrow wrap). */
-  rowCount: number;
-  /** Index of the row currently highlighted (0..rowCount-1) or -1. */
-  highlightedIndex: number;
-}
-
-/** What the parent should do in response to a keydown on the picker. */
-export type PickerKeydownAction =
-  | { kind: "open" }
-  | { kind: "close" }
-  | { kind: "highlight"; index: number }
-  | { kind: "select"; index: number }
-  | { kind: "passthrough" };
-
-/**
- * Pure reducer for the picker's keyboard interactions. Mirrors the
- * extraction pattern used by {@link decideKeydownAction} for the chat
- * composer.
- *
- * Contract:
- *  - When closed: Enter / Space / ArrowDown / ArrowUp open the menu.
- *    Anything else is `passthrough`.
- *  - When open: ArrowDown / ArrowUp move the highlight (with wrap).
- *    Home / End jump to first / last. Enter selects the highlighted
- *    row (or `passthrough` when no row is highlighted). Escape closes.
- *    Anything else is `passthrough`.
- */
-export function decidePickerKeydown(
-  s: PickerKeydownSnapshot,
-): PickerKeydownAction {
-  if (!s.isOpen) {
-    if (
-      s.key === "Enter" ||
-      s.key === " " ||
-      s.key === "ArrowDown" ||
-      s.key === "ArrowUp"
-    ) {
-      return { kind: "open" };
-    }
-    return { kind: "passthrough" };
-  }
-  if (s.key === "Escape") return { kind: "close" };
-  if (s.rowCount === 0) return { kind: "passthrough" };
-  if (s.key === "ArrowDown") {
-    const next =
-      s.highlightedIndex < 0
-        ? 0
-        : (s.highlightedIndex + 1) % s.rowCount;
-    return { kind: "highlight", index: next };
-  }
-  if (s.key === "ArrowUp") {
-    const next =
-      s.highlightedIndex <= 0
-        ? s.rowCount - 1
-        : s.highlightedIndex - 1;
-    return { kind: "highlight", index: next };
-  }
-  if (s.key === "Home") return { kind: "highlight", index: 0 };
-  if (s.key === "End") return { kind: "highlight", index: s.rowCount - 1 };
-  if (s.key === "Enter") {
-    if (s.highlightedIndex < 0 || s.highlightedIndex >= s.rowCount) {
-      return { kind: "passthrough" };
-    }
-    return { kind: "select", index: s.highlightedIndex };
-  }
-  return { kind: "passthrough" };
 }
 
 // ---------- Confirmation copy ----------

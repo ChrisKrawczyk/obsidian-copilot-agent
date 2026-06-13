@@ -3,8 +3,10 @@
 //
 // Pure rendering + event-callback wiring; all catalog/conversation
 // state lives in ModelCatalog and ConversationManager. Decisions
-// about which rows to show, whether to confirm, and what keyboard
-// action to take live in `modelPickerLogic.ts` (DOM-free, unit-tested).
+// about which rows to show and whether to confirm live in
+// `modelPickerLogic.ts` (DOM-free, unit-tested). Keyboard
+// accessibility is intentionally delegated to Obsidian's native Menu
+// widget because it owns menu focus and key handling once opened.
 //
 // Lifecycle: the parent (ChatView) constructs a ModelPicker, mounts
 // it under the header, and calls `render(viewModel)` whenever the

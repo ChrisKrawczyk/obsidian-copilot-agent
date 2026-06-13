@@ -69,6 +69,7 @@ v0.4 ships a per-conversation model picker (chat-header dropdown), a global defa
 ```
 
 - `loading` is transient — visible only while a refresh is in flight.
+- If `refresh()` is requested while a prior refresh is in flight (for example after token rotation rebuilds the shared SDK client), the catalog queues one follow-up refresh after the current pass settles so the new client is listed.
 - Exclusion policy (FR-012): HARD-disable on `policy.state === "disabled"` OR `disabled === true`. Soft signals (ids matching `/embedding|image|dall-e|whisper|tts/i`) are `console.warn`-ed but pass through unchanged.
 
 ### 3.2 Picker view-model (`buildModelPickerViewModel`)
@@ -127,6 +128,12 @@ When `ready` AND the active conv's bound `modelId` is missing from `chatModels`,
 4. **Atomic swap**: `isSwapInProgress = true`; `runtime.setModelId(newId, { persist: true })` → `AgentSession.swapModel(newId)` cancels pending approvals, aborts any in-flight turn, calls `session.setModel(newId)`, and only on resolution updates `selectedModel` + `preferredOverride`.
 5. **Finally**: re-render the picker (label snaps back on failure; reflects new id on success).
 
+Final-review hardening:
+
+- The target conversation id and runtime are captured before the async confirmation dialog opens. If the active conversation changes before the user confirms, the swap is cancelled with a Notice and no runtime is updated.
+- When swapping the actively streaming runtime, ChatView mirrors the Stop ordering by marking the current placeholder `interrupted` and setting the clean-stop flag before `swapModel()` aborts the SDK stream. Intentional swap cancellation therefore finalizes as `interrupted`, not `error`.
+- Picker keyboard accessibility is handled by Obsidian `Menu`'s native focus and key behavior. There is no separate picker keydown reducer to wire or keep in sync with the Menu internals.
+
 ## 5. Send gating (FR-014)
 
 `canSend(snapshot)` in `modelPickerLogic.ts` returns `{ ok: true }` or `{ ok: false, reason, kind }`. Precedence (highest first):
@@ -158,15 +165,15 @@ When `ready` AND the active conv's bound `modelId` is missing from `chatModels`,
 }
 ```
 
-- `modelId === undefined` ⇒ v0.3-migrated; lazy-resolved on first activation in v0.4.
+- `modelId === undefined` ⇒ v0.3-migrated; lazy-resolved on hydrate when initially active or on first later activation in v0.4.
 - `modelId === null` ⇒ v0.4 conversation created while the catalog was degraded (resolver returned null); lazy-resolved on first activation OR via deferred-init recovery.
 - `modelId === "<id>"` ⇒ explicit binding; honoured at construction time and survives reload.
 
-The conversations subtree schema version is bumped from v1 to v2, but the migration is additive and backward-compatible: v1 payloads upcast by adding `modelId: null`, and v2 also accepts a missing field as unresolved.
+The conversations subtree schema version is bumped from v1 to v2, but the migration is additive and backward-compatible: v1 payloads upcast by adding `modelId: null`, and v2 also accepts a missing field as unresolved. Invalid optional `modelId` values normalize to `null` rather than recovering the whole conversations subtree; structural identity/message/undo shape problems still recover.
 
 ## 7. Lazy resolution (FR-013)
 
-`ConversationManager.setActive(id)` → `maybeLazyResolveModelId(id)`:
+`ConversationManager.hydrate(...)` runs `maybeLazyResolveModelId(activeId)` for the initially active conversation, and `ConversationManager.setActive(id)` runs the same helper for later switches:
 
 1. If conv already has a non-empty string `modelId`, no-op.
 2. Otherwise call `resolveCreationModelId()` (configured-default-then-catalog-heuristic).
@@ -208,12 +215,12 @@ The conversations subtree schema version is bumped from v1 to v2, but the migrat
 |---|---|---|
 | FR-001 Per-conv model | ChatView ModelPicker + ConversationManager.modelId | `modelPickerLogic.test.ts`, `ConversationManager.test.ts` |
 | FR-002 Discoverable picker | ChatView header mount (FR-015 merge) | manual + `ModelPicker` rendering tests |
-| FR-005 Mid-conv swap preserves history | `AgentSession.swapModel` calls `session.setModel` | `AgentSession.test.ts` swapModel cases |
+| FR-005 Mid-conv swap preserves history | `AgentSession.swapModel` calls `session.setModel`; ChatView captures target runtime across confirmation | `AgentSession.test.ts` swapModel cases; `ChatView.modelPick.test.ts` |
 | FR-007 Default-model setting | Settings dropdown + `resolveCreationModelId` | `ConversationManager.test.ts` creation-time |
 | FR-008 Confirmation gating | `shouldConfirmSwap` + `confirmDestructive` | `modelPickerLogic.test.ts` |
 | FR-010 Unavailable-id state | Sentinel row + canSend `unavailable-model` | `modelPickerLogic.test.ts` Phase 5 |
 | FR-012 Capability filter | `filterChatCapable` (hard only) | `ModelCatalog.test.ts` |
-| FR-013 Lazy resolution | `ConversationManager.maybeLazyResolveModelId` | `ConversationManager.test.ts` lazy-resolution |
+| FR-013 Lazy resolution | `ConversationManager.maybeLazyResolveModelId` on hydrate + setActive | `ConversationManager.test.ts` lazy-resolution |
 | FR-014 Single-source send gate | `canSend()` + `ChatView.refreshSendGate` | `modelPickerLogic.test.ts` canSend |
 | FR-015 Header layout merge | `ChatView.onOpen` header-row + status pill collapse | manual |
 | FR-016 Empty-catalog UX | Inline banner `catalog-empty` | `modelPickerLogic.test.ts` |
