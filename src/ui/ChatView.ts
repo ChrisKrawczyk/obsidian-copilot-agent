@@ -570,6 +570,8 @@ export class ChatView extends ItemView {
     if (!activeId) return;
     const conv = this.manager.get(activeId);
     if (!conv) return;
+    const targetConversationId = activeId;
+    const targetRuntime = this.manager.getActiveRuntime();
     if (isIdentitySwap(conv.modelId ?? null, newModelId)) {
       // Identity — also re-render to make sure the picker label
       // matches the cached current id (defensive).
@@ -601,12 +603,16 @@ export class ChatView extends ItemView {
         this.refreshModelPicker();
         return;
       }
+      if (this.manager.getActiveId() !== targetConversationId) {
+        new Notice("Conversation changed; swap cancelled.", 4000);
+        this.refreshModelPicker();
+        return;
+      }
     }
 
     this.isSwapInProgress = true;
     try {
-      const runtime = this.manager.getActiveRuntime();
-      await runtime.setModelId(newModelId, { persist: true });
+      await targetRuntime.setModelId(newModelId, { persist: true });
     } catch (e) {
       new Notice(`Switch model failed: ${(e as Error).message}`, 6000);
     } finally {
