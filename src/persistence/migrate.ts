@@ -106,11 +106,12 @@ function cloneDefault(): PersistedConversationsState {
 
 /**
  * Validates the conversations array shape shared by v1 and v2. The
- * `modelId` field on each conversation is OPTIONAL — both `undefined`
- * and `null` are accepted (interpreted as "not yet resolved"), and a
- * non-empty string is the resolved id. A structurally-invalid value
- * (e.g. number, object) causes the entire payload to be rejected and
- * sent to recovery, matching the strict-validation policy of v0.3.
+ *  `modelId` field on each conversation is OPTIONAL and non-fatal —
+ * both `undefined` and `null` are accepted (interpreted as "not yet
+ * resolved"), and a non-empty string is the resolved id. Any invalid
+ * value (e.g. number, object, empty string) is normalized to `null`
+ * so one bad optional field does not recover the entire conversations
+ * subtree.
  */
 function validateConversationsArray(
   obj: Record<string, unknown>,
@@ -146,16 +147,17 @@ function validateConversation(raw: unknown): PersistedConversation | null {
   if (!Array.isArray(c.messages)) return null;
   if (!Array.isArray(c.undoEntries)) return null;
 
-  // modelId: optional. Accept undefined (missing), null, or a non-empty
-  // string. Anything else (number, object, empty string, etc.) is
-  // treated as structurally invalid and rejects the payload.
+  // modelId is optional and non-fatal. Accept undefined (missing),
+  // null, or a non-empty string. Anything else (number, object, empty
+  // string, etc.) normalizes to null so the conversation and siblings
+  // survive migration.
   let modelId: string | null | undefined;
   if (c.modelId === undefined || c.modelId === null) {
     modelId = c.modelId === null ? null : undefined;
   } else if (typeof c.modelId === "string" && c.modelId.length > 0) {
     modelId = c.modelId;
   } else {
-    return null;
+    modelId = null;
   }
 
   const messages: PersistedMessage[] = [];

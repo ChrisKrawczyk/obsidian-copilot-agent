@@ -181,7 +181,8 @@ function emptyState() {
  *   - The output blob carries CURRENT_SCHEMA_VERSION so subsequent
  *     loads validate as v2 directly.
  *   - The v2 path round-trips `modelId` (string / null / missing) and
- *     rejects structurally-invalid values into recovery.
+ *     normalizes structurally-invalid optional `modelId` values to
+ *     null without recovering otherwise-valid conversations.
  */
 describe("migrate — v0.4 v1 → v2 upcast (GATING)", () => {
   it("upcasts a v0.3 (schemaVersion=1) blob to v2 without recovery", () => {
@@ -270,15 +271,56 @@ describe("migrate — v0.4 modelId round-trip", () => {
     expect(r.state.conversations[0].modelId).toBeUndefined();
   });
 
-  it("rejects a structurally-invalid modelId (number)", () => {
-    expect(migrate(v2Blob({ modelId: 42 })).recovered).toBe(true);
+  it("normalizes a structurally-invalid modelId (number) to null", () => {
+    const r = migrate(v2Blob({ modelId: 42 }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBeNull();
   });
 
-  it("rejects an empty-string modelId", () => {
-    expect(migrate(v2Blob({ modelId: "" })).recovered).toBe(true);
+  it("normalizes an empty-string modelId to null", () => {
+    const r = migrate(v2Blob({ modelId: "" }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBeNull();
   });
 
-  it("rejects a non-string non-null modelId (object)", () => {
-    expect(migrate(v2Blob({ modelId: { id: "x" } })).recovered).toBe(true);
+  it("normalizes a non-string non-null modelId (object) to null", () => {
+    const r = migrate(v2Blob({ modelId: { id: "x" } }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].modelId).toBeNull();
+  });
+
+  it("preserves conversations and siblings when one optional modelId is invalid", () => {
+    const raw = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "bad optional field",
+          createdAt: 1,
+          lastActiveAt: 2,
+          modelId: 42,
+          messages: [],
+          undoEntries: [],
+        },
+        {
+          id: "c2",
+          name: "sibling",
+          createdAt: 3,
+          lastActiveAt: 4,
+          modelId: "gpt-4o",
+          messages: [],
+          undoEntries: [],
+        },
+      ],
+      activeConversationId: "c1",
+    };
+
+    const r = migrate(raw);
+
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations.map((c) => c.id)).toEqual(["c1", "c2"]);
+    expect(r.state.conversations[0].modelId).toBeNull();
+    expect(r.state.conversations[1].modelId).toBe("gpt-4o");
+    expect(r.state.activeConversationId).toBe("c1");
   });
 });
