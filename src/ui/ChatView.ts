@@ -612,6 +612,14 @@ export class ChatView extends ItemView {
 
     this.isSwapInProgress = true;
     try {
+      if (
+        this.currentPlaceholderId &&
+        this.currentStreamSession === targetRuntime.session
+      ) {
+        this.userRequestedStop = true;
+        const streamState = this.currentStreamState ?? targetRuntime.state;
+        streamState.interruptStreaming(this.currentPlaceholderId);
+      }
       await targetRuntime.setModelId(newModelId, { persist: true });
     } catch (e) {
       new Notice(`Switch model failed: ${(e as Error).message}`, 6000);
@@ -957,17 +965,19 @@ export class ChatView extends ItemView {
     this.currentStreamState = undefined;
     this.currentStreamSession = undefined;
 
-    if (failure) {
+    if (cancelled) {
+      // User clicked Stop or intentionally switched model mid-stream.
+      // In both cases the SDK may surface an abort error, but the
+      // user intent is a clean interruption and must not show an error
+      // Notice or overwrite the frozen placeholder.
+      state.interruptStreaming(placeholderId);
+    } else if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
       state.update(placeholderId, {
         content: `**Error:** ${msg}`,
         status: "error",
       });
       new Notice(`Copilot Agent error: ${msg}`, 8000);
-    } else if (cancelled) {
-      // User clicked Stop before any delta arrived. Freeze placeholder
-      // as interrupted with whatever (if anything) was streamed.
-      state.interruptStreaming(placeholderId);
     } else {
       // Normal completion. Prefer the SDK's final content over the
       // concatenated deltas (they may differ — e.g. when the model
@@ -1186,4 +1196,3 @@ function toPersistedToolCalls(
       undone: tc.undone,
     }));
 }
-
