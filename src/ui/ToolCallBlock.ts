@@ -4,6 +4,7 @@ import {
   type SearchMatchView,
   type TagCountView,
 } from "./searchResultRenderer";
+import { truncateMcpText } from "../sdk/approvalText";
 
 /**
  * Callback surface from the chat view into the block. The block emits
@@ -196,7 +197,10 @@ function renderApprovalPrompt(
   if (call.approval?.detail) {
     const pre = document.createElement("pre");
     pre.classList.add("copilot-agent-toolcall-approval-detail");
-    pre.textContent = truncate(call.approval.detail, 4000);
+    pre.textContent =
+      call.source === "mcp"
+        ? truncateMcpText(call.approval.detail)
+        : truncate(call.approval.detail, 4000);
     wrap.appendChild(pre);
   }
 
@@ -261,7 +265,7 @@ function makeLabeledPre(label: string, text: string): HTMLElement {
   labelEl.textContent = label;
   const pre = document.createElement("pre");
   pre.classList.add("copilot-agent-toolcall-section-content");
-  pre.textContent = truncate(text, 4000);
+  pre.textContent = truncateMcpText(text);
   wrap.appendChild(labelEl);
   wrap.appendChild(pre);
   return wrap;

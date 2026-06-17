@@ -1,4 +1,4 @@
-import type { McpServerId } from "./McpTypes";
+import type { McpServerConfig, McpServerId, McpTrustEpoch } from "./McpTypes";
 
 const PREFIX = "mcp__";
 const FORBIDDEN_TOOL_CHARS = /[\u0000-\u001f\u007f/\\]/;
@@ -22,4 +22,33 @@ export function parseSyntheticId(
 
 export function isValidMcpToolName(toolName: string): boolean {
   return toolName.length > 0 && !FORBIDDEN_TOOL_CHARS.test(toolName);
+}
+
+export interface McpToolSourceMetadata {
+  source: "mcp";
+  stableServerId: McpServerId;
+  serverName: string;
+  toolName: string;
+  trustEpoch: McpTrustEpoch;
+}
+
+export function resolveMcpToolSourceMetadata(
+  syntheticId: string | undefined,
+  servers: readonly Pick<
+    McpServerConfig,
+    "id" | "name" | "enabled" | "trustEpoch"
+  >[],
+): McpToolSourceMetadata | null {
+  if (!syntheticId) return null;
+  const parsed = parseSyntheticId(syntheticId);
+  if (!parsed) return null;
+  const server = servers.find((entry) => entry.id === parsed.serverId);
+  if (!server || server.enabled === false) return null;
+  return {
+    source: "mcp",
+    stableServerId: server.id,
+    serverName: server.name,
+    toolName: parsed.toolName,
+    trustEpoch: server.trustEpoch,
+  };
 }

@@ -28,10 +28,18 @@ export interface SafetyDecisionResult {
   reason: string;
 }
 
+import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+
 export interface SafetyPolicyInput {
   source: SafetySource;
   /** Custom or built-in tool name (e.g. "edit_file", "shell"); MCP server name not included. */
   toolName?: string;
+  /** Stable MCP server id for MCP tool calls. Required for MCP auto-apply. */
+  mcpServerId?: McpServerId;
+  /** Exact MCP tool name for MCP tool calls. Required for MCP auto-apply. */
+  mcpToolName?: string;
+  /** Current server trust epoch for MCP tool calls. Required for MCP auto-apply. */
+  mcpTrustEpoch?: McpTrustEpoch;
   /** Vault-relative path for vault writes; absolute path for extra-vault; undefined otherwise. */
   vaultRelativePath?: string;
   /** Extra-vault canonical root path; undefined otherwise (Phase 7+). */
@@ -54,7 +62,8 @@ export interface SafetyConfig {
  * reload, conversation reset, or Obsidian restart per spec FR-013.
  *
  * Grants are intentionally narrow: a vault-write session grant covers
- * the WHOLE vault scope; an MCP grant covers a single server; a
+ * the WHOLE vault scope; an MCP grant covers a single exact
+ * `(stable server id, tool name, trust epoch)` tuple; a
  * built-in grant covers a single `kind` (or for `custom-tool` kind, a
  * single tool name).
  */
@@ -71,8 +80,13 @@ export class SafetyState {
   grantExtraVault(rootPath: string): void {
     if (rootPath) this.extraVaultGranted.add(rootPath);
   }
-  grantMcp(serverName: string): void {
-    if (serverName) this.mcpGranted.add(serverName);
+  grantMcp(
+    serverId: McpServerId,
+    toolName: string,
+    trustEpoch: McpTrustEpoch,
+  ): void {
+    const key = formatMcpGrantKey(serverId, toolName, trustEpoch);
+    if (key) this.mcpGranted.add(key);
   }
   /** Grant by kind (e.g. "shell") or by tool name (for custom-tool kind). */
   grantBuiltin(key: string): void {
@@ -85,8 +99,13 @@ export class SafetyState {
   isExtraVaultGranted(rootPath: string): boolean {
     return this.extraVaultGranted.has(rootPath);
   }
-  isMcpGranted(serverName: string): boolean {
-    return this.mcpGranted.has(serverName);
+  isMcpGranted(
+    serverId: McpServerId,
+    toolName: string,
+    trustEpoch: McpTrustEpoch,
+  ): boolean {
+    const key = formatMcpGrantKey(serverId, toolName, trustEpoch);
+    return key ? this.mcpGranted.has(key) : false;
   }
   isBuiltinGranted(key: string): boolean {
     return this.builtinGranted.has(key);
@@ -148,7 +167,15 @@ export function decideSafety(
   config: SafetyConfig,
   state: SafetyState,
 ): SafetyDecisionResult {
-  const { source, toolName, vaultRelativePath, extraVaultRoot } = input;
+  const {
+    source,
+    toolName,
+    vaultRelativePath,
+    extraVaultRoot,
+    mcpServerId,
+    mcpToolName,
+    mcpTrustEpoch,
+  } = input;
 
   switch (source) {
     case "vault": {
@@ -197,20 +224,24 @@ export function decideSafety(
       };
     }
     case "mcp": {
-      // toolName here repurposed by callers to carry the MCP server
-      // name (it's the natural grant-scope unit for MCP). If we have
-      // a granular per-server toggle, it overrides require-approval.
-      const server = toolName ?? "";
-      if (server && state.isMcpGranted(server)) {
+      if (!mcpServerId || !mcpToolName || !mcpTrustEpoch) {
         return {
-          decision: "auto-apply",
-          reason: `MCP server "${server}" approved for this session.`,
+          decision: "require-approval",
+          reason:
+            "MCP tool calls require current server/tool trust metadata before auto-approval.",
         };
       }
-      if (server && config.mcpAutoApprove && config.mcpAutoApprove[server]) {
+      if (state.isMcpGranted(mcpServerId, mcpToolName, mcpTrustEpoch)) {
         return {
           decision: "auto-apply",
-          reason: `MCP server "${server}" is auto-approved in settings.`,
+          reason: `MCP tool "${mcpToolName}" on server "${mcpServerId}" approved for this session.`,
+        };
+      }
+      const key = formatMcpGrantKey(mcpServerId, mcpToolName, mcpTrustEpoch);
+      if (config.mcpAutoApprove && config.mcpAutoApprove[key]) {
+        return {
+          decision: "auto-apply",
+          reason: `MCP tool "${mcpToolName}" on server "${mcpServerId}" is auto-approved in settings.`,
         };
       }
       return {
@@ -246,4 +277,13 @@ export function decideSafety(
       };
     }
   }
+}
+
+export function formatMcpGrantKey(
+  serverId: McpServerId | undefined,
+  toolName: string | undefined,
+  trustEpoch: McpTrustEpoch | undefined,
+): string {
+  if (!serverId || !toolName || !trustEpoch) return "";
+  return `mcp:${serverId}:${trustEpoch}:${toolName}`;
 }

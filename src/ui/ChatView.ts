@@ -27,6 +27,8 @@ import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
+import { redactSensitive } from "../mcp/redactSensitive";
+import { truncateMcpText, escapeMcpPlainText } from "../sdk/approvalText";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -1198,10 +1200,18 @@ function toPersistedToolCalls(
         | "errored"
         | "approved"
         | "denied",
-      detail: tc.detail,
-      argsPreview: tc.argsPreview,
-      resultContent: tc.resultContent,
+      detail: sanitizePersistedMcpText(tc.source, tc.detail),
+      argsPreview: sanitizePersistedMcpText(tc.source, tc.argsPreview),
+      resultContent: sanitizePersistedMcpText(tc.source, tc.resultContent),
       undoId: tc.undoId,
       undone: tc.undone,
     }));
+}
+
+function sanitizePersistedMcpText(
+  source: import("../domain/types").ToolCall["source"],
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined || source !== "mcp") return value;
+  return truncateMcpText(escapeMcpPlainText(redactSensitive(value)));
 }

@@ -1,6 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   CopilotAgentSession,
+  classifyToolSource,
+  type AgentSessionOptions,
   type SdkClient,
   type SdkModule,
   type SdkPermissionRequest,
@@ -8,7 +10,13 @@ import {
   type SdkSession,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
-import { SafetyState } from "../domain/SafetyPolicy";
+import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
+import { formatSyntheticId } from "../mcp/McpToolIdentity";
+import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+
+const mcpServerId = "server-a" as McpServerId;
+const mcpEpoch1 = "epoch_1" as McpTrustEpoch;
+const mcpEpoch2 = "epoch_2" as McpTrustEpoch;
 
 interface FakeHandles {
   sdk: SdkModule;
@@ -844,6 +852,10 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       defaultMode?: "auto-apply-with-undo" | "require-approval";
       vaultAllowlist?: string[];
       builtinAutoApprove?: Record<string, boolean>;
+      mcpAutoApprove?: Record<string, boolean>;
+      getMcpToolSourceMetadata?: NonNullable<
+        AgentSessionOptions["safety"]
+      >["getMcpToolSourceMetadata"];
     } = {},
   ) {
     const state = new SafetyState();
@@ -858,9 +870,10 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
             fsDefaultMode: overrides.defaultMode ?? "auto-apply-with-undo",
             vaultAllowlist: overrides.vaultAllowlist ?? [],
             builtinAutoApprove: overrides.builtinAutoApprove ?? {},
-            mcpAutoApprove: {},
+            mcpAutoApprove: overrides.mcpAutoApprove ?? {},
           }),
           state,
+          getMcpToolSourceMetadata: overrides.getMcpToolSourceMetadata,
         },
       },
       async () => handles.sdk,
@@ -918,6 +931,177 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     });
     expect(shellResult.kind).toBe("reject");
     await agent.dispose();
+  });
+
+  test("synthetic MCP ids classify to source mcp", () => {
+    expect(
+      classifyToolSource(
+        "custom-tool",
+        formatSyntheticId(mcpServerId, "read_resource"),
+        new Set(),
+      ),
+    ).toBe("mcp");
+  });
+
+  test("MCP grant lookup reads current trust epoch synchronously at decision time", async () => {
+    const h = makeFakeSdk();
+    let epoch = mcpEpoch1;
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove: {
+        [formatMcpGrantKey(mcpServerId, "read", mcpEpoch2)]: true,
+      },
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: epoch,
+      }),
+    });
+    await agent.init();
+    const toolName = formatSyntheticId(mcpServerId, "read");
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-current-1",
+          kind: "mcp",
+          toolName,
+        })
+      ).kind,
+    ).toBe("reject");
+    epoch = mcpEpoch2;
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-current-2",
+          kind: "mcp",
+          toolName,
+        })
+      ).kind,
+    ).toBe("approve-once");
+    await agent.dispose();
+  });
+
+  test("approve-for-session grants exact MCP server/tool/epoch only", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = () =>
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    const { agent } = makeSafetyAgent(h, {
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const iter = agent.sendMessageStreaming("trigger")[Symbol.asyncIterator]();
+    const firstEvent = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-session",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await firstEvent;
+    agent.resolveApproval("tc-mcp-session", { kind: "approve-for-session" });
+    expect((await permission).kind).toBe("approve-once");
+
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-session-2",
+          kind: "mcp",
+          toolName: formatSyntheticId(mcpServerId, "read"),
+        })
+      ).kind,
+    ).toBe("approve-once");
+    resolveSend({ data: { content: "done" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
+  test("server removed between approval and dispatch rejects before approval reaches SDK", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = () =>
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    let present = true;
+    const { agent } = makeSafetyAgent(h, {
+      getMcpToolSourceMetadata: () =>
+        present
+          ? {
+              source: "mcp",
+              stableServerId: mcpServerId,
+              serverName: "Server A",
+              toolName: "read",
+              trustEpoch: mcpEpoch1,
+            }
+          : null,
+    });
+    await agent.init();
+    const iter = agent.sendMessageStreaming("trigger")[Symbol.asyncIterator]();
+    const firstEvent = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-removed",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await firstEvent;
+    present = false;
+    agent.resolveApproval("tc-mcp-removed", { kind: "approve-once" });
+    const result = await permission;
+    expect(result.kind).toBe("reject");
+    resolveSend({ data: { content: "done" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
+  test("resolved approval cache clears on MCP epoch rotation, disable, disconnect, and crashloop", async () => {
+    for (const state of ["epoch", "disable", "disconnect", "crashloop"]) {
+      const h = makeFakeSdk();
+      let metadata:
+        | {
+            source: "mcp";
+            stableServerId: typeof mcpServerId;
+            serverName: string;
+            toolName: string;
+            trustEpoch: McpTrustEpoch;
+          }
+        | null = {
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      };
+      const { agent } = makeSafetyAgent(h, {
+        mcpAutoApprove: {
+          [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+        },
+        getMcpToolSourceMetadata: () => metadata,
+      });
+      await agent.init();
+      const request = {
+        toolCallId: `tc-mcp-cache-${state}`,
+        kind: "mcp",
+        toolName: formatSyntheticId(mcpServerId, "read"),
+      };
+      expect((await h.permissionHandler!(request)).kind).toBe("approve-once");
+      metadata =
+        state === "epoch"
+          ? { ...metadata!, trustEpoch: mcpEpoch2 }
+          : null;
+      expect((await h.permissionHandler!(request)).kind).toBe("reject");
+      await agent.dispose();
+    }
   });
 
   test("built-in toggle auto-approves matching kind", async () => {

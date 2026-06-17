@@ -2,6 +2,7 @@ import { Notice } from "obsidian";
 import type { PluginDataIO } from "../auth/TokenStore";
 import { computeTrustEpoch, normalizeServerId } from "../mcp/McpIdentity";
 import type { McpServerConfig, McpServerId } from "../mcp/McpTypes";
+import { redactSensitive } from "../mcp/redactSensitive";
 
 interface PersistedShapeWithMcp {
   mcpServers?: unknown;
@@ -156,7 +157,9 @@ export class McpSettingsStore {
     if (signature === this.lastDropNotice) return;
     this.lastDropNotice = signature;
     this.notify(
-      `[Copilot Agent] Dropped malformed MCP server entries: ${labels.join(", ")}`,
+      redactSensitive(
+        `[Copilot Agent] Dropped malformed MCP server entries: ${labels.join(", ")}`,
+      ),
     );
   }
 }

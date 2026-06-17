@@ -28,6 +28,7 @@ import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { McpSettingsStore } from "./settings/McpSettingsStore";
+import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
@@ -398,9 +399,15 @@ export default class CopilotAgentPlugin extends Plugin {
               fsDefaultMode: snap.defaultMode,
               vaultAllowlist: snap.allowlist,
               builtinAutoApprove: snap.autoApproveBuiltins,
+              mcpAutoApprove: snap.mcpAutoApprove,
             };
           },
           state: safetyState,
+          getMcpToolSourceMetadata: (req) =>
+            resolveMcpToolSourceMetadata(
+              typeof req.toolName === "string" ? req.toolName : undefined,
+              mcpSettingsStore.snapshot(),
+            ),
           extractVaultPath: (req) => {
             const r = req as { toolName?: unknown; args?: { path?: unknown } };
             const tool = typeof r.toolName === "string" ? r.toolName : "";
