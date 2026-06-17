@@ -1,7 +1,11 @@
 import { Notice } from "obsidian";
 import type { PluginDataIO } from "../auth/TokenStore";
 import { computeTrustEpoch, normalizeServerId } from "../mcp/McpIdentity";
-import type { McpServerConfig, McpServerId } from "../mcp/McpTypes";
+import type {
+  McpServerConfig,
+  McpServerId,
+  McpServerRuntimeSnapshot,
+} from "../mcp/McpTypes";
 import { redactSensitive } from "../mcp/redactSensitive";
 
 interface PersistedShapeWithMcp {
@@ -10,6 +14,12 @@ interface PersistedShapeWithMcp {
 }
 
 type NotifyFn = (message: string) => void;
+
+export interface McpSettingsMutationResult {
+  serverId: McpServerId;
+  trustEpochChanged: boolean;
+  removed?: boolean;
+}
 
 const RUNTIME_KEYS = new Set([
   "status",
@@ -83,18 +93,43 @@ export class McpSettingsStore {
   }
 
   async add(server: McpServerConfig): Promise<void> {
-    const normalized = sanitizeAndDedupeOrThrow([server])[0];
-    if (this.cached.some((existing) => existing.id === normalized.id)) {
-      throw new Error(`MCP server id "${normalized.id}" already exists.`);
-    }
-    this.cached = [...this.cached, normalized];
-    await this.persist();
+    await this.addServer(server);
   }
 
   async update(
     serverId: McpServerId,
     update: Partial<McpServerConfig>,
   ): Promise<void> {
+    await this.updateServer(serverId, update);
+  }
+
+  async remove(serverId: McpServerId): Promise<void> {
+    await this.removeServer(serverId);
+  }
+
+  async setEnabled(serverId: McpServerId, enabled: boolean): Promise<McpSettingsMutationResult> {
+    const existing = this.findOrThrow(serverId);
+    if (existing.enabled === enabled) {
+      return { serverId, trustEpochChanged: false };
+    }
+    return this.updateServer(serverId, { enabled } as Partial<McpServerConfig>);
+  }
+
+  async addServer(server: McpServerConfig): Promise<McpSettingsMutationResult> {
+    const normalized = sanitizeAndDedupeOrThrow([server])[0];
+    if (this.cached.some((existing) => existing.id === normalized.id)) {
+      throw new Error(`MCP server id "${normalized.id}" already exists.`);
+    }
+    this.cached = [...this.cached, normalized];
+    await this.persist();
+    return { serverId: normalized.id, trustEpochChanged: false };
+  }
+
+  async updateServer(
+    serverId: McpServerId,
+    update: Partial<McpServerConfig>,
+  ): Promise<McpSettingsMutationResult> {
+    const before = this.findOrThrow(serverId);
     let found = false;
     const next: McpServerConfig[] = this.cached.map((server): McpServerConfig => {
       if (server.id !== serverId) return server;
@@ -104,19 +139,43 @@ export class McpSettingsStore {
     if (!found) throw new Error(`MCP server id "${serverId}" was not found.`);
     this.cached = sanitizeAndDedupeOrThrow(next);
     await this.persist();
+    const after = this.findOrThrow(serverId);
+    return { serverId, trustEpochChanged: before.trustEpoch !== after.trustEpoch };
   }
 
-  async remove(serverId: McpServerId): Promise<void> {
+  async removeServer(serverId: McpServerId): Promise<McpSettingsMutationResult> {
     const next = this.cached.filter((server) => server.id !== serverId);
     if (next.length === this.cached.length) {
       throw new Error(`MCP server id "${serverId}" was not found.`);
     }
     this.cached = next;
     await this.persist();
+    return { serverId, trustEpochChanged: true, removed: true };
   }
 
-  async setEnabled(serverId: McpServerId, enabled: boolean): Promise<void> {
-    await this.update(serverId, { enabled } as Partial<McpServerConfig>);
+  async recordStatus(
+    serverId: McpServerId,
+    snapshot: McpServerRuntimeSnapshot,
+  ): Promise<McpSettingsMutationResult> {
+    const existing = this.findOrThrow(serverId);
+    this.cached = this.cached.map((server) =>
+      server.id === serverId
+        ? ({
+            ...server,
+            status: snapshot.status,
+            ...(snapshot.lastError ? { lastError: snapshot.lastError } : { lastError: undefined }),
+            ...(snapshot.toolCount !== undefined ? { toolCount: snapshot.toolCount } : {}),
+          } as McpServerConfig)
+        : server,
+    );
+    await this.persist();
+    return { serverId: existing.id, trustEpochChanged: false };
+  }
+
+  private findOrThrow(serverId: McpServerId): McpServerConfig {
+    const server = this.cached.find((entry) => entry.id === serverId);
+    if (!server) throw new Error(`MCP server id "${serverId}" was not found.`);
+    return server;
   }
 
   private persist(): Promise<void> {

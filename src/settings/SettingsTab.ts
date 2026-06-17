@@ -1,4 +1,5 @@
 import { App, Notice, PluginSettingTab, Setting, type Plugin } from "obsidian";
+import * as fs from "node:fs";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import type { TokenStore } from "../auth/TokenStore";
 import { DeviceFlowModal } from "../ui/DeviceFlowModal";
@@ -16,6 +17,9 @@ import type {
   VaultAwarenessMode,
 } from "./VaultAwarenessSettings";
 import type { ModelCatalog, ModelCatalogState } from "../sdk/ModelCatalog";
+import type { McpSettingsStore } from "./McpSettingsStore";
+import type { McpManager } from "../mcp/McpManager";
+import { McpServersSection } from "./McpServersSection";
 
 /**
  * Phase 3 settings. Surfaces the auth state machine + persistence toggle.
@@ -29,6 +33,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
   private unavailableNoticeShown = false;
   private connectionDescEl?: HTMLElement;
   private connectionBtnSetting?: Setting;
+  private mcpSection?: McpServersSection;
 
   constructor(
     app: App,
@@ -37,12 +42,16 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     private readonly tokenStore: TokenStore,
     private readonly safetyStore?: SafetySettingsStore,
     private readonly modelCatalog?: ModelCatalog,
+    private readonly mcpSettingsStore?: McpSettingsStore,
+    private readonly mcpManager?: McpManager,
   ) {
     super(app, plugin);
   }
 
   display(): void {
     const { containerEl } = this;
+    this.mcpSection?.dispose();
+    this.mcpSection = undefined;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Copilot Agent" });
 
@@ -195,6 +204,20 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
       this.renderVaultAwarenessSection(containerEl);
     }
 
+    if (this.mcpSettingsStore && this.mcpManager && this.safetyStore) {
+      const vaultRoot =
+        (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.() ??
+        "";
+      this.mcpSection = new McpServersSection({
+        store: this.mcpSettingsStore,
+        manager: this.mcpManager,
+        safetyStore: this.safetyStore,
+        vaultRoot,
+        pathExists: (path) => fs.existsSync(path),
+      });
+      this.mcpSection.mount(containerEl);
+    }
+
     // Subscribe AFTER all DOM is built so the first render lands correctly.
     this.unsubscribe?.();
     this.unsubscribe = this.authController.subscribe((state) =>
@@ -333,6 +356,8 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     this.unsubscribe = undefined;
     this.catalogUnsubscribe?.();
     this.catalogUnsubscribe = undefined;
+    this.mcpSection?.dispose();
+    this.mcpSection = undefined;
     this.modelDropdownContainer = undefined;
     this.unavailableNoticeShown = false;
     super.hide?.();

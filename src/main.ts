@@ -29,6 +29,7 @@ import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { McpSettingsStore } from "./settings/McpSettingsStore";
 import { McpManager } from "./mcp/McpManager";
+import type { McpServerId } from "./mcp/McpTypes";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
@@ -41,6 +42,40 @@ import {
   makeRuntimeJournal,
   type ConversationRuntimeFactory,
 } from "./domain/ConversationRuntime";
+
+export interface McpLifecycleController {
+  enableAllConfigured: () => Promise<void>;
+  reconcileConfiguredServers: () => Promise<void>;
+  unload: () => Promise<void>;
+}
+
+export function startMcpLifecycle(manager: Pick<McpLifecycleController, "enableAllConfigured">): Promise<void> {
+  return manager.enableAllConfigured();
+}
+
+export function reconcileMcpLifecycle(manager: Pick<McpLifecycleController, "reconcileConfiguredServers">): Promise<void> {
+  return manager.reconcileConfiguredServers();
+}
+
+export function disposeMcpLifecycle(manager: Pick<McpLifecycleController, "unload">): Promise<void> {
+  return manager.unload();
+}
+
+export async function disableMcpServerLifecycle(
+  manager: Pick<McpManager, "disable">,
+  serverId: McpServerId,
+): Promise<void> {
+  await manager.disable(serverId);
+}
+
+export async function removeMcpServerLifecycle(
+  manager: Pick<McpManager, "remove">,
+  safetyStore: Pick<SafetySettingsStore, "revokeGrantsForServer">,
+  serverId: McpServerId,
+): Promise<void> {
+  await manager.remove(serverId);
+  await safetyStore.revokeGrantsForServer(serverId);
+}
 
 /**
  * Phase 3 wiring:
@@ -148,8 +183,20 @@ export default class CopilotAgentPlugin extends Plugin {
       vaultRoot,
       serversProvider: () => mcpSettingsStore.snapshot(),
       notify: (message) => new Notice(message, 8000),
+      persistStatus: (serverId, snapshot) =>
+        mcpSettingsStore.recordStatus(serverId, snapshot).then(() => undefined),
+      settleTrackedCalls: async () => undefined,
     });
     this.mcpManager = mcpManager;
+    const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
+      void reconcileMcpLifecycle(mcpManager).catch((err) => {
+        console.warn("[copilot-agent] MCP lifecycle reconcile failed", err);
+      });
+    });
+    this.register(unsubscribeMcpSettings);
+    void startMcpLifecycle(mcpManager).catch((err) => {
+      console.warn("[copilot-agent] MCP startup failed", err);
+    });
 
     // v0.3 Phase 4: per-conversation runtime architecture. Replaces
     // the single global UndoJournal + AgentSession with a factory the
@@ -681,7 +728,10 @@ export default class CopilotAgentPlugin extends Plugin {
       tokenStore,
       safetySettingsStore,
       modelCatalog,
+      mcpSettingsStore,
+      mcpManager,
     );
+    this.register(() => settingsTab.hide());
     this.addSettingTab(settingsTab);
 
     registerChatView(this, {
@@ -746,12 +796,13 @@ export default class CopilotAgentPlugin extends Plugin {
     this.mcpManager = null;
     this.conversationsStore = null;
     this.disposeSharedSdkClient = null;
+    this.mcpSettingsStore = null;
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.
     await flushThenDispose(store, manager);
     if (mcpManager) {
-      await mcpManager.unload();
+      await disposeMcpLifecycle(mcpManager);
     }
     // v0.4 Phase 2: stop the shared catalog client AFTER the per-
     // conversation runtimes are torn down so we don't race them on

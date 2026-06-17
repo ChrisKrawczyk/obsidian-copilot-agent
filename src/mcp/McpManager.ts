@@ -16,11 +16,13 @@ export interface McpManagerOptions extends McpServerRuntimeOptions {
   persistStatus?: (serverId: McpServerId, snapshot: McpServerRuntimeSnapshot) => void | Promise<void>;
   notify?: (message: string) => void;
   runtimeFactory?: (config: McpServerConfig, options: McpServerRuntimeOptions) => McpServerRuntime;
+  settleTrackedCalls?: (serverId: McpServerId) => void | Promise<void>;
 }
 
 export class McpManager {
   private runtimes = new Map<McpServerId, McpServerRuntime>();
   private inventories = new Map<McpServerId, DiscoveredInventory>();
+  private listeners = new Set<() => void>();
 
   constructor(private readonly options: McpManagerOptions) {}
 
@@ -44,10 +46,17 @@ export class McpManager {
   async disable(serverId: McpServerId): Promise<void> {
     const runtime = this.runtimes.get(serverId);
     this.inventories.delete(serverId);
+    await this.settle(serverId);
     if (runtime) {
       await runtime.disable();
       await this.persist(serverId, runtime.snapshot());
+    } else {
+      this.emit();
     }
+  }
+
+  async remove(serverId: McpServerId): Promise<void> {
+    await this.unload(serverId);
   }
 
   async reconnect(serverId: McpServerId): Promise<void> {
@@ -60,18 +69,39 @@ export class McpManager {
       const runtime = this.runtimes.get(serverId);
       this.inventories.delete(serverId);
       this.runtimes.delete(serverId);
+      await this.settle(serverId);
       if (runtime) await runtime.unload();
+      this.emit();
       return;
     }
-    const runtimes = Array.from(this.runtimes.values());
+    const entries = Array.from(this.runtimes.entries());
     this.runtimes.clear();
     this.inventories.clear();
-    await Promise.all(runtimes.map((runtime) => runtime.unload()));
+    await Promise.all(
+      entries.map(async ([serverId, runtime]) => {
+        await this.settle(serverId);
+        await runtime.unload();
+      }),
+    );
+    this.emit();
   }
 
   async enableAllConfigured(): Promise<void> {
     const configs = this.options.serversProvider().filter((server) => server.enabled);
-    await Promise.all(configs.map((server) => this.enable(server.id).catch(() => undefined)));
+    await Promise.allSettled(configs.map((server) => this.enable(server.id)));
+  }
+
+  async reconcileConfiguredServers(): Promise<void> {
+    const configs = this.options.serversProvider();
+    const configuredIds = new Set(configs.map((server) => server.id));
+    await Promise.all(
+      Array.from(this.runtimes.keys()).map((serverId) =>
+        configuredIds.has(serverId) ? Promise.resolve() : this.unload(serverId),
+      ),
+    );
+    await Promise.all(
+      configs.filter((server) => !server.enabled).map((server) => this.disable(server.id)),
+    );
   }
 
   statusSnapshot(): readonly McpServerRuntimeSnapshot[] {
@@ -92,6 +122,11 @@ export class McpManager {
     return this.runtimes.get(serverId);
   }
 
+  subscribe(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
   private getOrCreate(config: McpServerConfig): McpServerRuntime {
     const existing = this.runtimes.get(config.id);
     if (existing) return existing;
@@ -109,8 +144,24 @@ export class McpManager {
   }
 
   private async persist(serverId: McpServerId, snapshot: McpServerRuntimeSnapshot): Promise<void> {
-    if (!this.options.persistStatus) return;
-    await this.options.persistStatus(serverId, sanitizeSnapshot(snapshot));
+    if (this.options.persistStatus) {
+      await this.options.persistStatus(serverId, sanitizeSnapshot(snapshot));
+    }
+    this.emit();
+  }
+
+  private async settle(serverId: McpServerId): Promise<void> {
+    await this.options.settleTrackedCalls?.(serverId);
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // Runtime snapshot listeners must not affect transport lifecycle.
+      }
+    }
   }
 }
 
