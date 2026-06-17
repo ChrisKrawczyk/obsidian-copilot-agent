@@ -27,6 +27,7 @@ import { createSearchTools } from "./tools/SearchTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
+import { McpSettingsStore } from "./settings/McpSettingsStore";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
@@ -56,6 +57,7 @@ export default class CopilotAgentPlugin extends Plugin {
   /** v0.4 Phase 2: disposes the shared CopilotClient backing the
    *  catalog. Safe to call multiple times; idempotent. */
   private disposeSharedSdkClient: (() => Promise<void>) | null = null;
+  mcpSettingsStore: McpSettingsStore | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -85,6 +87,11 @@ export default class CopilotAgentPlugin extends Plugin {
       loadData: () => this.loadData(),
       saveData: (data) => this.saveData(data),
     });
+    const mcpSettingsStore = new McpSettingsStore({
+      loadData: () => this.loadData(),
+      saveData: (data) => this.saveData(data),
+    });
+    this.mcpSettingsStore = mcpSettingsStore;
 
     // v0.3 Phase 3: ConversationsStore. Owns its own top-level
     // `conversations`/`activeConversationId`/`schemaVersion` keys but
@@ -122,6 +129,11 @@ export default class CopilotAgentPlugin extends Plugin {
       await safetySettingsStore.load();
     } catch (e) {
       console.error("[copilot-agent] safety settings load failed", e);
+    }
+    try {
+      await mcpSettingsStore.load();
+    } catch (e) {
+      console.error("[copilot-agent] MCP settings load failed", e);
     }
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;

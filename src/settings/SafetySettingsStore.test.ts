@@ -4,6 +4,7 @@ import {
   SafetySettingsStore,
 } from "./SafetySettingsStore";
 import type { PluginDataIO } from "../auth/TokenStore";
+import { computeTrustEpoch, formatMcpApprovalKey, normalizeServerId } from "../mcp/McpIdentity";
 
 /**
  * Minimal in-memory PluginDataIO double mirroring the Obsidian
@@ -126,6 +127,83 @@ describe("SafetySettingsStore — defaultModelId (v0.4 Phase 2)", () => {
     const snap = await store.load();
     expect(snap.defaultModelId).toBeNull();
     expect(DEFAULT_SAFETY_SETTINGS.defaultModelId).toBeNull();
+  });
+
+  describe("SafetySettingsStore — MCP auto-approve grants (v0.5 Phase 1)", () => {
+    const serverId = normalizeServerId("alpha");
+    const otherServerId = normalizeServerId("beta");
+    const epoch = computeTrustEpoch({
+      id: serverId,
+      name: "Alpha",
+      enabled: true,
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+      trustEpoch: "epoch_test",
+    });
+    const staleEpoch = computeTrustEpoch({
+      id: serverId,
+      name: "Alpha",
+      enabled: true,
+      transport: "stdio",
+      command: "node",
+      args: ["other.js"],
+      trustEpoch: "epoch_test",
+    });
+
+    it("looks up grants by exact server id, tool name, and current trust epoch", async () => {
+      const store = new SafetySettingsStore(memoryIo(null));
+      await store.load();
+      await store.setMcpAutoApprove(serverId, "tool", epoch, true);
+      expect(store.isMcpAutoApproved(serverId, "tool", epoch)).toBe(true);
+      expect(store.isMcpAutoApproved(otherServerId, "tool", epoch)).toBe(false);
+      expect(store.isMcpAutoApproved(serverId, "other", epoch)).toBe(false);
+    });
+
+    it("fails closed for stale trust epochs but preserves them on read", async () => {
+      const staleKey = formatMcpApprovalKey(serverId, "tool", staleEpoch);
+      const io = memoryIo({ safety: { mcpAutoApprove: { [staleKey]: true } } });
+      const store = new SafetySettingsStore(io);
+      await store.load();
+      expect(store.isMcpAutoApproved(serverId, "tool", epoch)).toBe(false);
+      await store.setDefaultMode("require-approval");
+      const persisted = io.peek() as { safety: { mcpAutoApprove: Record<string, boolean> } };
+      expect(persisted.safety.mcpAutoApprove[staleKey]).toBe(true);
+    });
+
+    it("round-trips pre-existing v0.4 Record<string, boolean> keys without throwing", async () => {
+      const io = memoryIo({
+        safety: { mcpAutoApprove: { "trusted-server": true, disabled: false } },
+      });
+      const store = new SafetySettingsStore(io);
+      await store.load();
+      expect(store.isMcpAutoApproved(serverId, "tool", epoch)).toBe(false);
+      await store.setExposeRawFsTools(true);
+      const persisted = io.peek() as { safety: { mcpAutoApprove: Record<string, boolean> } };
+      expect(persisted.safety.mcpAutoApprove["trusted-server"]).toBe(true);
+      expect(persisted.safety.mcpAutoApprove.disabled).toBe(false);
+    });
+
+    it("revokeGrantsForServer clears only that server's new-shape grants", async () => {
+      const ownKey = formatMcpApprovalKey(serverId, "tool", epoch);
+      const otherKey = formatMcpApprovalKey(otherServerId, "tool", epoch);
+      const io = memoryIo({
+        safety: {
+          mcpAutoApprove: {
+            [ownKey]: true,
+            [otherKey]: true,
+            "trusted-server": true,
+          },
+        },
+      });
+      const store = new SafetySettingsStore(io);
+      await store.load();
+      await store.revokeGrantsForServer(serverId);
+      const persisted = io.peek() as { safety: { mcpAutoApprove: Record<string, boolean> } };
+      expect(persisted.safety.mcpAutoApprove[ownKey]).toBeUndefined();
+      expect(persisted.safety.mcpAutoApprove[otherKey]).toBe(true);
+      expect(persisted.safety.mcpAutoApprove["trusted-server"]).toBe(true);
+    });
   });
 
   it("round-trips a string id through setDefaultModelId + load()", async () => {

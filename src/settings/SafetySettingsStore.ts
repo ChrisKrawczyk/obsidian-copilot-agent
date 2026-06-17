@@ -11,6 +11,8 @@
  */
 
 import type { PluginDataIO } from "../auth/TokenStore";
+import { formatMcpApprovalKey } from "../mcp/McpIdentity";
+import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
 import {
   DEFAULT_VAULT_AWARENESS_SETTINGS,
   mergeVaultAwarenessSettings,
@@ -86,6 +88,14 @@ export interface SafetySettings {
    * setting — `modelId` is captured per-conversation at creation time.
    */
   defaultModelId: string | null;
+
+  /**
+   * v0.5 MCP client: persistent MCP approval grants. New grants are keyed by
+   * formatMcpApprovalKey(stableServerId, toolName, trustEpoch). Legacy v0.4
+   * Record<string, boolean> entries are preserved on round-trip but ignored by
+   * current-epoch lookup unless they exactly match the new canonical key.
+   */
+  mcpAutoApprove: Record<string, boolean>;
 }
 
 export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
@@ -95,6 +105,7 @@ export const DEFAULT_SAFETY_SETTINGS: SafetySettings = {
   vaultAwareness: { ...DEFAULT_VAULT_AWARENESS_SETTINGS },
   exposeRawFsTools: true,
   defaultModelId: null,
+  mcpAutoApprove: {},
 };
 
 /** SDK kinds we surface as built-in toggles in the settings UI. */
@@ -139,6 +150,7 @@ export class SafetySettingsStore {
       vaultAwareness: { ...this.cached.vaultAwareness },
       exposeRawFsTools: this.cached.exposeRawFsTools,
       defaultModelId: this.cached.defaultModelId,
+      mcpAutoApprove: { ...this.cached.mcpAutoApprove },
     };
   }
 
@@ -195,6 +207,46 @@ export class SafetySettingsStore {
    */
   async setDefaultModelId(id: string | null): Promise<void> {
     this.cached = { ...this.cached, defaultModelId: id };
+    await this.persist();
+  }
+
+  isMcpAutoApproved(
+    serverId: McpServerId,
+    toolName: string,
+    trustEpoch: McpTrustEpoch,
+  ): boolean {
+    return (
+      this.cached.mcpAutoApprove[
+        formatMcpApprovalKey(serverId, toolName, trustEpoch)
+      ] === true
+    );
+  }
+
+  async setMcpAutoApprove(
+    serverId: McpServerId,
+    toolName: string,
+    trustEpoch: McpTrustEpoch,
+    enabled: boolean,
+  ): Promise<void> {
+    const key = formatMcpApprovalKey(serverId, toolName, trustEpoch);
+    const next = { ...this.cached.mcpAutoApprove };
+    if (enabled) {
+      next[key] = true;
+    } else {
+      delete next[key];
+    }
+    this.cached = { ...this.cached, mcpAutoApprove: next };
+    await this.persist();
+  }
+
+  async revokeGrantsForServer(serverId: McpServerId): Promise<void> {
+    const prefix = `mcp:${serverId}:`;
+    const next = Object.fromEntries(
+      Object.entries(this.cached.mcpAutoApprove).filter(
+        ([key]) => !key.startsWith(prefix),
+      ),
+    );
+    this.cached = { ...this.cached, mcpAutoApprove: next };
     await this.persist();
   }
 
@@ -271,5 +323,14 @@ function mergeWithDefaults(
             partial.defaultModelId.length > 0
           ? partial.defaultModelId
           : null,
+    mcpAutoApprove:
+      partial.mcpAutoApprove && typeof partial.mcpAutoApprove === "object"
+        ? Object.fromEntries(
+            Object.entries(partial.mcpAutoApprove).filter(
+              (entry): entry is [string, boolean] =>
+                typeof entry[1] === "boolean",
+            ),
+          )
+        : {},
   };
 }

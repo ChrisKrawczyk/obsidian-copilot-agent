@@ -69,7 +69,7 @@ The implementation is additive. With no MCP servers configured, or with every se
 
 ## Phase Status
 
-- [ ] **Phase 1: Persistence shape + stable MCP identity** — Add additive config/grant stores, trust epoch semantics, and no-MCP persistence invariants. [FR-001] [FR-009] [FR-012] [SC-012] [SC-019]
+- [x] **Phase 1: Persistence shape + stable MCP identity** — Add additive config/grant stores, trust epoch semantics, and no-MCP persistence invariants. [FR-001] [FR-009] [FR-012] [SC-012] [SC-019]
 - [ ] **Phase 2: SafetyPolicy gate + safe approval rendering** — Wire stable MCP identity through `decideSafety`, session grants, approval prompts, and Undo suppression before transports execute. [FR-011] [FR-012] [FR-031] [SC-003] [SC-004]
 - [ ] **Phase 3: MCP runtime substrate + bounded discovery** — Add SDK dependency and headless stdio/Streamable HTTP runtimes with protocol, security, timeout, pagination, and size bounds. [FR-004] [FR-005] [FR-006] [FR-007] [FR-008] [FR-019] [FR-022] [FR-023] [FR-025] [FR-028] [FR-029]
 - [ ] **Phase 4: Settings UI + plugin lifecycle orchestration** — Add the MCP Servers settings section and lifecycle actions: load, start, stop, enable/disable, remove, reconnect, unload. [FR-002] [FR-003] [FR-017] [SC-001] [SC-017] [SC-019]
@@ -142,9 +142,9 @@ Add additive MCP configuration and auto-approval persistence with stable server 
 
 ### Quality Gates
 
-- [ ] `npm test`
-- [ ] `npm run typecheck`
-- [ ] `npm run build`
+- [x] `npm test`
+- [x] `npm run typecheck`
+- [x] `npm run build`
 
 ### Manual Verification
 
