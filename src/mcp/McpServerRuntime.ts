@@ -38,6 +38,7 @@ export interface McpServerRuntimeOptions {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
   now?: () => number;
+  onListChanged?: (serverId: McpServerConfig["id"]) => void;
 }
 
 export interface DiscoveredInventory {
@@ -60,6 +61,7 @@ export class McpServerRuntime {
   >();
   private sessionId: string | undefined;
   private listChangedSubscribed = false;
+  private crashAttempts: number[] = [];
 
   constructor(
     private readonly config: McpServerConfig,
@@ -77,6 +79,7 @@ export class McpServerRuntime {
       transport.onmessage = (message) => this.handleMessage(message);
       transport.onerror = (err) => this.setError(err);
       transport.onclose = () => {
+        this.rejectPending(new Error("MCP transport closed during request."));
         if (this.status === "connected") this.status = "disconnected";
       };
       await withTimeout(
@@ -122,12 +125,19 @@ export class McpServerRuntime {
       this.sessionId = undefined;
       this.tools = [];
       this.setError(err);
+      this.recordCrashAttempt();
       throw new Error(this.lastError);
     }
   }
 
-  async callTool(name: string, args: Record<string, unknown>, timeoutMs = MCP_CALL_TIMEOUT_MS): Promise<unknown> {
-    return this.request("tools/call", { name, arguments: args }, timeoutMs);
+  async callTool(name: string, args: Record<string, unknown>, timeoutMs = this.config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS): Promise<unknown> {
+    return this.request("tools/call", { name, arguments: args }, Math.min(timeoutMs, this.config.callTimeoutMs ?? timeoutMs));
+  }
+
+  async refreshInventory(): Promise<DiscoveredInventory> {
+    if (this.status !== "connected") throw new Error("MCP server is not connected.");
+    this.tools = await this.discoverTools();
+    return this.inventory();
   }
 
   async disable(): Promise<void> {
@@ -166,6 +176,14 @@ export class McpServerRuntime {
       tools: this.tools.map((tool) => Object.freeze({ ...tool })),
       ...(this.instructions ? { instructions: redactSensitive(this.instructions) } : {}),
     });
+  }
+
+  markInventoryRejected(reason: string): void {
+    this.lastError = redactSensitive(reason);
+  }
+
+  isCrashloop(): boolean {
+    return this.status === "crashloop";
   }
 
   hasListChangedSubscription(): boolean {
@@ -252,13 +270,18 @@ export class McpServerRuntime {
   }
 
   private handleMessage(message: JSONRPCMessage): void {
-    const maybe = message as { id?: string | number; result?: unknown; error?: { message?: string } };
+    const notification = message as { method?: string };
+    if (notification.method === "notifications/tools/list_changed") {
+      this.options.onListChanged?.(this.config.id);
+      return;
+    }
+    const maybe = message as { id?: string | number; result?: unknown; error?: { message?: string; code?: number | string; data?: unknown } };
     if (maybe.id === undefined) return;
     const pending = this.pending.get(maybe.id);
     if (!pending) return;
     this.pending.delete(maybe.id);
     if (maybe.error) {
-      pending.reject(new Error(redactSensitive(maybe.error.message ?? "MCP request failed.")));
+      pending.reject(new Error(redactSensitive(`JSON-RPC error: ${maybe.error.message ?? "MCP request failed."}`)));
     } else {
       pending.resolve(maybe.result);
     }
@@ -267,19 +290,34 @@ export class McpServerRuntime {
   private async close(): Promise<void> {
     const transport = this.transport;
     this.transport = null;
-    this.pending.forEach((pending) => pending.reject(new Error("MCP transport closed.")));
-    this.pending.clear();
+    this.rejectPending(new Error("MCP transport closed."));
     if (transport) await transport.close().catch((err) => this.setError(err));
   }
 
   private setError(err: unknown): void {
     const safe = sanitizeError(err);
     this.status = "error";
-    this.lastError = redactSensitive(`${safe.message}${safe.stack ? `\n${safe.stack}` : ""}`);
+    const stderr = this.stderrTail();
+    this.lastError = redactSensitive(`${safe.message}${safe.stack ? `\n${safe.stack}` : ""}${stderr ? `\nstderr:\n${stderr}` : ""}`);
   }
 
   private stderrTail(): string | undefined {
     return this.transport instanceof StdioTransport ? this.transport.getStderrTail() : undefined;
+  }
+
+  private rejectPending(err: Error): void {
+    this.pending.forEach((pending) => pending.reject(sanitizeError(err)));
+    this.pending.clear();
+  }
+
+  private recordCrashAttempt(): void {
+    const now = this.options.now?.() ?? Date.now();
+    this.crashAttempts = [...this.crashAttempts.filter((t) => now - t <= 5 * 60_000), now];
+    if (this.crashAttempts.length >= 5) {
+      this.status = "crashloop";
+      this.tools = [];
+      this.lastError = redactSensitive("MCP server entered crashloop after 5 failures in 5 minutes.");
+    }
   }
 }
 

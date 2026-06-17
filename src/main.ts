@@ -31,6 +31,8 @@ import { McpSettingsStore } from "./settings/McpSettingsStore";
 import { McpManager } from "./mcp/McpManager";
 import type { McpServerId } from "./mcp/McpTypes";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
+import { buildMcpToolRegistrySnapshot } from "./mcp/McpToolRegistry";
+import { createMcpSdkTools } from "./mcp/McpToolBridge";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
@@ -411,6 +413,23 @@ export default class CopilotAgentPlugin extends Plugin {
         now,
         vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
       });
+      const vaultTools = filterRawFsToolsIfGated(
+        [
+          ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ],
+        exposeRawFsToolsAtStartup,
+      );
+      const mcpSnapshot = () =>
+        buildMcpToolRegistrySnapshot({
+          inventory: mcpManager.inventorySnapshot(),
+          statuses: mcpManager.statusSnapshot(),
+          builtinToolNames: vaultTools.map((tool) => tool.name),
+          notify: (message) => new Notice(message, 8000),
+        });
 
       const session = new CopilotAgentSession({
         cliPath,
@@ -440,16 +459,9 @@ export default class CopilotAgentPlugin extends Plugin {
         // mid-session does not reach this runtime, nor any future
         // runtime built within this plugin instance — exactly the
         // FR-015 "next session start" semantic.
-        tools: filterRawFsToolsIfGated(
-          [
-            ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ],
-          exposeRawFsToolsAtStartup,
-        ),
+        tools: vaultTools,
+        mcpTools: () =>
+          createMcpSdkTools(mcpSnapshot(), { manager: mcpManager }) as unknown as import("./sdk/AgentSession").SdkTool[],
         safety: {
           config: () => {
             const snap = safetySettingsStore.snapshot();
@@ -502,6 +514,7 @@ export default class CopilotAgentPlugin extends Plugin {
             todayInTimezone,
             customBody: va.customBody,
             excludeRawFs: !exposeRawFsToolsAtStartup,
+            mcp: { tools: mcpSnapshot().tools },
           });
           return text || null;
         },

@@ -16,6 +16,7 @@ export interface McpServerConfigBase {
   name: string;
   enabled: boolean;
   trustEpoch: McpTrustEpoch;
+  callTimeoutMs?: number;
   [futureKey: string]: unknown;
 }
 

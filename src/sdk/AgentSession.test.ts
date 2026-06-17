@@ -177,6 +177,33 @@ describe("CopilotAgentSession", () => {
     await agent.dispose();
   });
 
+  test("MCP synthetic custom tools are handed to SDK session boundaries", async () => {
+    const h = makeFakeSdk();
+    let capturedTools: unknown;
+    h.client.createSession = async (opts) => {
+      capturedTools = opts.tools;
+      h.permissionHandler = opts.onPermissionRequest;
+      return h.session;
+    };
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => [{ name: formatSyntheticId(mcpServerId, "read__File") }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect((capturedTools as Array<{ name: string }>).map((t) => t.name)).toEqual([
+      "read_file",
+      "mcp__server-a__read__File",
+    ]);
+    await agent.dispose();
+  });
+
   test("init() is idempotent — concurrent callers share the same promise", async () => {
     const h = makeFakeSdk();
     const agent = makeAgent(h);

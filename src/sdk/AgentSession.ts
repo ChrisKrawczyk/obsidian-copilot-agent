@@ -9,16 +9,14 @@ import {
   type SafetyState,
 } from "../domain/SafetyPolicy";
 import { isVaultWriteToolName } from "../tools/WriteTools";
-import {
-  escapeMcpPlainText,
-  formatMcpApprovalText,
-  truncateMcpText,
-} from "./approvalText";
+import { formatMcpApprovalText } from "./approvalText";
 import { redactSensitive } from "../mcp/redactSensitive";
 import {
   parseSyntheticId,
   type McpToolSourceMetadata,
 } from "../mcp/McpToolIdentity";
+import type { McpToolRegistrySnapshot } from "../mcp/McpToolRegistry";
+import { normalizeMcpResult } from "../mcp/normalizeMcpResult";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -130,6 +128,8 @@ export interface AgentSessionOptions {
    * no custom tools (legacy Phase 1–4 behaviour).
    */
   tools?: SdkTool[];
+  /** MCP custom-tool snapshot producer. Read only at SDK session boundaries. */
+  mcpTools?: () => readonly SdkTool[] | McpToolRegistrySnapshot | undefined;
   /**
    * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
    * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
@@ -1050,6 +1050,19 @@ export class CopilotAgentSession implements AgentSession {
     return combined;
   }
 
+  private toolsForSession(): SdkTool[] | undefined {
+    const base = this.toolsList ? [...this.toolsList] : [];
+    let mcp: readonly SdkTool[] | McpToolRegistrySnapshot | undefined;
+    try {
+      mcp = this.opts.mcpTools?.();
+    } catch (e) {
+      console.warn("[AgentSession] MCP tools snapshot callback threw", e);
+    }
+    const mcpTools = Array.isArray(mcp) ? mcp : undefined;
+    const combined = [...base, ...(mcpTools ?? [])];
+    return combined.length > 0 ? combined : undefined;
+  }
+
   /**
    * Test probe — returns the text most recently handed to
    * `session.sendAndWait` for the first send and the most recent
@@ -1089,7 +1102,7 @@ export class CopilotAgentSession implements AgentSession {
       model: this.selectedModel,
       availableTools: ["builtin:*", "custom:*", "mcp:*"],
       streaming: true,
-      tools: this.toolsList,
+      tools: this.toolsForSession(),
       onPermissionRequest: (request: SdkPermissionRequest) =>
         this.handlePermission(request),
     });
@@ -1273,7 +1286,7 @@ export class CopilotAgentSession implements AgentSession {
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
-        tools: this.toolsList,
+        tools: this.toolsForSession(),
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
@@ -1344,7 +1357,7 @@ export class CopilotAgentSession implements AgentSession {
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
-        tools: this.toolsList,
+        tools: this.toolsForSession(),
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
@@ -1802,9 +1815,9 @@ export function classifyToolSource(
   toolName: string | undefined,
   customNames: Set<string>,
 ): "custom" | "mcp" | "builtin" {
-  // Strongest signal: name matches a tool we registered.
-  if (toolName && customNames.has(toolName)) return "custom";
   if (toolName && parseSyntheticId(toolName)) return "mcp";
+  // Strongest non-MCP signal: name matches a vault tool we registered.
+  if (toolName && customNames.has(toolName)) return "custom";
   // SDK kind hints. `custom-tool` is the wire shape for user-defined
   // tools we may have registered under an alias or via overrides.
   if (kind === "custom-tool") return "custom";
@@ -1951,7 +1964,7 @@ function sanitizeMcpMaybe(
 ): string | undefined {
   if (value === undefined) return undefined;
   if (source !== "mcp") return value;
-  return truncateMcpText(escapeMcpPlainText(redactSensitive(value)));
+  return normalizeMcpResult(value).content;
 }
 
 function extractText(resp: unknown): string | undefined {

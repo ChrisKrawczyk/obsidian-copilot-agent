@@ -44,11 +44,12 @@ export interface ToolCallBlockHandlers {
  * renderer calls this to decide whether to emit the Undo button.
  */
 export function shouldRenderUndoButton(
-  call: Pick<ToolCall, "outcome" | "undoId" | "undone" | "name">,
+  call: Pick<ToolCall, "outcome" | "undoId" | "undone" | "name" | "source">,
   handlers: Pick<ToolCallBlockHandlers, "onUndo" | "isUndoSuppressed">,
 ): boolean {
   if (call.outcome !== "completed") return false;
   if (!call.undoId) return false;
+  if (call.source === "mcp") return false;
   if (call.undone) return false;
   if (!handlers.onUndo) return false;
   if (call.name && handlers.isUndoSuppressed?.(call.name)) return false;

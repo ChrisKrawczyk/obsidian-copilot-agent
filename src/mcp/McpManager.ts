@@ -17,23 +17,37 @@ export interface McpManagerOptions extends McpServerRuntimeOptions {
   notify?: (message: string) => void;
   runtimeFactory?: (config: McpServerConfig, options: McpServerRuntimeOptions) => McpServerRuntime;
   settleTrackedCalls?: (serverId: McpServerId) => void | Promise<void>;
+  builtinToolNames?: readonly string[];
 }
 
 export class McpManager {
   private runtimes = new Map<McpServerId, McpServerRuntime>();
   private inventories = new Map<McpServerId, DiscoveredInventory>();
   private listeners = new Set<() => void>();
+  private connectPromises = new Map<McpServerId, Promise<void>>();
+  private inFlightCalls = new Map<McpServerId, number>();
+  private generations = new Map<McpServerId, number>();
+  private staleInventory = new Set<McpServerId>();
 
   constructor(private readonly options: McpManagerOptions) {}
 
   async enable(serverId: McpServerId): Promise<void> {
     const config = this.find(serverId);
     if (!config.enabled) return;
+    const existing = this.connectPromises.get(serverId);
+    if (existing) return existing;
+    const promise = this.enableInternal(serverId, config).finally(() => this.connectPromises.delete(serverId));
+    this.connectPromises.set(serverId, promise);
+    return promise;
+  }
+
+  private async enableInternal(serverId: McpServerId, config: McpServerConfig): Promise<void> {
     const runtime = this.getOrCreate(config);
     try {
       const inventory = await runtime.connect();
       assertNoSameServerDuplicateTools(inventory.tools);
-      this.inventories.set(serverId, inventory);
+      const accepted = this.rejectBuiltinCollisions(inventory, runtime);
+      this.inventories.set(serverId, accepted);
       await this.persist(serverId, runtime.snapshot());
     } catch (err) {
       this.inventories.delete(serverId);
@@ -45,6 +59,7 @@ export class McpManager {
 
   async disable(serverId: McpServerId): Promise<void> {
     const runtime = this.runtimes.get(serverId);
+    this.bumpGeneration(serverId);
     this.inventories.delete(serverId);
     await this.settle(serverId);
     if (runtime) {
@@ -60,6 +75,7 @@ export class McpManager {
   }
 
   async reconnect(serverId: McpServerId): Promise<void> {
+    this.bumpGeneration(serverId);
     await this.unload(serverId);
     await this.enable(serverId);
   }
@@ -67,6 +83,7 @@ export class McpManager {
   async unload(serverId?: McpServerId): Promise<void> {
     if (serverId) {
       const runtime = this.runtimes.get(serverId);
+      this.bumpGeneration(serverId);
       this.inventories.delete(serverId);
       this.runtimes.delete(serverId);
       await this.settle(serverId);
@@ -75,6 +92,7 @@ export class McpManager {
       return;
     }
     const entries = Array.from(this.runtimes.entries());
+    for (const [id] of entries) this.bumpGeneration(id);
     this.runtimes.clear();
     this.inventories.clear();
     await Promise.all(
@@ -118,6 +136,35 @@ export class McpManager {
     );
   }
 
+  async callTool(serverId: McpServerId, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    const config = this.find(serverId);
+    if (!config.enabled || !this.inventories.has(serverId)) {
+      throw cancelledError("MCP server is disabled, removed, or disconnected.");
+    }
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime || runtime.isCrashloop()) throw cancelledError("MCP server is unavailable.");
+    const generation = this.generations.get(serverId) ?? 0;
+    this.inFlightCalls.set(serverId, (this.inFlightCalls.get(serverId) ?? 0) + 1);
+    try {
+      const result = await runtime.callTool(toolName, args, config.callTimeoutMs);
+      if ((this.generations.get(serverId) ?? 0) !== generation || !this.find(serverId).enabled) {
+        throw cancelledError("MCP tool call was cancelled.");
+      }
+      return result;
+    } catch (err) {
+      if ((this.generations.get(serverId) ?? 0) !== generation) {
+        throw cancelledError("MCP tool call was cancelled.");
+      }
+      const snap = runtime.snapshot();
+      const stderr = snap.stderrTail ? `\nstderr:\n${snap.stderrTail}` : "";
+      throw new Error(redactSensitive(`${err instanceof Error ? err.message : String(err)}${stderr}`));
+    } finally {
+      const remaining = Math.max(0, (this.inFlightCalls.get(serverId) ?? 1) - 1);
+      if (remaining === 0) this.inFlightCalls.delete(serverId);
+      else this.inFlightCalls.set(serverId, remaining);
+    }
+  }
+
   getRuntimeForTest(serverId: McpServerId): McpServerRuntime | undefined {
     return this.runtimes.get(serverId);
   }
@@ -131,8 +178,8 @@ export class McpManager {
     const existing = this.runtimes.get(config.id);
     if (existing) return existing;
     const runtime = this.options.runtimeFactory
-      ? this.options.runtimeFactory(config, this.options)
-      : new McpServerRuntime(config, this.options);
+      ? this.options.runtimeFactory(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) })
+      : new McpServerRuntime(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) });
     this.runtimes.set(config.id, runtime);
     return runtime;
   }
@@ -154,6 +201,42 @@ export class McpManager {
     await this.options.settleTrackedCalls?.(serverId);
   }
 
+  private bumpGeneration(serverId: McpServerId): void {
+    this.generations.set(serverId, (this.generations.get(serverId) ?? 0) + 1);
+  }
+
+  private async handleListChanged(serverId: McpServerId): Promise<void> {
+    if ((this.inFlightCalls.get(serverId) ?? 0) > 0) {
+      this.staleInventory.add(serverId);
+      return;
+    }
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime) return;
+    try {
+      const inventory = await runtime.refreshInventory();
+      assertNoSameServerDuplicateTools(inventory.tools);
+      this.inventories.set(serverId, this.rejectBuiltinCollisions(inventory, runtime));
+      this.staleInventory.delete(serverId);
+      await this.persist(serverId, runtime.snapshot());
+    } catch (err) {
+      this.inventories.delete(serverId);
+      this.options.notify?.(redactSensitive(`[Copilot Agent] MCP inventory refresh failed: ${stringifyError(err)}`));
+      await this.persist(serverId, runtime.snapshot());
+    }
+  }
+
+  private rejectBuiltinCollisions(inventory: DiscoveredInventory, runtime: McpServerRuntime): DiscoveredInventory {
+    const builtin = new Set(this.options.builtinToolNames ?? []);
+    const tools = inventory.tools.filter((tool) => {
+      if (!builtin.has(tool.syntheticId)) return true;
+      const reason = `MCP tool "${tool.syntheticId}" collides with a built-in vault tool; built-in wins.`;
+      runtime.markInventoryRejected(reason);
+      this.options.notify?.(redactSensitive(`[Copilot Agent] ${reason}`));
+      return false;
+    });
+    return Object.freeze({ ...inventory, tools });
+  }
+
   private emit(): void {
     for (const listener of this.listeners) {
       try {
@@ -163,6 +246,12 @@ export class McpManager {
       }
     }
   }
+}
+
+function cancelledError(message: string): Error {
+  const err = new Error(message);
+  err.name = "CancelledError";
+  return err;
 }
 
 export function assertNoSameServerDuplicateTools(tools: readonly McpToolInventoryEntry[]): void {

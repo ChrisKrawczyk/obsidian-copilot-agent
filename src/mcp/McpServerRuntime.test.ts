@@ -101,6 +101,34 @@ describe("McpServerRuntime", () => {
     expect(rt.getVolatileSessionIdForTest()).toBeUndefined();
   });
 
+  test("tools/call timeout defaults to 60 seconds", async () => {
+    const transport = new HangingCallTransport();
+    const rt = runtime(transport);
+    await rt.connect();
+    vi.useFakeTimers();
+    try {
+      const call = rt.callTool("echo", {});
+      const expectation = expect(call).rejects.toThrow(/tools\/call.*timed out/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("five crashes in five minutes enter crashloop terminal state", async () => {
+    let now = 0;
+    const rt = runtime(new FakeTransport({}), config(), {
+      now: () => now,
+      transportFactory: () => new FakeTransport({ initialize: new Error("boom") }),
+    });
+    for (let i = 0; i < 5; i += 1) {
+      await expect(rt.connect()).rejects.toThrow();
+      now += 30_000;
+    }
+    expect(rt.snapshot()).toMatchObject({ status: "crashloop", toolCount: 0 });
+  });
+
   test("session id and SDK errors are redacted from snapshots", async () => {
     const transport = new FakeTransport(
       {
@@ -301,7 +329,6 @@ class FakeTransport implements Transport {
     this.noResponses = opts.noResponses ?? false;
     this.sessionId = opts.sessionId;
   }
-
   private readonly noResponses: boolean;
 
   async start(): Promise<void> {}
@@ -330,6 +357,29 @@ class FakeTransport implements Transport {
         this.onmessage?.({ jsonrpc: "2.0", id: m.id, result: response } as JSONRPCMessage);
       }
     }, 0);
+  }
+
+  async close(): Promise<void> {
+    this.onclose?.();
+  }
+}
+
+class HangingCallTransport implements Transport {
+  onmessage?: (message: JSONRPCMessage) => void;
+  onclose?: () => void;
+  requests: { method: string; params: unknown }[] = [];
+
+  async start(): Promise<void> {}
+
+  async send(message: JSONRPCMessage): Promise<void> {
+    const m = message as { id?: string | number; method?: string; params?: unknown };
+    if (m.id === undefined) return;
+    this.requests.push({ method: m.method ?? "", params: m.params });
+    if (m.method === "initialize") {
+      setTimeout(() => this.onmessage?.({ jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} } } } as JSONRPCMessage), 0);
+    } else if (m.method === "tools/list") {
+      setTimeout(() => this.onmessage?.({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "echo" }] } } as JSONRPCMessage), 0);
+    }
   }
 
   async close(): Promise<void> {

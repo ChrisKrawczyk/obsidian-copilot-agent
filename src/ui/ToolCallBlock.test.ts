@@ -58,13 +58,13 @@ describe("shouldRenderUndoButton — Undo suppression (FR-016)", () => {
       expect(truncated.endsWith(MCP_TEXT_TRUNCATION_MARKER)).toBe(true);
     });
 
-    test("vault Undo behavior remains preserved", () => {
+    test("vault Undo behavior remains preserved and MCP fake undo is suppressed", () => {
       expect(shouldRenderUndoButton(call(), { onUndo: vi.fn() })).toBe(true);
       expect(
         shouldRenderUndoButton(call({ source: "mcp", undoId: "undo-1" }), {
           onUndo: vi.fn(),
         }),
-      ).toBe(true);
+      ).toBe(false);
     });
   });
 
