@@ -40,6 +40,9 @@ export interface McpServerRuntimeSnapshot {
   status: McpRuntimeStatus;
   lastError?: string;
   toolCount?: number;
+  instructions?: string;
+  protocolVersion?: string;
+  stderrTail?: string;
 }
 
 export interface McpServerRedactedSnapshot {
@@ -49,4 +52,13 @@ export interface McpServerRedactedSnapshot {
   transport: McpTransport;
   status?: McpRuntimeStatus;
   lastError?: string;
+}
+
+export interface McpToolInventoryEntry {
+  serverId: McpServerId;
+  serverName: string;
+  toolName: string;
+  syntheticId: string;
+  description?: string;
+  inputSchema?: unknown;
 }

@@ -36,7 +36,7 @@ export function redactSensitive(text: string): string {
     .split(/\n/)
     .map((line) =>
       line.replace(
-        /^(\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*)(.*)$/i,
+        /(\b(?:export\s+)?([A-Z0-9_]+)\s*=\s*)([^\s]+)/gi,
         (match, prefix: string, key: string) =>
           ENV_KEY_PATTERN.test(key) ? `${prefix}${REDACTED}` : match,
       ),

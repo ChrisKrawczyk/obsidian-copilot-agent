@@ -28,6 +28,7 @@ import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { McpSettingsStore } from "./settings/McpSettingsStore";
+import { McpManager } from "./mcp/McpManager";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
@@ -59,6 +60,7 @@ export default class CopilotAgentPlugin extends Plugin {
    *  catalog. Safe to call multiple times; idempotent. */
   private disposeSharedSdkClient: (() => Promise<void>) | null = null;
   mcpSettingsStore: McpSettingsStore | null = null;
+  mcpManager: McpManager | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -139,6 +141,15 @@ export default class CopilotAgentPlugin extends Plugin {
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;
     const safetyState = new SafetyState();
+    const vaultRoot =
+      (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.() ??
+      baseDirectory;
+    const mcpManager = new McpManager({
+      vaultRoot,
+      serversProvider: () => mcpSettingsStore.snapshot(),
+      notify: (message) => new Notice(message, 8000),
+    });
+    this.mcpManager = mcpManager;
 
     // v0.3 Phase 4: per-conversation runtime architecture. Replaces
     // the single global UndoJournal + AgentSession with a factory the
@@ -435,10 +446,6 @@ export default class CopilotAgentPlugin extends Plugin {
         preamble: () => {
           const va = safetySettingsStore.snapshot().vaultAwareness;
           if (va.mode === "none") return null;
-          const vaultRoot =
-            (
-              this.app.vault.adapter as { getBasePath?: () => string }
-            ).getBasePath?.() ?? baseDirectory;
           const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
           const todayInTimezone = formatTodayInTimezone(new Date(), timezone);
           const text = assemblePreamble({
@@ -732,15 +739,20 @@ export default class CopilotAgentPlugin extends Plugin {
   async onunload(): Promise<void> {
     console.log("[copilot-agent] Unloading");
     const manager = this.conversationManager;
+    const mcpManager = this.mcpManager;
     const store = this.conversationsStore;
     const disposeShared = this.disposeSharedSdkClient;
     this.conversationManager = null;
+    this.mcpManager = null;
     this.conversationsStore = null;
     this.disposeSharedSdkClient = null;
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.
     await flushThenDispose(store, manager);
+    if (mcpManager) {
+      await mcpManager.unload();
+    }
     // v0.4 Phase 2: stop the shared catalog client AFTER the per-
     // conversation runtimes are torn down so we don't race them on
     // shutdown.

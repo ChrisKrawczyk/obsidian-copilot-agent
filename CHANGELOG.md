@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0] – Unreleased
+
+### Added
+
+- MCP client runtime substrate for stdio and Streamable HTTP, including exact-pinned `@modelcontextprotocol/sdk@1.29.0`, bounded initialize/discovery/call paths, stdio env filtering, HTTP redirect/SSRF policy, and immutable runtime status/inventory snapshots.
+
+### Bundle Size
+
+- NFR-005 Phase 3 measurement: pre-SDK `main.js` gzip 83,032 bytes; post-SDK/runtime `main.js` gzip 121,915 bytes; delta +38,883 bytes (≤80 KB gate passed). No waiver required.
+
 ## [0.4.0] – 2026-06-12
 
 ### Added
