@@ -31,9 +31,66 @@ describe("McpToolBridge", () => {
 
   test("isError and JSON-RPC error surface distinctly", async () => {
     const mcpErr = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "tool failed" }] })) } as never })[0];
-    await expect((mcpErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/tool failed/);
+    await expect((mcpErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/MCP tool reported error: tool failed/);
     const rpcErr = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(async () => ({ error: { message: "rpc failed" } })) } as never })[0];
-    await expect((rpcErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/rpc failed/);
+    await expect((rpcErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/MCP JSON-RPC error:[\s\S]*rpc failed/);
+  });
+
+  test("60s default timeout finalizes a failed call", async () => {
+    vi.useFakeTimers();
+    try {
+      const [tool] = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(() => new Promise(() => undefined)) } as never });
+      const call = (tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({});
+      const expectation = expect(call).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("removed between approval and dispatch aborts with cancelled", async () => {
+    const callTool = vi.fn();
+    const [tool] = createMcpSdkTools(snapshot(), {
+      manager: { callTool, statusSnapshot: () => [] } as never,
+      approval: async () => "approved",
+    });
+    await expect((tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toMatchObject({ name: "CancelledError" });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test("disabled between approval and dispatch aborts with cancelled", async () => {
+    const callTool = vi.fn();
+    const [tool] = createMcpSdkTools(snapshot(), {
+      manager: { callTool, statusSnapshot: () => [{ id: "s1" as McpServerId, status: "connected", enabled: false }] } as never,
+      approval: async () => "approved",
+    });
+    await expect((tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toMatchObject({ name: "CancelledError" });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test("server crash mid-call finalizes call with error", async () => {
+    const [tool] = createMcpSdkTools(snapshot(), {
+      manager: { callTool: vi.fn(async () => { throw new Error("server crashed"); }) } as never,
+    });
+    await expect((tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/server crashed/);
+  });
+
+  test("late responses after abort are discarded", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolve!: (value: unknown) => void;
+      const callTool = vi.fn(() => new Promise((r) => { resolve = r; }));
+      const [tool] = createMcpSdkTools(snapshot(), { manager: { callTool } as never, callTimeoutMs: 10 });
+      const call = (tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({});
+      const expectation = expect(call).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(10);
+      resolve({ content: [{ type: "text", text: "late ok" }] });
+      await vi.runAllTimersAsync();
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

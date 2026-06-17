@@ -129,7 +129,7 @@ export class McpServersSection {
     on(toggle, "click", () => void this.setEnabled(server, !server.enabled));
     const reconnect = child(row, "button", { text: "Reconnect", attr: { "aria-label": `Reconnect ${server.name}` } });
     reconnect.toggleAttribute("disabled", !server.enabled);
-    on(reconnect, "click", () => void this.options.manager.reconnect(server.id).catch((err: unknown) => this.noticeError(err)));
+    on(reconnect, "click", () => void this.options.manager.manualReconnect(server.id).catch((err: unknown) => this.noticeError(err)));
     const remove = child(row, "button", { text: "Remove", attr: { "aria-label": `Remove ${server.name}` } });
     on(remove, "click", () => void this.remove(server));
   }

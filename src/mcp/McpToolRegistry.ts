@@ -15,7 +15,7 @@ export interface McpToolRegistrySnapshot {
 
 export interface McpToolRegistryInput {
   inventory: readonly McpToolInventoryEntry[];
-  statuses?: readonly McpServerRuntimeSnapshot[];
+  statuses?: readonly (McpServerRuntimeSnapshot & { enabled?: boolean })[];
   builtinToolNames?: readonly string[];
   notify?: (message: string) => void;
 }
@@ -35,6 +35,7 @@ export class McpToolRegistry {
 
 export function buildMcpToolRegistrySnapshot(input: McpToolRegistryInput): McpToolRegistrySnapshot {
   const builtin = new Set(input.builtinToolNames ?? []);
+  const statuses = input.statuses ? new Map(input.statuses.map((status) => [status.id, status])) : undefined;
   const instructionsByServer: Record<string, string> = {};
   for (const status of input.statuses ?? []) {
     if (status.instructions) instructionsByServer[status.id] = status.instructions;
@@ -50,6 +51,10 @@ export function buildMcpToolRegistrySnapshot(input: McpToolRegistryInput): McpTo
   const accepted: McpRegisteredTool[] = [];
   const rejected: { serverId: McpServerId; toolName: string; reason: string }[] = [];
   for (const [serverId, tools] of byServer) {
+    const status = statuses?.get(serverId);
+    if (statuses && (!status || status.status !== "connected" || status.enabled === false)) {
+      continue;
+    }
     const seen = new Set<string>();
     const dup = tools.find((tool) => {
       if (seen.has(tool.toolName)) return true;

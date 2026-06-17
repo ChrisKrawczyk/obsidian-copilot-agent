@@ -68,7 +68,9 @@ export class McpServerRuntime {
     private readonly options: McpServerRuntimeOptions,
   ) {}
 
-  async connect(): Promise<DiscoveredInventory> {
+  async connect(options: { manual?: boolean } = {}): Promise<DiscoveredInventory> {
+    if (this.status === "crashloop" && !options.manual) return this.inventory();
+    if (options.manual) this.crashAttempts = [];
     this.status = "connecting";
     this.lastError = undefined;
     this.sessionId = undefined;
@@ -155,6 +157,12 @@ export class McpServerRuntime {
     this.sessionId = undefined;
     await this.close();
     return this.connect();
+  }
+
+  async manualReconnect(): Promise<DiscoveredInventory> {
+    this.sessionId = undefined;
+    await this.close();
+    return this.connect({ manual: true });
   }
 
   snapshot(): McpServerRuntimeSnapshot {

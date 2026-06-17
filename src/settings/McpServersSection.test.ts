@@ -68,6 +68,7 @@ function manager(statuses: McpServerRuntimeSnapshot[] = []) {
     enable: vi.fn(async () => undefined),
     disable: vi.fn(async () => undefined),
     reconnect: vi.fn(async () => undefined),
+    manualReconnect: vi.fn(async () => undefined),
     remove: vi.fn(async () => undefined),
     statusSnapshot: () => statuses,
     subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn); },
@@ -117,7 +118,7 @@ describe("McpServersSection", () => {
     expect(ctx.mgr.enable).toHaveBeenCalledTimes(3);
     ctx.root.byAria("Reconnect Alpha").click();
     await flush();
-    expect(ctx.mgr.reconnect).toHaveBeenCalledWith(normalizeServerId("alpha"));
+    expect(ctx.mgr.manualReconnect).toHaveBeenCalledWith(normalizeServerId("alpha"));
     ctx.root.byAria("Remove Alpha").click();
     await flush();
     expect(ctx.mgr.remove).toHaveBeenCalledWith(normalizeServerId("alpha"));

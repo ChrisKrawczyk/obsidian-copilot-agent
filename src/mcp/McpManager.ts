@@ -5,6 +5,7 @@ import type {
   McpToolInventoryEntry,
 } from "./McpTypes";
 import {
+  MCP_CALL_TIMEOUT_MS,
   McpServerRuntime,
   type DiscoveredInventory,
   type McpServerRuntimeOptions,
@@ -34,6 +35,7 @@ export class McpManager {
   async enable(serverId: McpServerId): Promise<void> {
     const config = this.find(serverId);
     if (!config.enabled) return;
+    if (isCrashloopRuntime(this.runtimes.get(serverId))) return;
     const existing = this.connectPromises.get(serverId);
     if (existing) return existing;
     const promise = this.enableInternal(serverId, config).finally(() => this.connectPromises.delete(serverId));
@@ -75,9 +77,38 @@ export class McpManager {
   }
 
   async reconnect(serverId: McpServerId): Promise<void> {
+    await this.manualReconnect(serverId);
+  }
+
+  async manualReconnect(serverId: McpServerId): Promise<void> {
+    const config = this.find(serverId);
+    if (!config.enabled) return;
+    const existing = this.connectPromises.get(serverId);
+    if (existing) return existing;
+    const promise = this.manualReconnectInternal(serverId, config).finally(() => this.connectPromises.delete(serverId));
+    this.connectPromises.set(serverId, promise);
+    return promise;
+  }
+
+  private async manualReconnectInternal(serverId: McpServerId, config: McpServerConfig): Promise<void> {
     this.bumpGeneration(serverId);
-    await this.unload(serverId);
-    await this.enable(serverId);
+    this.inventories.delete(serverId);
+    await this.settle(serverId);
+    const runtime = this.getOrCreate(config);
+    try {
+      const inventory = await (typeof (runtime as McpServerRuntime & { manualReconnect?: () => Promise<DiscoveredInventory> }).manualReconnect === "function"
+        ? (runtime as McpServerRuntime & { manualReconnect: () => Promise<DiscoveredInventory> }).manualReconnect()
+        : runtime.reconnect());
+      assertNoSameServerDuplicateTools(inventory.tools);
+      const accepted = this.rejectBuiltinCollisions(inventory, runtime);
+      this.inventories.set(serverId, accepted);
+      await this.persist(serverId, runtime.snapshot());
+    } catch (err) {
+      this.inventories.delete(serverId);
+      await this.persist(serverId, runtime.snapshot());
+      this.options.notify?.(redactSensitive(`[Copilot Agent] MCP server failed: ${stringifyError(err)}`));
+      throw err;
+    }
   }
 
   async unload(serverId?: McpServerId): Promise<void> {
@@ -142,11 +173,17 @@ export class McpManager {
       throw cancelledError("MCP server is disabled, removed, or disconnected.");
     }
     const runtime = this.runtimes.get(serverId);
-    if (!runtime || runtime.isCrashloop()) throw cancelledError("MCP server is unavailable.");
+    if (!runtime || isCrashloopRuntime(runtime)) throw cancelledError("MCP server is unavailable.");
     const generation = this.generations.get(serverId) ?? 0;
     this.inFlightCalls.set(serverId, (this.inFlightCalls.get(serverId) ?? 0) + 1);
     try {
-      const result = await runtime.callTool(toolName, args, config.callTimeoutMs);
+      const result = await withTimeout(
+        runtime.callTool(toolName, args, config.callTimeoutMs),
+        config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS,
+        "MCP tool call timed out.",
+        this.options.setTimeout,
+        this.options.clearTimeout,
+      );
       if ((this.generations.get(serverId) ?? 0) !== generation || !this.find(serverId).enabled) {
         throw cancelledError("MCP tool call was cancelled.");
       }
@@ -252,6 +289,33 @@ function cancelledError(message: string): Error {
   const err = new Error(message);
   err.name = "CancelledError";
   return err;
+}
+
+function isCrashloopRuntime(runtime: McpServerRuntime | undefined): boolean {
+  return typeof (runtime as McpServerRuntime & { isCrashloop?: () => boolean } | undefined)?.isCrashloop === "function" &&
+    (runtime as McpServerRuntime & { isCrashloop: () => boolean }).isCrashloop();
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+  setTimer: typeof setTimeout = setTimeout,
+  clearTimer: typeof clearTimeout = clearTimeout,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimer(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimer(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimer(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 export function assertNoSameServerDuplicateTools(tools: readonly McpToolInventoryEntry[]): void {

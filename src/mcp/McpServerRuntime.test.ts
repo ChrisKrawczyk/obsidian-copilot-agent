@@ -129,6 +129,31 @@ describe("McpServerRuntime", () => {
     expect(rt.snapshot()).toMatchObject({ status: "crashloop", toolCount: 0 });
   });
 
+  test("crashloop blocks automatic connect until manualReconnect resets attempts", async () => {
+    let now = 0;
+    const factory = vi.fn(() => new FakeTransport({ initialize: new Error("boom") }));
+    const rt = runtime(new FakeTransport({}), config(), {
+      now: () => now,
+      transportFactory: factory,
+    });
+    for (let i = 0; i < 5; i += 1) {
+      await expect(rt.connect()).rejects.toThrow();
+      now += 30_000;
+    }
+    expect(rt.snapshot()).toMatchObject({ status: "crashloop", toolCount: 0 });
+    factory.mockClear();
+    await rt.connect();
+    expect(factory).not.toHaveBeenCalled();
+    expect(rt.snapshot()).toMatchObject({ status: "crashloop", toolCount: 0 });
+    factory.mockImplementationOnce(() => new FakeTransport({
+      initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
+      "tools/list": { tools: [] },
+    }));
+    await rt.manualReconnect();
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(rt.snapshot()).toMatchObject({ status: "connected", toolCount: 0 });
+  });
+
   test("session id and SDK errors are redacted from snapshots", async () => {
     const transport = new FakeTransport(
       {

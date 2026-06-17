@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import { normalizeServerId } from "./McpIdentity";
 import { McpManager } from "./McpManager";
+import { buildMcpToolRegistrySnapshot } from "./McpToolRegistry";
 import type { McpServerConfig, McpToolInventoryEntry } from "./McpTypes";
 
 describe("McpManager MVR", () => {
@@ -29,6 +30,108 @@ describe("McpManager MVR", () => {
     reject(new Error("late"));
     await expect(call).rejects.toMatchObject({ name: "CancelledError" });
     expect(manager.inventorySnapshot()).toHaveLength(0);
+  });
+
+  test("fake-time tool-call timeout defaults to 60 seconds", async () => {
+    const s = config("s");
+    const manager = managerFor(s, runtime(s, { callTool: vi.fn(() => new Promise(() => undefined)) }));
+    await manager.enable(s.id);
+    vi.useFakeTimers();
+    try {
+      const call = manager.callTool(s.id, "x", {});
+      const expectation = expect(call).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("mid-call crash finalizes error and leaves terminal UI state", async () => {
+    const s = config("s");
+    let reject!: (err: Error) => void;
+    let crashed = false;
+    const manager = managerFor(s, runtime(s, {
+      callTool: vi.fn(() => new Promise((_resolve, rej) => { reject = rej; })),
+      isCrashloop: () => crashed,
+      snapshot: () => ({ id: s.id, status: crashed ? "crashloop" : "connected", toolCount: crashed ? 0 : 1 }),
+    }));
+    await manager.enable(s.id);
+    const call = manager.callTool(s.id, "x", {});
+    crashed = true;
+    reject(new Error("server crashed"));
+    await expect(call).rejects.toThrow(/server crashed/);
+    expect(manager.statusSnapshot()[0]).toMatchObject({ status: "crashloop", toolCount: 0 });
+  });
+
+  test("remove triggers abort cancelled", async () => {
+    const s = config("s");
+    let reject!: (err: Error) => void;
+    const manager = managerFor(s, runtime(s, { callTool: vi.fn(() => new Promise((_resolve, rej) => { reject = rej; })) }));
+    await manager.enable(s.id);
+    const call = manager.callTool(s.id, "x", {});
+    await manager.remove(s.id);
+    reject(new Error("late"));
+    await expect(call).rejects.toMatchObject({ name: "CancelledError" });
+  });
+
+  test("reconnect triggers abort cancelled", async () => {
+    const s = config("s");
+    let reject!: (err: Error) => void;
+    const manager = managerFor(s, runtime(s, { callTool: vi.fn(() => new Promise((_resolve, rej) => { reject = rej; })) }));
+    await manager.enable(s.id);
+    const call = manager.callTool(s.id, "x", {});
+    await manager.reconnect(s.id);
+    reject(new Error("late"));
+    await expect(call).rejects.toMatchObject({ name: "CancelledError" });
+  });
+
+  test("crashloop terminal state hard-disables server and removes registry tools", async () => {
+    const s = config("s");
+    let crashed = false;
+    const connect = vi.fn(async () => {
+      if (crashed) throw new Error("crashloop");
+      return { serverId: s.id, tools: [tool(s, "x")] };
+    });
+    const rt = runtime(s, {
+      connect,
+      isCrashloop: () => crashed,
+      snapshot: () => ({ id: s.id, status: crashed ? "crashloop" : "connected", toolCount: crashed ? 0 : 1 }),
+    });
+    const manager = managerFor(s, rt);
+    await manager.enable(s.id);
+    crashed = true;
+    await manager.enable(s.id);
+    expect(connect).toHaveBeenCalledTimes(1);
+    const snap = buildMcpToolRegistrySnapshot({
+      inventory: [tool(s, "x")],
+      statuses: manager.statusSnapshot(),
+    });
+    expect(snap.tools).toHaveLength(0);
+  });
+
+  test("crashloop enable is a no-op until manualReconnect resets attempts", async () => {
+    const s = config("s");
+    let crashed = false;
+    const connect = vi.fn(async () => ({ serverId: s.id, tools: [tool(s, "x")] }));
+    const rt = runtime(s, {
+      connect,
+      isCrashloop: () => crashed,
+      snapshot: () => ({ id: s.id, status: crashed ? "crashloop" : "connected", toolCount: crashed ? 0 : 1 }),
+      manualReconnect: vi.fn(async () => {
+        crashed = false;
+        return connect();
+      }),
+    });
+    const manager = managerFor(s, rt);
+    await manager.enable(s.id);
+    crashed = true;
+    await manager.enable(s.id);
+    expect(connect).toHaveBeenCalledTimes(1);
+    await manager.manualReconnect(s.id);
+    expect(rt.manualReconnect).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(crashed).toBe(false);
   });
 
   test("stderr is surfaced redacted on failure", async () => {
@@ -73,6 +176,7 @@ function runtime(s: McpServerConfig, overrides: Record<string, unknown> = {}) {
   const tools = [tool(s, "x")];
   return {
     connect: vi.fn(async () => ({ serverId: s.id, tools })),
+    manualReconnect: vi.fn(async () => ({ serverId: s.id, tools })),
     snapshot: () => ({ id: s.id, status: "connected", toolCount: tools.length }),
     disable: vi.fn(async () => undefined),
     unload: vi.fn(async () => undefined),

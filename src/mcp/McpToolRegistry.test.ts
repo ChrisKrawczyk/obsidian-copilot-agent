@@ -28,17 +28,41 @@ describe("McpToolRegistry", () => {
     const a = server("a");
     const notify = vi.fn();
     const snap = buildMcpToolRegistrySnapshot({
-      inventory: [tool(a, "bad/path"), tool(a, "safe")],
+      inventory: [tool(a, "bad/path"), tool(a, "bad\x07bell"), tool(a, "bad\x1bescape"), tool(a, "bad\x00nul"), tool(a, "safe")],
       builtinToolNames: ["mcp__a__safe"],
       notify,
     });
     expect(snap.tools).toHaveLength(0);
-    expect(snap.rejected).toHaveLength(2);
+    expect(snap.rejected).toHaveLength(5);
     expect(notify).toHaveBeenCalled();
   });
 
   test("absent inventory from disabled/disconnected/removed servers contributes zero tools", () => {
     expect(buildMcpToolRegistrySnapshot({ inventory: [] }).tools).toHaveLength(0);
+  });
+
+  test.each([
+    ["disconnected", { status: "disconnected" }],
+    ["disabled", { status: "connected", enabled: false }],
+    ["crashloop", { status: "crashloop" }],
+    ["connecting", { status: "connecting" }],
+  ] as const)("server with %s state contributes zero tools", (_name, status) => {
+    const a = server("a");
+    const snap = buildMcpToolRegistrySnapshot({
+      inventory: [tool(a, "cached")],
+      statuses: [{ id: a.id, ...status } as never],
+    });
+    expect(snap.tools).toHaveLength(0);
+  });
+
+  test("server removed from manager status map contributes zero tools", () => {
+    const a = server("a");
+    const b = server("b");
+    const snap = buildMcpToolRegistrySnapshot({
+      inventory: [tool(a, "cached")],
+      statuses: [{ id: b.id, status: "connected" }],
+    });
+    expect(snap.tools).toHaveLength(0);
   });
 
   test("instructions metadata is surfaced per server", () => {
