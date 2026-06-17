@@ -11,8 +11,10 @@ import {
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
 import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
+import { normalizeServerId } from "../mcp/McpIdentity";
+import { McpManager } from "../mcp/McpManager";
 import { formatSyntheticId } from "../mcp/McpToolIdentity";
-import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+import type { McpServerConfig, McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
 
 const mcpServerId = "server-a" as McpServerId;
 const mcpEpoch1 = "epoch_1" as McpTrustEpoch;
@@ -155,6 +157,109 @@ function makeAgent(
     },
     async () => handles.sdk,
   );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function attachStreamingHandlers(handles: FakeHandles) {
+  const handlers: {
+    delta?: (event: {
+      type: "assistant.message_delta";
+      data: { deltaContent: string };
+    }) => void;
+    toolStart?: (event: {
+      type: "tool.execution_start";
+      data: {
+        toolCallId: string;
+        toolName: string;
+        arguments?: Record<string, unknown>;
+        mcpServerName?: string;
+      };
+    }) => void;
+    toolComplete?: (event: {
+      type: "tool.execution_complete";
+      data: {
+        toolCallId: string;
+        success: boolean;
+        result?: { content?: string; detailedContent?: string };
+        error?: { code?: string; message: string };
+      };
+    }) => void;
+  } = {};
+  handles.session.on = (eventType, handler) => {
+    if (eventType === "assistant.message_delta") {
+      handlers.delta = handler as typeof handlers.delta;
+      return () => {
+        handlers.delta = undefined;
+      };
+    }
+    if (eventType === "tool.execution_start") {
+      handlers.toolStart = handler as typeof handlers.toolStart;
+      return () => {
+        handlers.toolStart = undefined;
+      };
+    }
+    if (eventType === "tool.execution_complete") {
+      handlers.toolComplete = handler as typeof handlers.toolComplete;
+      return () => {
+        handlers.toolComplete = undefined;
+      };
+    }
+    return () => {};
+  };
+  return handlers;
+}
+
+function mcpTestServer(id: string): McpServerConfig {
+  return {
+    id: normalizeServerId(id),
+    name: id,
+    enabled: true,
+    trustEpoch: "epoch_test" as McpTrustEpoch,
+    transport: "stdio",
+    command: "node",
+    args: [],
+  };
+}
+
+function makeMcpLifecycleManager(
+  agents: Array<{
+    cancelPendingMcpApprovalsForServer: (serverId: string, reason?: string) => void;
+    cancelMcpCallsForServer: (serverId: string, reason?: string) => void;
+  }>,
+  reason: () => string,
+) {
+  const serverX = mcpTestServer("server-x");
+  const serverY = mcpTestServer("server-y");
+  const manager = new McpManager({
+    vaultRoot: "C:\\vault",
+    serversProvider: () => [serverX, serverY],
+    runtimeFactory: (config) =>
+      ({
+        connect: vi.fn(async () => ({ serverId: config.id, tools: [] })),
+        snapshot: () => ({ id: config.id, status: "connected" }),
+        disable: vi.fn(async () => undefined),
+        unload: vi.fn(async () => undefined),
+        callTool: vi.fn(async () => {
+          throw new Error("server disconnected");
+        }),
+      }) as never,
+    settleTrackedCalls: async (serverId) => {
+      for (const agent of agents) {
+        agent.cancelPendingMcpApprovalsForServer(serverId, reason());
+        agent.cancelMcpCallsForServer(serverId, reason());
+      }
+    },
+  });
+  return { manager, serverX: serverX.id, serverY: serverY.id };
 }
 
 describe("CopilotAgentSession", () => {
@@ -1193,6 +1298,286 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       ),
     ).toBe(false);
     await agent.dispose();
+  });
+
+  test.each([
+    ["disable", "MCP server disabled."],
+    ["disconnect", "MCP server disconnected."],
+  ])(
+    "M3 isolation: server-X %s cancels only matching in-flight MCP calls",
+    async (lifecycleEvent, reason) => {
+      const hA = makeFakeSdk();
+      const hB = makeFakeSdk();
+      const handlersA = attachStreamingHandlers(hA);
+      const handlersB = attachStreamingHandlers(hB);
+      const sendA = deferred<unknown>();
+      const sendB = deferred<unknown>();
+      hA.session.sendAndWait = (prompt) => {
+        hA.sendCalls.push(prompt);
+        return sendA.promise;
+      };
+      hB.session.sendAndWait = (prompt) => {
+        hB.sendCalls.push(prompt);
+        return sendB.promise;
+      };
+
+      const agentA = makeAgent(hA);
+      const agentB = makeAgent(hB);
+      await agentA.init();
+      await agentB.init();
+      const { manager, serverX } = makeMcpLifecycleManager(
+        [agentA, agentB],
+        () => reason,
+      );
+      await manager.enableAllConfigured();
+
+      const iterA = agentA.sendMessageStreaming("session A streaming text")[Symbol.asyncIterator]();
+      const iterB = agentB.sendMessageStreaming("session B uses MCP")[Symbol.asyncIterator]();
+      const firstA = iterA.next();
+      const firstB = iterB.next();
+      await new Promise((r) => setTimeout(r, 0));
+
+      handlersA.delta!({
+        type: "assistant.message_delta",
+        data: { deltaContent: "still " },
+      });
+      expect(await firstA).toEqual({
+        value: { type: "delta", text: "still " },
+        done: false,
+      });
+
+      handlersB.toolStart!({
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "b-mcp-x",
+          toolName: formatSyntheticId(serverX, "read"),
+          mcpServerName: "server-X",
+          arguments: { path: "x.md" },
+        },
+      });
+      expect(await firstB).toMatchObject({
+        value: {
+          type: "tool_call_start",
+          toolCall: {
+            id: "b-mcp-x",
+            source: "mcp",
+            outcome: "approved",
+          },
+        },
+        done: false,
+      });
+
+      const builtInStart = iterB.next();
+      handlersB.toolStart!({
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "b-shell",
+          toolName: "shell",
+          arguments: { command: "echo ok" },
+        },
+      });
+      expect(await builtInStart).toMatchObject({
+        value: {
+          type: "tool_call_start",
+          toolCall: {
+            id: "b-shell",
+            source: "builtin",
+            outcome: "approved",
+          },
+        },
+        done: false,
+      });
+
+      if (lifecycleEvent === "disable") {
+        await manager.disable(serverX);
+      } else {
+        await expect(manager.callTool(serverX, "read", {})).rejects.toThrow(
+          /server disconnected/,
+        );
+      }
+
+      expect(await iterB.next()).toEqual({
+        value: {
+          type: "tool_call_complete",
+          id: "b-mcp-x",
+          outcome: "cancelled",
+          errorMessage: reason,
+        },
+        done: false,
+      });
+      expect(hA.abortCalls).toBe(0);
+      expect(hB.abortCalls).toBe(0);
+
+      const secondA = iterA.next();
+      handlersA.delta!({
+        type: "assistant.message_delta",
+        data: { deltaContent: "streaming" },
+      });
+      expect(await secondA).toEqual({
+        value: { type: "delta", text: "streaming" },
+        done: false,
+      });
+
+      const builtInComplete = iterB.next();
+      handlersB.toolComplete!({
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "b-mcp-x",
+          success: true,
+          result: { content: "late mcp result" },
+        },
+      });
+      handlersB.toolComplete!({
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "b-shell",
+          success: true,
+          result: { content: "ok" },
+        },
+      });
+      expect(await builtInComplete).toEqual({
+        value: {
+          type: "tool_call_complete",
+          id: "b-shell",
+          outcome: "completed",
+          content: "ok",
+          errorMessage: undefined,
+        },
+        done: false,
+      });
+
+      sendA.resolve({ data: { content: "A done" } });
+      sendB.resolve({ data: { content: "B done" } });
+      expect(await iterA.next()).toMatchObject({
+        value: { type: "complete", content: "A done" },
+        done: false,
+      });
+      expect(await iterB.next()).toMatchObject({
+        value: { type: "complete", content: "B done" },
+        done: false,
+      });
+      expect((await iterA.next()).done).toBe(true);
+      expect((await iterB.next()).done).toBe(true);
+      await agentA.dispose();
+      await agentB.dispose();
+    },
+  );
+
+  test("M3 isolation: server-Y lifecycle cancellation leaves server-X calls in another session running", async () => {
+    const hA = makeFakeSdk();
+    const hB = makeFakeSdk();
+    const handlersA = attachStreamingHandlers(hA);
+    const handlersB = attachStreamingHandlers(hB);
+    const sendA = deferred<unknown>();
+    const sendB = deferred<unknown>();
+    hA.session.sendAndWait = (prompt) => {
+      hA.sendCalls.push(prompt);
+      return sendA.promise;
+    };
+    hB.session.sendAndWait = (prompt) => {
+      hB.sendCalls.push(prompt);
+      return sendB.promise;
+    };
+
+    const agentA = makeAgent(hA);
+    const agentB = makeAgent(hB);
+    await agentA.init();
+    await agentB.init();
+    const { manager, serverX, serverY } = makeMcpLifecycleManager(
+      [agentA, agentB],
+      () => "MCP server disconnected.",
+    );
+    await manager.enableAllConfigured();
+
+    const iterA = agentA.sendMessageStreaming("session A uses server Y")[Symbol.asyncIterator]();
+    const iterB = agentB.sendMessageStreaming("session B uses server X")[Symbol.asyncIterator]();
+    const firstA = iterA.next();
+    const firstB = iterB.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    handlersA.toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "a-mcp-y",
+        toolName: formatSyntheticId(serverY, "lookup"),
+        mcpServerName: "server-Y",
+        arguments: { query: "a" },
+      },
+    });
+    handlersB.toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "b-mcp-x",
+        toolName: formatSyntheticId(serverX, "lookup"),
+        mcpServerName: "server-X",
+        arguments: { query: "b" },
+      },
+    });
+    expect(await firstA).toMatchObject({
+      value: { type: "tool_call_start", toolCall: { id: "a-mcp-y", source: "mcp" } },
+      done: false,
+    });
+    expect(await firstB).toMatchObject({
+      value: { type: "tool_call_start", toolCall: { id: "b-mcp-x", source: "mcp" } },
+      done: false,
+    });
+
+    await manager.disable(serverY);
+
+    expect(await iterA.next()).toEqual({
+      value: {
+        type: "tool_call_complete",
+        id: "a-mcp-y",
+        outcome: "cancelled",
+        errorMessage: "MCP server disconnected.",
+      },
+      done: false,
+    });
+
+    const serverXComplete = iterB.next();
+    handlersA.toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "a-mcp-y",
+        success: true,
+        result: { content: "late y result" },
+      },
+    });
+    handlersB.toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "b-mcp-x",
+        success: true,
+        result: { content: "x result" },
+      },
+    });
+    expect(await serverXComplete).toEqual({
+      value: {
+        type: "tool_call_complete",
+        id: "b-mcp-x",
+        outcome: "completed",
+        content: "x result",
+        errorMessage: undefined,
+      },
+      done: false,
+    });
+    expect(hA.abortCalls).toBe(0);
+    expect(hB.abortCalls).toBe(0);
+
+    sendA.resolve({ data: { content: "A done" } });
+    sendB.resolve({ data: { content: "B done" } });
+    expect(await iterA.next()).toMatchObject({
+      value: { type: "complete", content: "A done" },
+      done: false,
+    });
+    expect(await iterB.next()).toMatchObject({
+      value: { type: "complete", content: "B done" },
+      done: false,
+    });
+    expect((await iterA.next()).done).toBe(true);
+    expect((await iterB.next()).done).toBe(true);
+    await agentA.dispose();
+    await agentB.dispose();
   });
 
   test("server cancellation clears resolved MCP approvals with NUL-separated cache keys", async () => {
