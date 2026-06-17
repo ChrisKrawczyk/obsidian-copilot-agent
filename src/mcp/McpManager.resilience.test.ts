@@ -77,10 +77,81 @@ describe("McpManager resilience", () => {
     expect(rt.unload).toHaveBeenCalledTimes(1);
     expect(manager.getRuntimeForTest(s.id)).toBeUndefined();
   });
+
+  test("pending MCP approval resolves cancelled on runtime disconnect before tools/call dispatch", async () => {
+    const s = config("stdio", "stdio");
+    let cancelPendingApproval!: (reason: string) => void;
+    const rt = runtime(s, {
+      callTool: vi.fn(async (name: string) => {
+        if (name === "x") throw new Error("server disconnected");
+        return { content: [{ type: "text", text: "unexpected" }] };
+      }),
+    });
+    const manager = managerFor(s, rt, {
+      settleTrackedCalls: () => cancelPendingApproval?.("MCP server disconnected."),
+    });
+    await manager.enable(s.id);
+    const pending = pendingApprovalDispatch(s, manager, (cancel) => {
+      cancelPendingApproval = cancel;
+    });
+
+    await expect(manager.callTool(s.id, "x", {})).rejects.toThrow(/server disconnected/);
+
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason: "MCP server disconnected." });
+    expect(rt.callTool).toHaveBeenCalledTimes(1);
+    expect(rt.callTool).toHaveBeenCalledWith("x", {}, undefined);
+  });
+
+  test("pending MCP approval resolves cancelled on crashloop transition before tools/call dispatch", async () => {
+    const s = config("stdio", "stdio");
+    let cancelPendingApproval!: (reason: string) => void;
+    const rt = runtime(s, {
+      connect: vi.fn(async () => { throw new Error("boot failed"); }),
+    });
+    const manager = managerFor(s, rt, {
+      settleTrackedCalls: () => cancelPendingApproval?.("MCP server disconnected."),
+    });
+    const pending = pendingApprovalDispatch(s, manager, (cancel) => {
+      cancelPendingApproval = cancel;
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      await expect(manager.enable(s.id)).rejects.toThrow(/boot failed/);
+    }
+
+    await expect(pending).resolves.toEqual({ kind: "cancelled", reason: "MCP server disconnected." });
+    expect(rt.callTool).not.toHaveBeenCalled();
+  });
 });
 
-function managerFor(s: McpServerConfig, rt: Record<string, unknown>): McpManager {
-  return new McpManager({ vaultRoot: "C:\\vault", serversProvider: () => [s], runtimeFactory: () => rt as never });
+function managerFor(
+  s: McpServerConfig,
+  rt: Record<string, unknown>,
+  overrides: Partial<ConstructorParameters<typeof McpManager>[0]> = {},
+): McpManager {
+  return new McpManager({
+    vaultRoot: "C:\\vault",
+    serversProvider: () => [s],
+    runtimeFactory: () => rt as never,
+    ...overrides,
+  });
+}
+
+type PendingApprovalChoice =
+  | { kind: "approved" }
+  | { kind: "cancelled"; reason: string };
+
+async function pendingApprovalDispatch(
+  s: McpServerConfig,
+  manager: McpManager,
+  captureCancel: (cancel: (reason: string) => void) => void,
+): Promise<PendingApprovalChoice> {
+  const approval = new Promise<PendingApprovalChoice>((resolve) => {
+    captureCancel((reason) => resolve({ kind: "cancelled", reason }));
+  });
+  const choice = await approval;
+  if (choice.kind === "approved") await manager.callTool(s.id, "read", {});
+  return choice;
 }
 
 function runtime(s: McpServerConfig, overrides: Record<string, unknown> = {}) {

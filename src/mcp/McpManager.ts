@@ -238,6 +238,7 @@ export class McpManager {
         runtime.clearVolatileSession?.();
         this.inventories.delete(serverId);
       }
+      await this.settle(serverId);
       throw new Error(redactSensitive(`${err instanceof Error ? err.message : String(err)}${stderr}`));
     } finally {
       this.notificationQueue.endCall(serverId);
@@ -313,7 +314,10 @@ export class McpManager {
         onStatus: async (status, lastError) => {
           const runtime = this.runtimes.get(serverId);
           if (runtime && status === "reconnecting") runtime.markReconnecting?.(lastError);
-          if (runtime && status === "crashloop") runtime.markCrashloop?.(lastError ?? "MCP server entered crashloop.");
+          if (runtime && status === "crashloop") {
+            runtime.markCrashloop?.(lastError ?? "MCP server entered crashloop.");
+            await this.settle(serverId);
+          }
           if (runtime) await this.persist(serverId, runtime.snapshot());
         },
       });
