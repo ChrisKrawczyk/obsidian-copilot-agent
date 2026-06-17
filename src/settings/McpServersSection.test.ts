@@ -164,8 +164,19 @@ describe("McpServersSection", () => {
     ctx.root.byAria("Environment").value = "GITHUB_TOKEN=x";
     ctx.root.byAria("Save MCP server").click();
     await flush();
-    expect(ctx.notices.join("\n")).toContain("GITHUB_TOKEN");
+    expect(ctx.notices.filter((n) => n === "Explicit MCP env keys override the denylist: GITHUB_TOKEN")).toHaveLength(1);
     expect(ctx.root.byText("override denylist")).toBeTruthy();
+  });
+
+  test("denylist-env Notice does not fire without denylisted keys", async () => {
+    const ctx = await mount();
+    ctx.root.byAria("Add MCP server").click();
+    ctx.root.byAria("Server id").value = "env";
+    ctx.root.byAria("Command").value = "node";
+    ctx.root.byAria("Environment").value = "SAFE_KEY=x";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n.startsWith("Explicit MCP env keys override the denylist:"))).toHaveLength(0);
   });
 
   test("Authorization storage Notice is one-shot", async () => {
@@ -182,7 +193,7 @@ describe("McpServersSection", () => {
     expect(ctx.notices.filter((n) => n === AUTHORIZATION_STORAGE_NOTICE)).toHaveLength(1);
   });
 
-  test("trust-epoch grant-revocation Notice is exactly once", async () => {
+  test("trust-epoch grant-revocation Notice fires once per epoch change", async () => {
     const ctx = await mount([stdio()]);
     for (const command of ["python", "ruby"]) {
       ctx.root.byAria("Edit Alpha").click();
@@ -190,8 +201,18 @@ describe("McpServersSection", () => {
       ctx.root.byAria("Save MCP server").click();
       await flush();
     }
-    expect(ctx.notices.filter((n) => n.includes("MCP grants were revoked"))).toHaveLength(1);
+    expect(ctx.notices.filter((n) => n.includes("MCP grants were revoked"))).toHaveLength(2);
     expect(ctx.safety.revokeGrantsForServer).toHaveBeenCalled();
+  });
+
+  test("trust-epoch grant-revocation Notice does not fire for non-epoch edits", async () => {
+    const ctx = await mount([stdio()]);
+    ctx.root.byAria("Edit Alpha").click();
+    ctx.root.byAria("Environment").value = "SAFE_KEY=x";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n.includes("MCP grants were revoked"))).toHaveLength(0);
+    expect(ctx.safety.revokeGrantsForServer).not.toHaveBeenCalled();
   });
 
   test("accessible row labels include server identity and status", async () => {

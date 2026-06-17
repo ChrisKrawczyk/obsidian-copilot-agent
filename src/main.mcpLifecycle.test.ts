@@ -9,6 +9,13 @@ import {
   startMcpLifecycle,
 } from "./main";
 
+const spawnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: spawnSpy };
+});
+
 function server(id: string, enabled = true): McpServerConfig {
   return { id: normalizeServerId(id), name: id, enabled, trustEpoch: "epoch_test" as McpServerConfig["trustEpoch"], transport: "stdio", command: "node", args: [] };
 }
@@ -21,10 +28,18 @@ function deferred<T>() {
 
 describe("main MCP lifecycle orchestration", () => {
   test("no servers means no spawn/fetch runtime construction", async () => {
+    spawnSpy.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
     const runtimeFactory = vi.fn();
     const manager = new McpManager({ vaultRoot: "C:\\vault", serversProvider: () => [], runtimeFactory });
-    await startMcpLifecycle(manager);
-    expect(runtimeFactory).not.toHaveBeenCalled();
+    try {
+      await startMcpLifecycle(manager);
+      expect(runtimeFactory).not.toHaveBeenCalled();
+      expect(spawnSpy).toHaveBeenCalledTimes(0);
+      expect(fetchSpy).toHaveBeenCalledTimes(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   test("enabled servers start asynchronously and in parallel with allSettled semantics", async () => {

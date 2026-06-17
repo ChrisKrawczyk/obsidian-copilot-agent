@@ -36,7 +36,7 @@ export class McpServersSection {
   private disposed = false;
   private unsubs: Array<() => void> = [];
   private domCleanups: Array<() => void> = [];
-  private grantNoticeKeys = new Set<string>();
+  private lastGrantNoticeEpochByServer = new Map<string, string>();
   private authStorageNoticeShown = false;
 
   constructor(private readonly options: McpServersSectionOptions) {}
@@ -212,7 +212,7 @@ export class McpServersSection {
       this.authStorageNoticeShown = true;
       this.notify(AUTHORIZATION_STORAGE_NOTICE);
     }
-    await this.handleTrustEpochChange(meta, config.name);
+    await this.handleTrustEpochChange(meta, config.name, config.trustEpoch);
     if (config.enabled) {
       void this.options.manager.enable(config.id).catch((err: unknown) => this.noticeError(err));
     }
@@ -232,12 +232,14 @@ export class McpServersSection {
     await this.handleTrustEpochChange(meta, server.name);
   }
 
-  private async handleTrustEpochChange(meta: McpSettingsMutationResult, name: string): Promise<void> {
+  private async handleTrustEpochChange(meta: McpSettingsMutationResult, name: string, trustEpoch?: string): Promise<void> {
     if (!meta.trustEpochChanged) return;
     await this.options.safetyStore.revokeGrantsForServer(meta.serverId);
-    const key = `${meta.serverId}`;
-    if (this.grantNoticeKeys.has(key)) return;
-    this.grantNoticeKeys.add(key);
+    if (trustEpoch) {
+      const lastNotifiedEpoch = this.lastGrantNoticeEpochByServer.get(meta.serverId);
+      if (lastNotifiedEpoch === trustEpoch) return;
+      this.lastGrantNoticeEpochByServer.set(meta.serverId, trustEpoch);
+    }
     this.notify(`${TRUST_REVOKE_NOTICE_PREFIX} ${name}.`);
   }
 
