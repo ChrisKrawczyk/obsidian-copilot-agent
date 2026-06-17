@@ -400,6 +400,10 @@ Record the as-built v0.5 architecture, user setup steps, security posture, bundl
 - [ ] **NFR-005:** CHANGELOG records measured gzip bundle delta or mitigation/waiver. [SC-001] [SC-002] [SC-005] [SC-017] [SC-018] [SC-020]
 - [ ] **SC-020:** README, Docs.md, and CHANGELOG satisfy the documentation FR and match implemented behavior. [SC-001] [SC-002] [SC-005] [SC-017] [SC-018] [SC-020]
 
+### Closing Notes
+
+- Phase 7 documentation completed locally: technical Docs.md, README MCP setup, CHANGELOG v0.5 entry, and verification gates recorded. Checkboxes intentionally left for orchestrator-managed status.
+
 ---
 
 ## Requirements Traceability Matrix
