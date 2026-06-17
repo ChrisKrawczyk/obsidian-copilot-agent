@@ -78,6 +78,7 @@ describe("McpToolBridge", () => {
 
   test("late responses after abort are discarded", async () => {
     vi.useFakeTimers();
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
     try {
       let resolve!: (value: unknown) => void;
       const callTool = vi.fn(() => new Promise((r) => { resolve = r; }));
@@ -88,8 +89,31 @@ describe("McpToolBridge", () => {
       resolve({ content: [{ type: "text", text: "late ok" }] });
       await vi.runAllTimersAsync();
       await expectation;
+      expect(debug).toHaveBeenCalled();
     } finally {
+      debug.mockRestore();
       vi.useRealTimers();
+    }
+  });
+
+  test("Stop cancellation forwards AbortSignal and logs late response discard", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+    try {
+      let resolve!: (value: unknown) => void;
+      const callTool = vi.fn((_server, _tool, _args, _options?: { signal?: AbortSignal }) =>
+        new Promise((r) => {
+          resolve = r;
+        }));
+      const [tool] = createMcpSdkTools(snapshot(), { manager: { callTool } as never });
+      const controller = new AbortController();
+      const call = (tool as never as { handler: (args: unknown, invocation?: unknown) => Promise<unknown> }).handler({ secret: "x" }, { signal: controller.signal });
+      controller.abort();
+      await expect(call).rejects.toMatchObject({ name: "CancelledError" });
+      resolve({ content: [{ type: "text", text: "late" }] });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(callTool.mock.calls[0][3]).toMatchObject({ signal: controller.signal });
+    } finally {
+      debug.mockRestore();
     }
   });
 });

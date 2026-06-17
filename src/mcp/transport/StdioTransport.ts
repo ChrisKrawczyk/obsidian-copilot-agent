@@ -22,6 +22,9 @@ export interface StdioTransportOptions {
   platform?: NodeJS.Platform;
   inheritedEnv?: NodeJS.ProcessEnv;
   spawn?: SpawnFn;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+  onForcedKill?: (event: { pid?: number; reason: string }) => void;
 }
 
 export type SpawnFn = (
@@ -40,6 +43,7 @@ export class StdioTransport implements Transport {
   private stderrTail = "";
   private stderrTruncated = false;
   private closed = false;
+  private closingPromise: Promise<void> | null = null;
 
   constructor(
     private readonly config: StdioTransportConfig,
@@ -88,13 +92,14 @@ export class StdioTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    if (this.closingPromise) return this.closingPromise;
     const child = this.child;
     if (!child) {
       this.finishClose();
       return;
     }
-    child.stdin.end();
-    this.finishClose();
+    this.closingPromise = this.closeChild(child);
+    return this.closingPromise;
   }
 
   getStderrTail(): string {
@@ -141,6 +146,56 @@ export class StdioTransport implements Transport {
     if (this.closed) return;
     this.closed = true;
     this.onclose?.();
+  }
+
+  private async closeChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+    try {
+      child.stdin.end();
+    } catch {
+      // best effort; fall through to signal sequence
+    }
+    if (await this.waitForClose(5_000)) return;
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // best effort; forced kill follows
+    }
+    if (await this.waitForClose(5_000)) return;
+    this.forceKill(child, "Stubborn MCP stdio child did not exit after stdin close and SIGTERM.");
+  }
+
+  private waitForClose(ms: number): Promise<boolean> {
+    if (this.closed) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const setTimer = this.options.setTimeout ?? setTimeout;
+      const clearTimer = this.options.clearTimeout ?? clearTimeout;
+      const timer = setTimer(() => {
+        cleanup();
+        resolve(this.closed);
+      }, ms);
+      const onClose = (): void => {
+        cleanup();
+        resolve(true);
+      };
+      const cleanup = (): void => {
+        clearTimer(timer);
+        this.child?.off?.("close", onClose);
+      };
+      this.child?.once?.("close", onClose);
+    });
+  }
+
+  private forceKill(child: ChildProcessWithoutNullStreams, reason: string): void {
+    try {
+      child.kill(process.platform === "win32" ? undefined : "SIGKILL");
+    } catch {
+      // force-kill is best effort
+    }
+    const event = { pid: child.pid, reason: redactSensitive(reason) };
+    this.options.onForcedKill?.(event);
+    // eslint-disable-next-line no-console -- documented redaction seam (Phase 6 forced stdio shutdown warning)
+    console.warn(redactSensitive(`[Copilot Agent] ${event.reason} pid=${event.pid ?? "unknown"}`));
+    this.finishClose();
   }
 }
 

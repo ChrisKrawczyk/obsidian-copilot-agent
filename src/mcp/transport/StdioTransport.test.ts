@@ -56,6 +56,48 @@ describe("StdioTransport", () => {
     expect(transport.getStderrTail()).toContain("stderr truncated");
     expect(transport.getStderrTail()).not.toContain("secret");
   });
+
+  test("stubborn child receives stdin close, SIGTERM, then forced kill warning", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const child = fakeChild();
+      const forced: unknown[] = [];
+      const transport = new StdioTransport(
+        { id: "server", command: "node", args: [] } as never,
+        { vaultRoot: "C:\\vault", spawn: () => child, onForcedKill: (event) => forced.push(event) },
+      );
+      await transport.start();
+      const close = transport.close();
+      expect(child.stdin.end).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await close;
+      expect(child.kill).toHaveBeenCalledTimes(2);
+      expect(forced).toHaveLength(1);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("clean exit after stdin close sends no kill", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = fakeChild();
+      const transport = new StdioTransport({ command: "node", args: [] }, { vaultRoot: "C:\\vault", spawn: () => child });
+      await transport.start();
+      const close = transport.close();
+      child.emit("close");
+      await close;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function fakeChild(): ChildProcessWithoutNullStreams {
@@ -67,5 +109,7 @@ function fakeChild(): ChildProcessWithoutNullStreams {
     write: (_chunk: unknown, cb: (err?: Error) => void) => cb(),
     end: vi.fn(),
   }) as unknown as ChildProcessWithoutNullStreams["stdin"];
+  child.kill = vi.fn() as unknown as ChildProcessWithoutNullStreams["kill"];
+  child.pid = 1234;
   return child;
 }

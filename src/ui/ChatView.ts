@@ -1187,6 +1187,7 @@ function toPersistedToolCalls(
       (tc) =>
         tc.outcome === "completed" ||
         tc.outcome === "errored" ||
+        tc.outcome === "cancelled" ||
         tc.outcome === "approved" ||
         tc.outcome === "denied",
     )
@@ -1198,6 +1199,7 @@ function toPersistedToolCalls(
       outcome: tc.outcome as
         | "completed"
         | "errored"
+        | "cancelled"
         | "approved"
         | "denied",
       detail: sanitizePersistedMcpText(tc.source, tc.detail),

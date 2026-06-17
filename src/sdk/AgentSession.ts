@@ -37,7 +37,7 @@ export interface AssistantToolCall {
    *   - `builtin` — bundled with the CLI runtime (shell, web_fetch, …)
    */
   source?: "custom" | "mcp" | "builtin";
-  outcome: "denied" | "approved" | "completed" | "errored" | "pending_approval";
+  outcome: "denied" | "approved" | "completed" | "errored" | "cancelled" | "pending_approval";
   detail?: string;
   /** Truncated JSON of the tool arguments for display. */
   argsPreview?: string;
@@ -177,7 +177,7 @@ export type StreamEvent =
   | {
       type: "tool_call_complete";
       id: string;
-      outcome: "completed" | "errored" | "denied";
+      outcome: "completed" | "errored" | "denied" | "cancelled";
       content?: string;
       errorMessage?: string;
     }
@@ -286,6 +286,7 @@ export interface AgentSession {
    * `swapModel()` if they confirm the switch.
    */
   hasPendingApprovals(): boolean;
+  cancelPendingMcpApprovalsForServer(serverId: string, reason?: string): void;
   /**
    * v0.4 Phase 5 (S1 — deferred-init contract): true iff `init()`
    * resolved successfully but `createSession()` was NOT issued because
@@ -748,9 +749,12 @@ export class CopilotAgentSession implements AgentSession {
           const existing = this.toolCallsThisTurn.find(
             (c) => c.id === d.toolCallId,
           );
-          const outcome: "completed" | "errored" = d.success
+          const errorText = typeof d.error?.message === "string" ? d.error.message : "";
+          const outcome: "completed" | "errored" | "cancelled" = d.success
             ? "completed"
-            : "errored";
+            : isAbortError(d.error) || /cancel/i.test(errorText)
+              ? "cancelled"
+              : "errored";
           const resultContent = sanitizeMcpMaybe(
             existing?.source,
             d.result?.detailedContent ?? d.result?.content ?? undefined,
@@ -1788,6 +1792,16 @@ export class CopilotAgentSession implements AgentSession {
    */
   public hasPendingApprovals(): boolean {
     return this.pendingApprovals.size > 0;
+  }
+
+  public cancelPendingMcpApprovalsForServer(serverId: string, reason = "MCP server disconnected."): void {
+    for (const [toolCallId, deferred] of this.pendingApprovals) {
+      const cached = this.resolvedApprovals.get(toolCallId);
+      if (cached?.mcpCacheKey?.startsWith(`${serverId}:`)) {
+        deferred.resolve({ kind: "reject", reason });
+        this.pendingApprovals.delete(toolCallId);
+      }
+    }
   }
 
   private cancelAllPendingApprovals(reason: string): void {

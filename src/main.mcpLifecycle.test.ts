@@ -116,4 +116,41 @@ describe("main MCP lifecycle orchestration", () => {
     await removeMcpServerLifecycle(manager, { revokeGrantsForServer: vi.fn(async () => undefined) }, active.id);
     expect(order).toEqual(["settle", "disable", "settle", "unload"]);
   });
+
+  test("unload runs server shutdown in parallel behind aggregate cap and is idempotent", async () => {
+    vi.useFakeTimers();
+    try {
+      const a = server("a");
+      const b = server("b");
+      const order: string[] = [];
+      const manager = new McpManager({
+        vaultRoot: "C:\\vault",
+        serversProvider: () => [a, b],
+        runtimeFactory: (config) => ({
+          connect: vi.fn(async () => ({ serverId: config.id, tools: [] })),
+          snapshot: () => ({ id: config.id, status: "connected" }),
+          disable: vi.fn(async () => undefined),
+          unload: vi.fn(() => new Promise<void>((resolve) => {
+            order.push(`start-${config.id}`);
+            setTimeout(() => {
+              order.push(`done-${config.id}`);
+              resolve();
+            }, 30_000);
+          })),
+        }) as never,
+      });
+      await manager.enable(a.id);
+      await manager.enable(b.id);
+      const unload = manager.unload();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(order).toEqual(["start-a", "start-b"]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await unload;
+      await manager.unload();
+      expect(manager.statusSnapshot()).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

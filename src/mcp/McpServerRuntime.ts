@@ -39,6 +39,7 @@ export interface McpServerRuntimeOptions {
   clearTimeout?: typeof clearTimeout;
   now?: () => number;
   onListChanged?: (serverId: McpServerConfig["id"]) => void;
+  onForcedKill?: (event: { serverId: McpServerConfig["id"]; pid?: number; reason: string }) => void;
 }
 
 export interface DiscoveredInventory {
@@ -62,6 +63,7 @@ export class McpServerRuntime {
   private sessionId: string | undefined;
   private listChangedSubscribed = false;
   private crashAttempts: number[] = [];
+  private lifecycleEpoch = 0;
 
   constructor(
     private readonly config: McpServerConfig,
@@ -71,6 +73,7 @@ export class McpServerRuntime {
   async connect(options: { manual?: boolean } = {}): Promise<DiscoveredInventory> {
     if (this.status === "crashloop" && !options.manual) return this.inventory();
     if (options.manual) this.crashAttempts = [];
+    const epoch = this.lifecycleEpoch;
     this.status = "connecting";
     this.lastError = undefined;
     this.sessionId = undefined;
@@ -91,6 +94,7 @@ export class McpServerRuntime {
         this.options.setTimeout,
         this.options.clearTimeout,
       );
+      this.assertNotAborted(epoch);
       const init = await this.request(
         "initialize",
         {
@@ -100,6 +104,7 @@ export class McpServerRuntime {
         },
         MCP_INITIALIZE_TIMEOUT_MS,
       );
+      this.assertNotAborted(epoch);
       const result = init as {
         protocolVersion?: string;
         capabilities?: { tools?: { listChanged?: boolean } };
@@ -113,6 +118,7 @@ export class McpServerRuntime {
       this.sessionId = transport.sessionId;
       this.instructions = truncate(result.instructions ?? "", MCP_INSTRUCTIONS_LIMIT);
       await this.notification("notifications/initialized");
+      this.assertNotAborted(epoch);
       if (!result.capabilities || result.capabilities.tools === undefined) {
         this.status = "error";
         this.lastError = "MCP server does not advertise tools capability.";
@@ -121,6 +127,7 @@ export class McpServerRuntime {
       }
       this.listChangedSubscribed = result.capabilities.tools.listChanged === true;
       this.tools = await this.discoverTools();
+      this.assertNotAborted(epoch);
       this.status = "connected";
       return this.inventory();
     } catch (err) {
@@ -136,6 +143,15 @@ export class McpServerRuntime {
     return this.request("tools/call", { name, arguments: args }, Math.min(timeoutMs, this.config.callTimeoutMs ?? timeoutMs));
   }
 
+  async callToolCancellable(
+    name: string,
+    args: Record<string, unknown>,
+    timeoutMs = this.config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return this.request("tools/call", { name, arguments: args }, Math.min(timeoutMs, this.config.callTimeoutMs ?? timeoutMs), signal);
+  }
+
   async refreshInventory(): Promise<DiscoveredInventory> {
     if (this.status !== "connected") throw new Error("MCP server is not connected.");
     this.tools = await this.discoverTools();
@@ -143,24 +159,24 @@ export class McpServerRuntime {
   }
 
   async disable(): Promise<void> {
-    this.sessionId = undefined;
+    this.lifecycleEpoch++;
     await this.close();
     this.status = "disabled";
   }
 
   async unload(): Promise<void> {
-    this.sessionId = undefined;
+    this.lifecycleEpoch++;
     await this.close();
   }
 
   async reconnect(): Promise<DiscoveredInventory> {
-    this.sessionId = undefined;
+    this.lifecycleEpoch++;
     await this.close();
     return this.connect();
   }
 
   async manualReconnect(): Promise<DiscoveredInventory> {
-    this.sessionId = undefined;
+    this.lifecycleEpoch++;
     await this.close();
     return this.connect({ manual: true });
   }
@@ -190,6 +206,22 @@ export class McpServerRuntime {
     this.lastError = redactSensitive(reason);
   }
 
+  markReconnecting(reason?: string): void {
+    this.status = "reconnecting";
+    if (reason) this.lastError = redactSensitive(reason);
+  }
+
+  markCrashloop(reason: string): void {
+    this.status = "crashloop";
+    this.tools = [];
+    this.sessionId = undefined;
+    this.lastError = redactSensitive(reason);
+  }
+
+  clearVolatileSession(): void {
+    this.sessionId = undefined;
+  }
+
   isCrashloop(): boolean {
     return this.status === "crashloop";
   }
@@ -205,7 +237,12 @@ export class McpServerRuntime {
   private createTransport(): Transport {
     if (this.options.transportFactory) return this.options.transportFactory(this.config);
     if (this.config.transport === "stdio") {
-      return new StdioTransport(this.config, { vaultRoot: this.options.vaultRoot });
+      return new StdioTransport(this.config, {
+        vaultRoot: this.options.vaultRoot,
+        setTimeout: this.options.setTimeout,
+        clearTimeout: this.options.clearTimeout,
+        onForcedKill: (event) => this.options.onForcedKill?.({ serverId: this.config.id, ...event }),
+      });
     }
     return createStreamableHttpTransport(this.config, this.options.fetch ?? fetch);
   }
@@ -252,15 +289,41 @@ export class McpServerRuntime {
     throw new Error("MCP tools/list page cap exceeded.");
   }
 
-  private request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+  private request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const transport = this.transport;
     if (!transport) return Promise.reject(new Error("MCP transport is not connected."));
     const id = this.nextId++;
+    let settled = false;
+    const cleanup = (): void => {
+      settled = true;
+      this.pending.delete(id);
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = (): void => {
+      if (settled) return;
+      void this.notification("notifications/cancelled", { requestId: id, reason: "user_cancelled" });
+      const pending = this.pending.get(id);
+      cleanup();
+      pending?.reject(cancelledError("MCP tool call was cancelled."));
+    };
+    if (signal?.aborted) {
+      return Promise.reject(cancelledError("MCP tool call was cancelled."));
+    }
     return withTimeout(
       new Promise<unknown>((resolve, reject) => {
-        this.pending.set(id, { resolve, reject });
+        this.pending.set(id, {
+          resolve: (value) => {
+            cleanup();
+            resolve(value);
+          },
+          reject: (err) => {
+            cleanup();
+            reject(err);
+          },
+        });
+        if (method === "tools/call") signal?.addEventListener("abort", abort, { once: true });
         void transport.send({ jsonrpc: "2.0", id, method, params } as JSONRPCMessage).catch((err) => {
-          this.pending.delete(id);
+          cleanup();
           reject(sanitizeError(err));
         });
       }),
@@ -268,13 +331,25 @@ export class McpServerRuntime {
       `MCP request "${method}" timed out.`,
       this.options.setTimeout,
       this.options.clearTimeout,
-    );
+    ).catch(async (err) => {
+      cleanup();
+      if (method === "tools/call" && !(err instanceof Error && err.name === "CancelledError")) {
+        void this.notification("notifications/cancelled", { requestId: id, reason: "user_cancelled" }).catch(() => undefined);
+      }
+      if (this.config.transport === "http" && this.sessionId) {
+        this.sessionId = undefined;
+        if (/404|not found/i.test(err instanceof Error ? err.message : String(err))) {
+          await this.close().catch(() => undefined);
+        }
+      }
+      throw err;
+    });
   }
 
-  private notification(method: string): Promise<void> {
+  private notification(method: string, params?: unknown): Promise<void> {
     const transport = this.transport;
     if (!transport) return Promise.resolve();
-    return transport.send({ jsonrpc: "2.0", method } as JSONRPCMessage);
+    return transport.send({ jsonrpc: "2.0", method, ...(params ? { params } : {}) } as JSONRPCMessage);
   }
 
   private handleMessage(message: JSONRPCMessage): void {
@@ -297,6 +372,8 @@ export class McpServerRuntime {
 
   private async close(): Promise<void> {
     const transport = this.transport;
+    await this.deleteHttpSessionBestEffort();
+    this.sessionId = undefined;
     this.transport = null;
     this.rejectPending(new Error("MCP transport closed."));
     if (transport) await transport.close().catch((err) => this.setError(err));
@@ -316,6 +393,36 @@ export class McpServerRuntime {
   private rejectPending(err: Error): void {
     this.pending.forEach((pending) => pending.reject(sanitizeError(err)));
     this.pending.clear();
+  }
+
+  private async deleteHttpSessionBestEffort(): Promise<void> {
+    if (this.config.transport !== "http" || !this.sessionId) return;
+    const sessionId = this.sessionId;
+    this.sessionId = undefined;
+    const controller = new AbortController();
+    const timer = (this.options.setTimeout ?? setTimeout)(() => controller.abort(), 1_500);
+    try {
+      await (this.options.fetch ?? fetch)(this.config.url, {
+        method: "DELETE",
+        headers: {
+          "Mcp-Session-Id": sessionId,
+          ...(this.protocolVersion ? { "MCP-Protocol-Version": this.protocolVersion } : {}),
+          ...(this.config.authorization ? { Authorization: this.config.authorization } : {}),
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      this.lastError = redactSensitive(`MCP HTTP session cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      (this.options.clearTimeout ?? clearTimeout)(timer);
+    }
+  }
+
+  private assertNotAborted(epoch: number): void {
+    if (this.lifecycleEpoch !== epoch) {
+      this.status = "disconnected";
+      throw cancelledError("MCP initialize was cancelled.");
+    }
   }
 
   private recordCrashAttempt(): void {
@@ -499,8 +606,15 @@ function withTimeout<T>(
 function sanitizeError(err: unknown): Error {
   const source = err instanceof Error ? err : new Error(String(err));
   const next = new Error(redactSensitive(source.message));
+  next.name = source.name;
   next.stack = source.stack ? redactSensitive(source.stack) : undefined;
   return next;
+}
+
+function cancelledError(message: string): Error {
+  const err = new Error(message);
+  err.name = "CancelledError";
+  return err;
 }
 
 function truncate(text: string, max: number): string | undefined {

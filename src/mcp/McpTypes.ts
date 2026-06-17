@@ -7,6 +7,7 @@ export type McpRuntimeStatus =
   | "disabled"
   | "disconnected"
   | "connecting"
+  | "reconnecting"
   | "connected"
   | "error"
   | "crashloop";

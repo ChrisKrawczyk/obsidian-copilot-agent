@@ -116,6 +116,74 @@ describe("McpServerRuntime", () => {
     }
   });
 
+  test("Stop during tools/call sends bounded cancellation payload and late response is ignored", async () => {
+    const transport = new HangingCallTransport();
+    const rt = runtime(transport);
+    await rt.connect();
+    const controller = new AbortController();
+    const call = rt.callToolCancellable("echo", { secret: "do-not-send" }, 60_000, controller.signal);
+    controller.abort();
+    await expect(call).rejects.toMatchObject({ name: "CancelledError" });
+    const cancel = transport.sentMessages.find((message) => (message as { method?: string }).method === "notifications/cancelled") as { params?: unknown } | undefined;
+    expect(cancel?.params).toEqual({ requestId: 3, reason: "user_cancelled" });
+    expect(JSON.stringify(cancel)).not.toContain("do-not-send");
+  });
+
+  test("unload mid-handshake aborts initialize and never publishes connected", async () => {
+    vi.useFakeTimers();
+    try {
+      const rt = runtime(new FakeTransport({}, { noResponses: true }));
+      const connect = rt.connect();
+      await rt.unload();
+      await expect(connect).rejects.toThrow(/cancelled|closed|timed out/i);
+      expect(rt.snapshot().status).not.toBe("connected");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Stop never sends notifications/cancelled for initialize", async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new FakeTransport({}, { noResponses: true });
+      const rt = runtime(transport);
+      const connect = rt.connect();
+      await rt.unload();
+      await expect(connect).rejects.toThrow(/cancelled|closed|timed out/i);
+      expect(transport.sentMessages.some((message) => (message as { method?: string }).method === "notifications/cancelled")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("HTTP shutdown attempts bounded DELETE with session id then clears it", async () => {
+    const fetchSpy = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }));
+    const transport = new FakeTransport(
+      {
+        initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
+        "tools/list": { tools: [] },
+      },
+      { sessionId: "sid-secret" },
+    );
+    const rt = runtime(transport, httpConfig(), { fetch: fetchSpy as never });
+    await rt.connect();
+    vi.useFakeTimers();
+    try {
+      const unload = rt.unload();
+      await vi.advanceTimersByTimeAsync(1_500);
+      await unload;
+      expect(fetchSpy).toHaveBeenCalledWith("https://example.com/mcp", expect.objectContaining({
+        method: "DELETE",
+        headers: expect.objectContaining({ "Mcp-Session-Id": "sid-secret" }),
+      }));
+      expect(rt.getVolatileSessionIdForTest()).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("five crashes in five minutes enter crashloop terminal state", async () => {
     let now = 0;
     const rt = runtime(new FakeTransport({}), config(), {
@@ -342,6 +410,7 @@ class FakeTransport implements Transport {
   onerror?: (error: Error) => void;
   requests: { method: string; params: unknown }[] = [];
   notifications: string[] = [];
+  sentMessages: JSONRPCMessage[] = [];
   sessionId?: string;
 
   constructor(
@@ -359,6 +428,7 @@ class FakeTransport implements Transport {
   async start(): Promise<void> {}
 
   async send(message: JSONRPCMessage): Promise<void> {
+    this.sentMessages.push(message);
     const m = message as { id?: string | number; method?: string; params?: { cursor?: string } };
     if (m.id === undefined) {
       if (m.method) this.notifications.push(m.method);
@@ -393,10 +463,12 @@ class HangingCallTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   onclose?: () => void;
   requests: { method: string; params: unknown }[] = [];
+  sentMessages: JSONRPCMessage[] = [];
 
   async start(): Promise<void> {}
 
   async send(message: JSONRPCMessage): Promise<void> {
+    this.sentMessages.push(message);
     const m = message as { id?: string | number; method?: string; params?: unknown };
     if (m.id === undefined) return;
     this.requests.push({ method: m.method ?? "", params: m.params });

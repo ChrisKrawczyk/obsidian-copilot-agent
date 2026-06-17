@@ -96,14 +96,22 @@ export class McpServersSection {
       },
     });
     child(row, "strong", { text: server.name });
-    child(row, "span", { text: ` ${server.id} · ${server.transport} · ${server.enabled ? "enabled" : "disabled"} · ${status}` });
+    const statusMeta = statusDisplay(status);
+    child(row, "span", { text: ` ${server.id} · ${server.transport} · ${server.enabled ? "enabled" : "disabled"} · ${statusMeta.icon} ${statusMeta.label}` });
     child(row, "span", { text: ` · tools: ${runtime?.toolCount ?? 0}` });
     const lastError = runtime?.lastError ?? stringField(server, "lastError");
     if (lastError) {
-      child(row, "div", {
+      child(row, "pre", {
         cls: "copilot-agent-mcp-last-error",
         attr: { role: "status", "aria-label": `Last error for ${server.name}` },
-        text: `Last error: ${redactSensitive(lastError)}`,
+        text: `Last error:\n${redactSensitive(lastError)}`,
+      });
+    }
+    if (runtime?.stderrTail) {
+      child(row, "pre", {
+        cls: "copilot-agent-mcp-stderr",
+        attr: { role: "status", "aria-label": `stderr for ${server.name}` },
+        text: `stderr:\n${redactSensitive(runtime.stderrTail)}`,
       });
     }
     const denyWarnings = server.transport === "stdio"
@@ -267,7 +275,20 @@ function child(parent: DomEl, tag: string, options: { text?: string; cls?: strin
     for (const [key, value] of Object.entries(options.attr ?? {})) el.setAttribute(key, value);
     parent.appendChild(el);
   }
+
   return el;
+}
+
+function statusDisplay(status: string): { icon: string; label: string } {
+  switch (status) {
+    case "connected": return { icon: "●", label: "connected" };
+    case "connecting": return { icon: "◌", label: "connecting" };
+    case "reconnecting": return { icon: "↻", label: "reconnecting" };
+    case "crashloop": return { icon: "⚠", label: "crashloop" };
+    case "error": return { icon: "!", label: "error" };
+    case "disabled": return { icon: "○", label: "disabled" };
+    default: return { icon: "○", label: "disconnected" };
+  }
 }
 
 function input(parent: DomEl, labelText: string, value: string): HTMLInputElement {

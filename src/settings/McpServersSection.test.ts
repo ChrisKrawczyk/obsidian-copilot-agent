@@ -157,6 +157,25 @@ describe("McpServersSection", () => {
     expect(error.innerHTML).toBe("");
   });
 
+  test("stderr and last-error render redacted plain text in pre blocks", async () => {
+    const ctx = await mount([stdio()], [{
+      id: normalizeServerId("alpha"),
+      status: "crashloop",
+      lastError: "https://example.com/mcp?token=secret Mcp-Session-Id: sid <b>bad</b>",
+      stderrTail: "OPENAI_API_KEY=sk-test\n<script>alert(1)</script>\n**markdown**",
+      toolCount: 0,
+    }]);
+    const error = ctx.root.byAria("Last error for Alpha");
+    const stderr = ctx.root.byAria("stderr for Alpha");
+    expect(error.tagName).toBe("pre");
+    expect(stderr.tagName).toBe("pre");
+    expect(`${error.textContent}\n${stderr.textContent}`).toContain("[REDACTED]");
+    expect(`${error.textContent}\n${stderr.textContent}`).toContain("<script>alert(1)</script>");
+    expect(`${error.textContent}\n${stderr.textContent}`).toContain("**markdown**");
+    expect(error.innerHTML).toBe("");
+    expect(stderr.innerHTML).toBe("");
+  });
+
   test("denylist-env warning and one-shot Notice on save", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
@@ -220,5 +239,10 @@ describe("McpServersSection", () => {
     const ctx = await mount([http()], [{ id: normalizeServerId("http"), status: "connected", toolCount: 3 }]);
     const rows = ctx.root.queryAll((e) => e.getAttribute("role") === "listitem");
     expect(rows[0].getAttribute("aria-label")).toContain("MCP server HTTP (http) status connected");
+  });
+
+  test("status indicator includes accessible text label, not color alone", async () => {
+    const ctx = await mount([http()], [{ id: normalizeServerId("http"), status: "reconnecting", toolCount: 0 }]);
+    expect(ctx.root.byText("↻ reconnecting")).toBeTruthy();
   });
 });

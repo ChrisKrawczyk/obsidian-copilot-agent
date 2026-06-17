@@ -10,6 +10,8 @@ import {
   type DiscoveredInventory,
   type McpServerRuntimeOptions,
 } from "./McpServerRuntime";
+import { McpNotificationQueue } from "./McpNotificationQueue";
+import { McpReconnectPolicy } from "./McpReconnectPolicy";
 import { redactSensitive } from "./redactSensitive";
 
 export interface McpManagerOptions extends McpServerRuntimeOptions {
@@ -26,9 +28,10 @@ export class McpManager {
   private inventories = new Map<McpServerId, DiscoveredInventory>();
   private listeners = new Set<() => void>();
   private connectPromises = new Map<McpServerId, Promise<void>>();
-  private inFlightCalls = new Map<McpServerId, number>();
   private generations = new Map<McpServerId, number>();
-  private staleInventory = new Set<McpServerId>();
+  private reconnectPolicies = new Map<McpServerId, McpReconnectPolicy>();
+  private notificationQueue = new McpNotificationQueue({ refresh: (serverId) => this.refreshInventory(serverId) });
+  private unloading = false;
 
   constructor(private readonly options: McpManagerOptions) {}
 
@@ -50,9 +53,12 @@ export class McpManager {
       assertNoSameServerDuplicateTools(inventory.tools);
       const accepted = this.rejectBuiltinCollisions(inventory, runtime);
       this.inventories.set(serverId, accepted);
+      this.policy(serverId).recordSuccess();
       await this.persist(serverId, runtime.snapshot());
     } catch (err) {
       this.inventories.delete(serverId);
+      runtime.clearVolatileSession?.();
+      if (config.transport === "stdio") this.policy(serverId).recordFailure(err);
       await this.persist(serverId, runtime.snapshot());
       this.options.notify?.(redactSensitive(`[Copilot Agent] MCP server failed: ${stringifyError(err)}`));
       throw err;
@@ -62,6 +68,8 @@ export class McpManager {
   async disable(serverId: McpServerId): Promise<void> {
     const runtime = this.runtimes.get(serverId);
     this.bumpGeneration(serverId);
+    this.notificationQueue.cancel(serverId);
+    this.policy(serverId).cancel();
     this.inventories.delete(serverId);
     await this.settle(serverId);
     if (runtime) {
@@ -92,19 +100,28 @@ export class McpManager {
 
   private async manualReconnectInternal(serverId: McpServerId, config: McpServerConfig): Promise<void> {
     this.bumpGeneration(serverId);
+    this.notificationQueue.cancel(serverId);
+    this.policy(serverId).recordSuccess();
+    await this.performManualReconnect(serverId, config);
+  }
+
+  private async performManualReconnect(serverId: McpServerId, config: McpServerConfig): Promise<void> {
     this.inventories.delete(serverId);
     await this.settle(serverId);
     const runtime = this.getOrCreate(config);
     try {
+      runtime.clearVolatileSession?.();
       const inventory = await (typeof (runtime as McpServerRuntime & { manualReconnect?: () => Promise<DiscoveredInventory> }).manualReconnect === "function"
         ? (runtime as McpServerRuntime & { manualReconnect: () => Promise<DiscoveredInventory> }).manualReconnect()
         : runtime.reconnect());
       assertNoSameServerDuplicateTools(inventory.tools);
       const accepted = this.rejectBuiltinCollisions(inventory, runtime);
       this.inventories.set(serverId, accepted);
+      this.policy(serverId).recordSuccess();
       await this.persist(serverId, runtime.snapshot());
     } catch (err) {
       this.inventories.delete(serverId);
+      runtime.clearVolatileSession?.();
       await this.persist(serverId, runtime.snapshot());
       this.options.notify?.(redactSensitive(`[Copilot Agent] MCP server failed: ${stringifyError(err)}`));
       throw err;
@@ -115,6 +132,8 @@ export class McpManager {
     if (serverId) {
       const runtime = this.runtimes.get(serverId);
       this.bumpGeneration(serverId);
+      this.notificationQueue.cancel(serverId);
+      this.policy(serverId).cancel();
       this.inventories.delete(serverId);
       this.runtimes.delete(serverId);
       await this.settle(serverId);
@@ -122,16 +141,21 @@ export class McpManager {
       this.emit();
       return;
     }
+    this.unloading = true;
     const entries = Array.from(this.runtimes.entries());
     for (const [id] of entries) this.bumpGeneration(id);
+    this.notificationQueue.cancel();
+    for (const policy of this.reconnectPolicies.values()) policy.cancel();
     this.runtimes.clear();
     this.inventories.clear();
-    await Promise.all(
+    await withTimeout(Promise.all(
       entries.map(async ([serverId, runtime]) => {
         await this.settle(serverId);
         await runtime.unload();
       }),
-    );
+    ), 20_000, "MCP unload aggregate timeout exceeded.", this.options.setTimeout, this.options.clearTimeout).catch(() => undefined);
+    this.reconnectPolicies.clear();
+    this.unloading = false;
     this.emit();
   }
 
@@ -155,7 +179,15 @@ export class McpManager {
 
   statusSnapshot(): readonly McpServerRuntimeSnapshot[] {
     return Object.freeze(
-      Array.from(this.runtimes.values()).map((runtime) => Object.freeze({ ...runtime.snapshot() })),
+      Array.from(this.runtimes.entries()).map(([id, runtime]) => {
+        const policy = this.reconnectPolicies.get(id);
+        const snap = runtime.snapshot();
+        return Object.freeze({
+          ...snap,
+          ...(policy?.status() === "reconnecting" && snap.status !== "crashloop" ? { status: "reconnecting" as const } : {}),
+          ...(policy?.status() === "crashloop" ? { status: "crashloop" as const } : {}),
+        });
+      }),
     );
   }
 
@@ -167,18 +199,24 @@ export class McpManager {
     );
   }
 
-  async callTool(serverId: McpServerId, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  async callTool(serverId: McpServerId, toolName: string, args: Record<string, unknown>, options: { signal?: AbortSignal } = {}): Promise<unknown> {
     const config = this.find(serverId);
-    if (!config.enabled || !this.inventories.has(serverId)) {
+    if (!config.enabled) {
       throw cancelledError("MCP server is disabled, removed, or disconnected.");
     }
+    if (!this.inventories.has(serverId) && config.transport === "http") await this.enable(serverId);
+    if (!this.inventories.has(serverId)) throw cancelledError("MCP server is disabled, removed, or disconnected.");
     const runtime = this.runtimes.get(serverId);
     if (!runtime || isCrashloopRuntime(runtime)) throw cancelledError("MCP server is unavailable.");
     const generation = this.generations.get(serverId) ?? 0;
-    this.inFlightCalls.set(serverId, (this.inFlightCalls.get(serverId) ?? 0) + 1);
+    this.notificationQueue.beginCall(serverId);
     try {
+      const signal = options.signal;
+      const call = typeof (runtime as McpServerRuntime & { callToolCancellable?: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable === "function"
+        ? (runtime as McpServerRuntime & { callToolCancellable: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable(toolName, args, config.callTimeoutMs, signal)
+        : runtime.callTool(toolName, args, config.callTimeoutMs);
       const result = await withTimeout(
-        runtime.callTool(toolName, args, config.callTimeoutMs),
+        call,
         config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS,
         "MCP tool call timed out.",
         this.options.setTimeout,
@@ -187,6 +225,7 @@ export class McpManager {
       if ((this.generations.get(serverId) ?? 0) !== generation || !this.find(serverId).enabled) {
         throw cancelledError("MCP tool call was cancelled.");
       }
+
       return result;
     } catch (err) {
       if ((this.generations.get(serverId) ?? 0) !== generation) {
@@ -194,11 +233,14 @@ export class McpManager {
       }
       const snap = runtime.snapshot();
       const stderr = snap.stderrTail ? `\nstderr:\n${snap.stderrTail}` : "";
+      if (config.transport === "stdio" && !this.unloading) this.policy(serverId).recordFailure(err);
+      if (config.transport === "http") {
+        runtime.clearVolatileSession?.();
+        this.inventories.delete(serverId);
+      }
       throw new Error(redactSensitive(`${err instanceof Error ? err.message : String(err)}${stderr}`));
     } finally {
-      const remaining = Math.max(0, (this.inFlightCalls.get(serverId) ?? 1) - 1);
-      if (remaining === 0) this.inFlightCalls.delete(serverId);
-      else this.inFlightCalls.set(serverId, remaining);
+      this.notificationQueue.endCall(serverId);
     }
   }
 
@@ -243,23 +285,41 @@ export class McpManager {
   }
 
   private async handleListChanged(serverId: McpServerId): Promise<void> {
-    if ((this.inFlightCalls.get(serverId) ?? 0) > 0) {
-      this.staleInventory.add(serverId);
-      return;
-    }
+    this.notificationQueue.notifyListChanged(serverId);
+  }
+
+  private async refreshInventory(serverId: McpServerId): Promise<void> {
     const runtime = this.runtimes.get(serverId);
     if (!runtime) return;
     try {
       const inventory = await runtime.refreshInventory();
       assertNoSameServerDuplicateTools(inventory.tools);
       this.inventories.set(serverId, this.rejectBuiltinCollisions(inventory, runtime));
-      this.staleInventory.delete(serverId);
       await this.persist(serverId, runtime.snapshot());
     } catch (err) {
-      this.inventories.delete(serverId);
       this.options.notify?.(redactSensitive(`[Copilot Agent] MCP inventory refresh failed: ${stringifyError(err)}`));
       await this.persist(serverId, runtime.snapshot());
     }
+  }
+
+  private policy(serverId: McpServerId): McpReconnectPolicy {
+    let policy = this.reconnectPolicies.get(serverId);
+    if (!policy) {
+      policy = new McpReconnectPolicy({
+        setTimeout: this.options.setTimeout,
+        clearTimeout: this.options.clearTimeout,
+        now: this.options.now,
+        onAttempt: () => this.enable(serverId).catch(() => undefined),
+        onStatus: async (status, lastError) => {
+          const runtime = this.runtimes.get(serverId);
+          if (runtime && status === "reconnecting") runtime.markReconnecting?.(lastError);
+          if (runtime && status === "crashloop") runtime.markCrashloop?.(lastError ?? "MCP server entered crashloop.");
+          if (runtime) await this.persist(serverId, runtime.snapshot());
+        },
+      });
+      this.reconnectPolicies.set(serverId, policy);
+    }
+    return policy;
   }
 
   private rejectBuiltinCollisions(inventory: DiscoveredInventory, runtime: McpServerRuntime): DiscoveredInventory {

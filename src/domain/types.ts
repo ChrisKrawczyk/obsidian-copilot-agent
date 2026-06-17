@@ -39,6 +39,7 @@ export interface ToolCall {
     | "approved"
     | "completed"
     | "errored"
+    | "cancelled"
     | "pending_approval";
   /** Optional message describing why (e.g. denial reason / error). */
   detail?: string;

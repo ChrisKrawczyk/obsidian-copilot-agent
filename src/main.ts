@@ -181,13 +181,26 @@ export default class CopilotAgentPlugin extends Plugin {
     const vaultRoot =
       (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.() ??
       baseDirectory;
+    const liveRuntimes = new Set<{
+      session: AgentSession;
+      conversationId: string;
+    }>();
     const mcpManager = new McpManager({
       vaultRoot,
       serversProvider: () => mcpSettingsStore.snapshot(),
       notify: (message) => new Notice(message, 8000),
       persistStatus: (serverId, snapshot) =>
         mcpSettingsStore.recordStatus(serverId, snapshot).then(() => undefined),
-      settleTrackedCalls: async () => undefined,
+      settleTrackedCalls: async (serverId) => {
+        await Promise.all(Array.from(liveRuntimes).map(async ({ session }) => {
+          session.cancelPendingMcpApprovalsForServer(serverId, "MCP server disconnected.");
+          await session.cancelCurrent();
+        }));
+      },
+      onForcedKill: (event) => {
+        // eslint-disable-next-line no-console -- documented redaction seam (Phase 6 forced MCP child shutdown warning)
+        console.warn(`[Copilot Agent] ${event.reason} pid=${event.pid ?? "unknown"} serverId=${event.serverId}`);
+      },
     });
     this.mcpManager = mcpManager;
     const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
@@ -355,11 +368,6 @@ export default class CopilotAgentPlugin extends Plugin {
     // that has actually been built. Lazily-uninstantiated runtimes
     // start with `currentToken` at construction time, so they don't
     // need broadcasts.
-    const liveRuntimes = new Set<{
-      session: AgentSession;
-      conversationId: string;
-    }>();
-
     // The factory that ConversationManager uses to materialize a
     // runtime on first activation. Captures all shared deps via
     // closure; binds tools to the per-runtime journal.
