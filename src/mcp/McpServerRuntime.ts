@@ -79,7 +79,13 @@ export class McpServerRuntime {
       transport.onclose = () => {
         if (this.status === "connected") this.status = "disconnected";
       };
-      await withTimeout(transport.start(), MCP_INITIALIZE_TIMEOUT_MS, "MCP initialize timed out.");
+      await withTimeout(
+        transport.start(),
+        MCP_INITIALIZE_TIMEOUT_MS,
+        "MCP initialize timed out.",
+        this.options.setTimeout,
+        this.options.clearTimeout,
+      );
       const init = await this.request(
         "initialize",
         {
@@ -179,19 +185,20 @@ export class McpServerRuntime {
   }
 
   private async discoverTools(): Promise<McpToolInventoryEntry[]> {
-    const started = (this.options.now ?? Date.now)();
+    const now = this.options.now ?? Date.now;
+    const deadline = now() + MCP_DISCOVERY_TIMEOUT_MS;
     const discovered: McpToolInventoryEntry[] = [];
     const seen = new Set<string>();
     let cursor: string | undefined;
     for (let page = 0; page < MCP_MAX_TOOL_LIST_PAGES; page += 1) {
-      const now = (this.options.now ?? Date.now)();
-      if (now - started > MCP_DISCOVERY_TIMEOUT_MS) {
+      const remaining = deadline - now();
+      if (remaining <= 0) {
         throw new Error("MCP tools/list aggregate timeout exceeded.");
       }
       const result = (await this.request(
         "tools/list",
         cursor ? { cursor } : {},
-        MCP_LIST_PAGE_TIMEOUT_MS,
+        Math.min(MCP_LIST_PAGE_TIMEOUT_MS, remaining),
       )) as { tools?: { name: string; description?: string; inputSchema?: unknown }[]; nextCursor?: string };
       for (const tool of result.tools ?? []) {
         if (!isValidMcpToolName(tool.name)) {
@@ -233,6 +240,8 @@ export class McpServerRuntime {
       }),
       timeoutMs,
       `MCP request "${method}" timed out.`,
+      this.options.setTimeout,
+      this.options.clearTimeout,
     );
   }
 
@@ -288,7 +297,10 @@ export function createStreamableHttpTransport(
   });
 }
 
-export function createMcpHttpFetchWrapper(baseFetch: typeof fetch): typeof fetch {
+export function createMcpHttpFetchWrapper(
+  baseFetch: typeof fetch,
+  bodyLimitBytes = MCP_HTTP_BODY_LIMIT_BYTES,
+): typeof fetch {
   return async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     assertNoTlsBypassOptions(init as Record<string, unknown>);
     let url = input instanceof Request ? new URL(input.url) : new URL(String(input));
@@ -302,7 +314,7 @@ export function createMcpHttpFetchWrapper(baseFetch: typeof fetch): typeof fetch
       const response = await baseFetch(validation.url, currentInit);
       const location = response.headers.get("location");
       if (![301, 302, 303, 307, 308].includes(response.status) || !location) {
-        return enforceResponseSize(response);
+        return enforceResponseSize(response, bodyLimitBytes);
       }
       const next = validateRedirectHop(validation.url, location, hop + 1, {
         allowPrivateNetwork: false,
@@ -323,6 +335,9 @@ export function negotiateProtocolVersion(
   serverReturns: string | undefined,
   transport: McpTransportKind,
 ): string {
+  if (transport === "legacy-sse") {
+    throw new Error("Unsupported MCP transport: legacy HTTP+SSE is not supported in v0.5.");
+  }
   if (serverReturns === MCP_ADVERTISED_PROTOCOL_VERSION) return serverReturns;
   if (
     serverReturns === MCP_COMPAT_PROTOCOL_VERSION &&
@@ -330,30 +345,105 @@ export function negotiateProtocolVersion(
   ) {
     return serverReturns;
   }
-  if (transport === "legacy-sse") {
-    throw new Error("Unsupported MCP transport: legacy HTTP+SSE is not supported in v0.5.");
-  }
   throw new Error(`Unsupported MCP protocol version: ${serverReturns ?? "(missing)"}.`);
 }
 
-async function enforceResponseSize(response: Response): Promise<Response> {
+function enforceResponseSize(response: Response, bodyLimitBytes: number): Response {
   const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (contentLength > MCP_HTTP_BODY_LIMIT_BYTES) {
-    throw new Error("MCP HTTP response exceeds 16 MiB.");
+  if (contentLength > bodyLimitBytes) {
+    throw new Error(`MCP HTTP response exceeds ${formatByteLimit(bodyLimitBytes)}.`);
   }
-  return response;
+  if (!response.body) return response;
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = contentType.toLowerCase().includes("text/event-stream")
+    ? capSseResponseBody(response.body, bodyLimitBytes)
+    : capResponseBody(response.body, bodyLimitBytes);
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+function capResponseBody(body: ReadableStream<Uint8Array>, bodyLimitBytes: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let consumed = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      consumed += value.byteLength;
+      if (consumed > bodyLimitBytes) {
+        throw new Error(`MCP HTTP response exceeds ${formatByteLimit(bodyLimitBytes)}.`);
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+function capSseResponseBody(body: ReadableStream<Uint8Array>, bodyLimitBytes: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let consumed = 0;
+  let eventBytes = 0;
+  let lineContentBytes = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      for (const byte of value) {
+        eventBytes += 1;
+        if (eventBytes > bodyLimitBytes) {
+          throw new Error(`MCP SSE event exceeds ${formatByteLimit(bodyLimitBytes)}.`);
+        }
+        if (byte === 10) {
+          if (lineContentBytes === 0) eventBytes = 0;
+          lineContentBytes = 0;
+        } else if (byte !== 13) {
+          lineContentBytes += 1;
+        }
+      }
+      consumed += value.byteLength;
+      if (consumed > bodyLimitBytes) {
+        throw new Error(`MCP HTTP response exceeds ${formatByteLimit(bodyLimitBytes)}.`);
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+function formatByteLimit(bytes: number): string {
+  return bytes === MCP_HTTP_BODY_LIMIT_BYTES ? "16 MiB" : `${bytes} bytes`;
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string,
+  setTimer: typeof setTimeout = setTimeout,
+  clearTimer: typeof clearTimeout = clearTimeout,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
+    const timer = setTimer(() => reject(new Error(message)), ms);
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        clearTimer(timer);
         resolve(value);
       },
       (err) => {
-        clearTimeout(timer);
+        clearTimer(timer);
         reject(sanitizeError(err));
       },
     );

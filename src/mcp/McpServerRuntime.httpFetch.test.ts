@@ -60,8 +60,55 @@ describe("MCP HTTP fetch wrapper", () => {
       ),
     ).rejects.toThrow(/TLS bypass/);
   });
+
+  test("Content-Length above the body cap rejects before reading", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response("ok", {
+          headers: { "content-length": "9" },
+        }),
+    );
+    await expect(
+      createMcpHttpFetchWrapper(fetch as unknown as typeof globalThis.fetch, 8)(
+        "https://example.com/mcp",
+      ),
+    ).rejects.toThrow(/exceeds 8 bytes/);
+  });
+
+  test("chunked HTTP response above the body cap rejects while reading", async () => {
+    const fetch = vi.fn(async () => new Response(chunked(["abc", "def"])));
+    const response = await createMcpHttpFetchWrapper(
+      fetch as unknown as typeof globalThis.fetch,
+      5,
+    )("https://example.com/mcp");
+    await expect(response.text()).rejects.toThrow(/HTTP response exceeds 5 bytes/);
+  });
+
+  test("SSE event above the accumulator cap rejects while reading", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(chunked(["data: aaa"]), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const response = await createMcpHttpFetchWrapper(
+      fetch as unknown as typeof globalThis.fetch,
+      8,
+    )("https://example.com/mcp");
+    await expect(response.text()).rejects.toThrow(/SSE event exceeds 8 bytes/);
+  });
 });
 
 function redirect(location: string): Response {
   return new Response(null, { status: 302, headers: { location } });
+}
+
+function chunked(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
 }

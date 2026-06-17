@@ -5,10 +5,12 @@ import { normalizeServerId } from "./McpIdentity";
 import type { McpServerConfig } from "./McpTypes";
 import {
   MCP_ADVERTISED_PROTOCOL_VERSION,
+  MCP_DISCOVERY_TIMEOUT_MS,
   MCP_INITIALIZE_TIMEOUT_MS,
   MCP_MAX_TOOL_LIST_PAGES,
   MCP_MAX_TOOLS_PER_SERVER,
   McpServerRuntime,
+  type McpServerRuntimeOptions,
   negotiateProtocolVersion,
 } from "./McpServerRuntime";
 
@@ -159,6 +161,42 @@ describe("McpServerRuntime", () => {
     ).rejects.toThrow(/tool cap/);
   });
 
+  test("tools/list discovery uses one aggregate deadline with shortened page timeout", async () => {
+    const timerDelays: number[] = [];
+    const pages: Record<string, unknown> = {
+      initialize: {
+        protocolVersion: "2025-06-18",
+        capabilities: { tools: {} },
+      },
+      "tools/list:": { tools: [], nextCursor: "c1" },
+      "tools/list:c1": { tools: [], nextCursor: "c2" },
+      "tools/list:c2": { tools: [], nextCursor: "c3" },
+      "tools/list:c3": { tools: [] },
+    };
+    const nowValues = [0, 0, 9_000, 18_000, MCP_DISCOVERY_TIMEOUT_MS - 4_000];
+    await runtime(new FakeTransport(pages), config(), {
+      now: () => nowValues.shift() ?? MCP_DISCOVERY_TIMEOUT_MS,
+      setTimeout: ((handler: TimerHandler, timeout?: number) => {
+        void handler;
+        timerDelays.push(timeout ?? 0);
+        return 0;
+      }) as typeof setTimeout,
+      clearTimeout: (() => undefined) as typeof clearTimeout,
+    }).connect();
+    expect(timerDelays.slice(2)).toEqual([10_000, 10_000, 10_000, 4_000]);
+
+    const expired = new FakeTransport({
+      initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
+      "tools/list": { tools: [] },
+    });
+    await expect(
+      runtime(expired, config(), {
+        now: vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(MCP_DISCOVERY_TIMEOUT_MS),
+      }).connect(),
+    ).rejects.toThrow(/aggregate timeout/);
+    expect(expired.requests.filter((r) => r.method === "tools/list")).toHaveLength(0);
+  });
+
   test("protocol matrix accepts supported versions and rejects legacy SSE/unknown", () => {
     const versions = ["2025-06-18", "2024-11-05", "1999-01-01"] as const;
     const transports = ["stdio", "http", "legacy-sse"] as const;
@@ -173,6 +211,7 @@ describe("McpServerRuntime", () => {
     );
     expect(outcomes).toContainEqual(["stdio", "2024-11-05", "2024-11-05"]);
     expect(outcomes).toContainEqual(["http", "2024-11-05", "2024-11-05"]);
+    expect(outcomes).toContainEqual(["legacy-sse", "2025-06-18", "reject"]);
     expect(outcomes).toContainEqual(["legacy-sse", "2024-11-05", "reject"]);
     expect(outcomes).toContainEqual(["stdio", "1999-01-01", "reject"]);
   });
@@ -184,7 +223,7 @@ describe("McpServerRuntime", () => {
     ["http", "2025-06-18", "2025-06-18"],
     ["http", "2024-11-05", "2024-11-05"],
     ["http", "1999-01-01", "reject"],
-    ["legacy-sse", "2025-06-18", "2025-06-18"],
+    ["legacy-sse", "2025-06-18", "reject"],
     ["legacy-sse", "2024-11-05", "reject"],
     ["legacy-sse", "1999-01-01", "reject"],
   ] as const)("protocol fixture %s %s -> %s", (transport, serverReturns, expected) => {
@@ -194,12 +233,30 @@ describe("McpServerRuntime", () => {
       expect(negotiateProtocolVersion(serverReturns, transport)).toBe(expected);
     }
   });
+
+  test.each(["2025-06-18", "2024-11-05"] as const)(
+    "Streamable HTTP accepts supported protocol %s",
+    async (protocolVersion) => {
+      const transport = new FakeTransport({
+        initialize: { protocolVersion, capabilities: { tools: {} } },
+        "tools/list": { tools: [] },
+      });
+      await expect(runtime(transport, httpConfig()).connect()).resolves.toMatchObject({
+        tools: [],
+      });
+    },
+  );
 });
 
-function runtime(transport: Transport): McpServerRuntime {
-  return new McpServerRuntime(config(), {
+function runtime(
+  transport: Transport,
+  serverConfig: McpServerConfig = config(),
+  overrides: Partial<McpServerRuntimeOptions> = {},
+): McpServerRuntime {
+  return new McpServerRuntime(serverConfig, {
     vaultRoot: "C:\\vault",
     transportFactory: () => transport,
+    ...overrides,
   });
 }
 
@@ -215,6 +272,17 @@ function config(): McpServerConfig {
   };
 }
 
+function httpConfig(): McpServerConfig {
+  return {
+    id: normalizeServerId("server"),
+    name: "Server",
+    enabled: true,
+    trustEpoch: "epoch_test" as McpServerConfig["trustEpoch"],
+    transport: "http",
+    url: "https://example.com/mcp",
+  };
+}
+
 class FakeTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   onclose?: () => void;
@@ -225,7 +293,10 @@ class FakeTransport implements Transport {
 
   constructor(
     private readonly responses: Record<string, unknown>,
-    opts: { noResponses?: boolean; sessionId?: string } = {},
+    opts: {
+      noResponses?: boolean;
+      sessionId?: string;
+    } = {},
   ) {
     this.noResponses = opts.noResponses ?? false;
     this.sessionId = opts.sessionId;
