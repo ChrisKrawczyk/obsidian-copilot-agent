@@ -6,7 +6,7 @@ v0.5 adds MCP client support to obsidian-copilot-agent so users can manually con
 
 The release supports MCP tools only over stdio subprocesses and Streamable HTTP. It performs the MCP initialize/initialized lifecycle, discovers tools with bounded `tools/list` pagination, registers MCP tools into the existing SDK/session surface with collision-safe synthetic ids, and routes every MCP call through the existing universal approval gate. MCP tools are mutating-by-default and not undoable; approval is required per call unless the user explicitly allows the stable server/tool identity through the existing `mcpAutoApprove` path.
 
-Locked v0.5 decisions: advertise protocol version `2025-06-18`; accept `2024-11-05` only over stdio or Streamable HTTP; reject legacy HTTP+SSE-only servers at initialize with a clear error; store server config and static HTTP `Authorization` headers in plugin `data.json`; use full-inherit-minus-denylist env filtering for stdio; spawn stdio with `shell: false`; prepend `/usr/local/bin` and `/opt/homebrew/bin` to macOS subprocess PATH; include server `instructions` in the preamble truncated to 4 KB per server; keep HTTP `Mcp-Session-Id` only in memory and never log it; defer/coalesce `notifications/tools/list_changed` atomically; and shut down stdio servers with stdin close → 5 s → SIGTERM → 5 s → SIGKILL. [SpecResearch §1.1, §1.2, §1.3, §1.4, §2a, §2b, §5.1, §5.2, §7.3, §8, §9]
+Locked v0.5 decisions: advertise protocol version `2025-06-18`; accept `2024-11-05` only over stdio or Streamable HTTP; reject legacy HTTP+SSE-only servers at initialize with a clear error; store server config and static HTTP `Authorization` headers in plugin `data.json`; use full-inherit-minus-denylist env filtering for stdio; spawn stdio with `shell: false`; prepend `/usr/local/bin` and `/opt/homebrew/bin` to macOS subprocess PATH; include server `instructions` in the preamble truncated to 4 KB per server; keep HTTP `Mcp-Session-Id` only in memory and never log it; handle `notifications/tools/list_changed` in two phases (Phase 5 idle refresh-on-event; Phase 6 deferred/coalesced atomic refresh while calls are in flight); and shut down stdio servers with stdin close → 5 s → SIGTERM → 5 s → SIGKILL. [SpecResearch §1.1, §1.2, §1.3, §1.4, §2a, §2b, §5.1, §5.2, §7.3, §8, §9]
 
 ## Goals
 
@@ -90,7 +90,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 - **HTTP stale session:** HTTP 404 for a session id clears volatile HTTP state and reinitializes on the next call; `Mcp-Session-Id` is never persisted or logged. (FR-019)
 - **Stdio crashloop:** Five failed reconnect attempts within five minutes put the server in `crashloop` terminal state until manual Reconnect. (FR-018)
 - **Oversized I/O:** Frames/bodies/SSE accumulators over 16 MiB fail deterministically with diagnostics rather than exhausting memory. (FR-028)
-- **Approval text injection:** MCP-supplied tool names, server names, descriptions, and arguments are escaped as plain text in approval UI; no markdown rendering occurs in the modal. (FR-030)
+- **Approval text injection:** MCP-supplied tool names, server names, descriptions, and arguments are escaped as plain text in approval UI; no markdown rendering occurs in the modal. (FR-031)
 
 ## Functional Requirements
 
@@ -106,7 +106,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-003 — Static HTTP Authorization header
 - **Statement:** HTTP configs MUST support a static pasted `Authorization` header stored with the server config in `data.json`, same posture as current token storage. (Stories: US-1, US-5)
-- **Acceptance criteria:** Header is sent on initialize and subsequent same-origin HTTP requests; saved value is redacted in the UI except explicit edit/reveal; removing the server removes the header; redirects follow FR-025; no OAuth/PKCE/token refresh is introduced.
+- **Acceptance criteria:** Header is sent on initialize and subsequent same-origin HTTP requests; saved value is redacted in the UI except explicit edit/reveal; the Settings UI shows a one-time Notice on first HTTP-server-with-Authorization add: `Authorization headers are stored in plain text in data.json. If your vault is synced (Obsidian Sync, iCloud, Dropbox, etc.) this credential will sync too.`; removing the server removes the header; redirects follow FR-025; no OAuth/PKCE/token refresh is introduced.
 - **Test hooks:** HTTP config tests; settings redaction/removal tests.
 
 ### FR-004 — Stdio transport
@@ -116,7 +116,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-005 — Streamable HTTP transport
 - **Statement:** Enabled HTTP servers MUST connect with MCP Streamable HTTP and MUST NOT fall back to deprecated HTTP+SSE. (Stories: US-2, US-5, US-6)
-- **Acceptance criteria:** Requests POST to the configured endpoint with required `Accept` headers; server notifications over Streamable HTTP are handled when exposed; stale session/404 reinitializes; legacy-SSE-only endpoint failures surface as unsupported transport errors.
+- **Acceptance criteria:** Requests POST to the configured endpoint with required `Accept` headers; implementation uses exactly `@modelcontextprotocol/sdk@1.29.0` for v0.5 client protocol paths; server notifications over Streamable HTTP are handled when exposed; stale session/404 reinitializes; legacy-SSE-only endpoint failures surface as unsupported transport errors.
 - **Test hooks:** Mocked HTTP transport tests for initialize, request, notification, stale session, and legacy-SSE rejection.
 
 ### FR-006 — Protocol version negotiation
@@ -131,7 +131,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-008 — Full tools/list pagination
 - **Statement:** On connect/reconnect, the plugin MUST follow `nextCursor` until `tools/list` is exhausted or FR-027/FR-028 bounds are reached. (Stories: US-2, US-4)
-- **Acceptance criteria:** Each `tools/list` page has a 10 s timeout; all pages are included until exhausted; total pages followed is capped at 50; total tools per server is capped at 1000; mid-pagination failure or cap exceedance marks inventory unavailable with last error; duplicate tool names within a single server are rejected for that server with visible error.
+- **Acceptance criteria:** Each `tools/list` page has a 10 s timeout and aggregate discovery is capped at 30 s per server; all pages are included until exhausted; total pages followed is capped at 50; total tools per server is capped at 1000; mid-pagination failure or cap exceedance marks inventory unavailable with last error; duplicate tool names within a single server are rejected for that server with visible error.
 - **Test hooks:** Tool discovery tests for single page, multiple pages, timeout, cap exceedance, failures, and duplicates.
 
 ### FR-009 — SDK tool registration
@@ -146,7 +146,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-011 — Universal permission gate routing
 - **Statement:** Every MCP tool call MUST route through the existing approval gate as `SafetySource = "mcp"` before execution. (Stories: US-3)
-- **Acceptance criteria:** SDK `kind === "mcp"` maps in `AgentSession.buildSafetyInput` to `source: "mcp"` and stable server/tool scope; the top-level `decideSafety(...)` function requires approval by default; approval prompt shows escaped server/tool/args per FR-030; rejected calls are not sent to the server.
+- **Acceptance criteria:** SDK `kind === "mcp"` maps in `AgentSession.buildSafetyInput` to `source: "mcp"` and stable server/tool scope; the top-level `decideSafety(...)` function requires approval by default; approval prompt shows escaped server/tool/args per FR-031; rejected calls are not sent to the server.
 - **Test hooks:** `src\domain\SafetyPolicy.test.ts`; `src\sdk\AgentSession.test.ts`; approval UI tests.
 
 ### FR-012 — MCP auto-approval allowlist
@@ -186,22 +186,22 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-019 — HTTP session id lifecycle
 - **Statement:** HTTP `Mcp-Session-Id` MUST be in-memory only and MUST NOT persist across plugin reloads or appear in logs/errors/UI diagnostics. (Stories: US-5, US-6)
-- **Acceptance criteria:** Same-load requests include assigned session id; reload/reconnect starts without old session id and initializes fresh; clean shutdown attempts HTTP DELETE with current session id and tolerates 405; session ids are redacted from local diagnostics, last-error text, and `data.json`.
+- **Acceptance criteria:** Same-load requests include assigned session id during initialize, bounded `tools/list` discovery, and `tools/call`; HTTP discovery also observes the 30 s aggregate `tools/list` cap; reload/reconnect starts without old session id and initializes fresh; clean shutdown attempts HTTP DELETE with current session id and tolerates 405; session ids are redacted from local diagnostics, last-error text, and `data.json`.
 - **Test hooks:** HTTP session lifecycle tests.
 
-### FR-020 — list_changed coalescing
-- **Statement:** `notifications/tools/list_changed` MUST trigger a deferred, coalesced refresh only after no MCP tool call is in flight for that server, and registry updates MUST be atomic. (Stories: US-2, US-4)
-- **Acceptance criteria:** No in-flight call schedules one refresh; multiple notifications coalesce; notification during a call waits until it settles; refresh failure preserves previous inventory and records last error; successful refresh computes add/remove/replace as a complete diff and swaps the SDK-visible registry atomically with no partial state visible mid-flight.
-- **Test hooks:** Coalescing/concurrency/atomic-swap tests.
+### FR-020 — list_changed refresh and coalescing
+- **Statement:** `notifications/tools/list_changed` MUST refresh MCP tool inventories without exposing partial registry state, with Phase 5 providing idle refresh-on-event and Phase 6 adding deferred/coalesced refresh while calls are in flight. (Stories: US-2, US-4)
+- **Acceptance criteria:** Phase 5: when no MCP call is in flight for that server, one notification triggers one immediate non-coalesced full registry refresh between tool calls only, and refresh failure preserves the previous inventory with last error. Phase 6: multiple notifications coalesce; notifications during a call defer until it settles; successful refresh computes add/remove/replace as a complete diff and swaps the SDK-visible registry atomically with no partial state visible mid-flight.
+- **Test hooks:** Idle refresh-on-event tests; coalescing/concurrency/atomic-swap tests.
 
 ### FR-021 — Cancellation and Stop
 - **Statement:** The plugin MUST handle MCP cancellation notifications gracefully and SHOULD send `notifications/cancelled` when Stop cancels an in-flight MCP call. (Stories: US-4, US-6)
-- **Acceptance criteria:** Known-request cancellation marks call cancelled/interrupted; unknown or already-complete cancellations are ignored; Stop settles UI state and sends cancellation when request id support exists; late responses after cancellation are discarded.
+- **Acceptance criteria:** Known-request cancellation marks call cancelled/interrupted; unknown or already-complete cancellations are ignored; Stop settles UI state and sends cancellation when request id support exists using payload `{ requestId, reason: "user_cancelled" }`; late responses after cancellation are discarded.
 - **Test hooks:** Cancellation/Stop tests.
 
 ### FR-022 — Stdio environment filtering
 - **Statement:** Stdio subprocess env MUST be full inherit minus denylist, plus explicit per-server allowlisted env entries. (Stories: US-1, US-5)
-- **Acceptance criteria:** Before spawn, filter out `GITHUB_TOKEN`, `GH_TOKEN`, `COPILOT_*`, `COPILOT_AGENT_*`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_OPENAI_*`, `AWS_*`, `GCP_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `SSH_AUTH_SOCK`, `SSH_PRIVATE_KEY`, anything matching `*_TOKEN`, `*_API_KEY`, `*_SECRET`, and `*_PASSWORD`; Windows matching is case-insensitive; explicit per-server env entries are injected after filtering; ordinary usability vars (`PATH`, `HOME`, `USERPROFILE`, `TMP`, `TEMP`, `TMPDIR`, locale vars) remain unless denied.
+- **Acceptance criteria:** Before spawn, filter out `GITHUB_TOKEN`, `GH_TOKEN`, `COPILOT_*`, `COPILOT_AGENT_*`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_OPENAI_*`, `AWS_*`, `GCP_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `SSH_AUTH_SOCK`, `SSH_PRIVATE_KEY`, anything matching `*_TOKEN`, `*_API_KEY`, `*_SECRET`, and `*_PASSWORD`; Windows matching is case-insensitive; explicit per-server env entries are injected after filtering; ordinary usability vars (`PATH`, `HOME`, `USERPROFILE`, `TMP`, `TEMP`, `TMPDIR`, locale vars) remain unless denied; when user-configured explicit env keys match the denylist, Settings shows an inline warning and a one-shot Notice on save before the override is injected.
 - **Test hooks:** Env-filter unit tests for exact keys, wildcard prefixes, Windows case behavior, and explicit overrides.
 
 ### FR-023 — macOS PATH amendment
@@ -211,12 +211,12 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-024 — Stdio shutdown sequence
 - **Statement:** Disable/remove/reconnect and plugin unload MUST shut down every spawned stdio server by closing stdin, waiting 5 s, sending SIGTERM, waiting 5 s, then sending SIGKILL. (Stories: US-1, US-4)
-- **Acceptance criteria:** Clean exit after stdin close sends no kill; still-alive after 5 s receives SIGTERM; still-alive 5 s later receives SIGKILL; unload attempts this for every tracked process and is idempotent.
+- **Acceptance criteria:** Clean exit after stdin close sends no kill; still-alive after 5 s receives SIGTERM; still-alive 5 s later receives SIGKILL; unload attempts this for every tracked process in parallel, is idempotent, and enforces a 20 s aggregate wall-clock cap with forced kill and redacted warning for any still-running child.
 - **Test hooks:** Fake child-process/fake-timer shutdown tests; plugin unload integration test.
 
 ### FR-025 — HTTP URL and TLS posture
 - **Statement:** HTTP MCP URLs MUST use normal TLS validation and MUST reject or warn on risky destinations before connecting. (Stories: US-5)
-- **Acceptance criteria:** URL must be `https://` unless host is `localhost`, `127.0.0.1`, or `::1`; plaintext `http://` to any non-loopback host is rejected at config-add with an error; HTTPS uses default certificate validation and no `rejectUnauthorized: false` option is exposed; malformed URLs fail validation; URL host is classified at config time: loopback has no warning; private-IP ranges (`10/8`, `172.16/12`, `192.168/16`, link-local, `fc00::/7`) require confirmation modal text `This server is on a private network. Continue?`; cloud metadata IPs/hosts including `169.254.169.254` and AWS/GCP/Azure metadata hosts are rejected; redirects follow at most 3 hops and drop the `Authorization` header on cross-origin redirects.
+- **Acceptance criteria:** URL must be `https://` unless host is `localhost`, `127.0.0.1`, or `::1`; plaintext `http://` to any non-loopback host is rejected at config-add with an error; HTTPS uses default certificate validation and no `rejectUnauthorized: false` option is exposed; malformed URLs fail validation; URL host is classified at config time: loopback has no warning; private-IP ranges (`10/8`, `172.16/12`, `192.168/16`, link-local, `fc00::/7`) require confirmation modal text `This server is on a private network. Continue?`; cloud metadata IPs/hosts including `169.254.169.254` and AWS/GCP/Azure metadata hosts are rejected; redirects follow at most 3 hops, reclassify each hop host against the same loopback/private/metadata policy before following it, and drop the `Authorization` header on cross-origin redirects.
 - **Test hooks:** URL/TLS/SSRF/redirect validation tests.
 
 ### FR-026 — MCP-disabled baseline
@@ -231,7 +231,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 ### FR-028 — Bounded I/O, payload, and diagnostics caps
 - **Statement:** MCP stdio and HTTP I/O MUST enforce explicit size caps to prevent hangs and memory exhaustion. (Stories: US-1, US-4, US-5)
-- **Acceptance criteria:** Stdio JSON-RPC frame/line max is 16 MiB; over-limit stdio frames tear down the stdio transport and surface a diagnostic; HTTP response body max is 16 MiB; Streamable HTTP SSE accumulator max is 16 MiB; stderr capture for stdio is a ring buffer retaining the last 64 KiB and surfaced in server-config UI on failure; `tools/list` caps from FR-008 apply before registry publication.
+- **Acceptance criteria:** Stdio JSON-RPC frame/line max is 16 MiB; over-limit stdio frames tear down the stdio transport and surface a diagnostic; HTTP response body max is 16 MiB; Streamable HTTP SSE accumulator max is 16 MiB; stderr capture for stdio is a ring buffer retaining the last 64 KiB and surfaced in server-config UI on failure with control characters escaped/neutralized and truncation visibly marked; `tools/list` caps from FR-008 apply before registry publication.
 - **Test hooks:** Oversized stdio frame, HTTP body, SSE accumulator, stderr ring-buffer, tool-count, and page-count tests.
 
 ### FR-029 — 2024-11-05 supported-transport compatibility
@@ -239,7 +239,12 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 - **Acceptance criteria:** A stdio server negotiating `2024-11-05` proceeds; a Streamable HTTP server negotiating `2024-11-05` proceeds if it uses the single-endpoint Streamable HTTP request/response framing accepted by v0.5; a server requiring the deprecated two-endpoint HTTP+SSE flow fails with `Unsupported MCP transport: legacy HTTP+SSE is not supported in v0.5` or equivalent user-visible wording.
 - **Test hooks:** Protocol/transport compatibility matrix tests.
 
-### FR-030 — Approval prompt safe rendering and truncation
+### FR-030 — Documentation
+- **Statement:** v0.5 MCP client behavior MUST be documented for users and maintainers before release. (Stories: US-1, US-5, US-6)
+- **Acceptance criteria:** README is updated with an MCP Servers section covering stdio and Streamable HTTP setup, static Authorization storage warning, no legacy SSE fallback, and no-Undo behavior; `.paw\work\mcp-client\Docs.md` covers identity model, transports, security posture, troubleshooting, resilience/list_changed behavior, and verification guidance; CHANGELOG includes a coherent v0.5 entry with SDK version, bundle delta or waiver, security posture, and migration notes.
+- **Test hooks:** Documentation review for README, Docs.md, and CHANGELOG against SC-020.
+
+### FR-031 — Approval prompt safe rendering and truncation
 - **Statement:** MCP approval prompts MUST render tool name, server name, and arguments safely as escaped plain text. (Stories: US-3, US-5)
 - **Acceptance criteria:** The modal does not markdown-render MCP-supplied descriptions, tool names, server display names, or argument values; HTML/markdown/control characters are escaped or neutralized consistently with existing safe text rendering; arguments display is truncated at 4 KB with a visible truncation marker; full arguments are sent to the server only after approval.
 - **Test hooks:** Approval modal rendering tests for markdown injection, HTML injection, long args, and control characters.
@@ -247,13 +252,13 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 ## Non-Functional Requirements (NFR)
 
 - **NFR-001 Performance and bounded latency:** `tools/list` discovery for a typical server completes in ≤ 2 seconds and never blocks chat UI; hard operation bounds are initialize 10 s, `tools/list` page 10 s, and `tools/call` default 60 s configurable per server up to 300 s.
-- **NFR-002 Resilience and bounded resources:** Server crash, malformed response, network failure, timeout, over-16-MiB frame/body/SSE accumulator, or pagination cap exceedance never crashes the plugin; failures surface as status/errors and built-in tools remain usable.
+- **NFR-002 Resilience and bounded resources:** Server crash, malformed response, network failure, timeout, unload over the 20 s aggregate cap, over-16-MiB frame/body/SSE accumulator, or pagination cap exceedance never crashes the plugin; failures surface as status/errors and built-in tools remain usable.
 - **NFR-003 Security:** Env filter, `shell: false` process launch, auth-header storage posture, untrusted annotations, TLS validation, SSRF checks, redirect auth stripping, session-id redaction, built-in collision prevention, and human approval are mandatory controls.
 - **NFR-004 Compatibility:** `2025-06-18` and `2024-11-05` work over stdio/Streamable HTTP; HTTP+SSE-only legacy transport is intentionally unsupported and rejected with a clear error.
-- **NFR-005 Bundle size:** MCP SDK v1.x client paths SHOULD add ≤ 80 KB gzip to `main.js`. If the SDK exceeds this, document the addition in CHANGELOG and mitigate via tree-shaking; the limit is a sanity check, not a blocker.
+- **NFR-005 Bundle size:** The exact `@modelcontextprotocol/sdk@1.29.0` client paths SHOULD add ≤ 80 KB gzip to `main.js`. If the SDK exceeds this, document the addition in CHANGELOG and mitigate via tree-shaking; the limit is a sanity check, not a blocker.
 - **NFR-006 Accessibility:** MCP server settings UI and approval prompts are keyboard-navigable with meaningful labels, accessible last-error text, and non-color-only status indicators.
 - **NFR-007 Baseline preservation:** Streaming, Stop, approval prompts, token rotation, multi-conversation archive flow, Undo journal, raw-FS gating, preamble, model picker/catalog/recovery, lazy modelId resolution, deferred-init recovery, and send-gate precedence remain intact.
-- **NFR-008 Observability without telemetry:** Connection state, last error, crashloop state, and stderr ring-buffer snippets are locally visible; no telemetry/cost accounting is added; sensitive values including `Authorization` and `Mcp-Session-Id` are redacted.
+- **NFR-008 Observability without telemetry:** Connection state, last error, crashloop state, and stderr ring-buffer snippets are locally visible; no telemetry/cost accounting is added; sensitive values including `Authorization`, `Mcp-Session-Id`, tokenized URLs/userinfo, bearer values, denylisted env-like lines, and SDK error/stack strings are redacted.
 
 ## Success Criteria (SC)
 
@@ -278,6 +283,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 | SC-017 | HTTP config rejects non-loopback `http://`, rejects metadata hosts, warns on private network, follows at most 3 redirects, and strips Authorization on cross-origin redirect. | URL validation and redirect fixtures for loopback, private IP, metadata IP/host, same-origin redirect, cross-origin redirect. |
 | SC-018 | `2024-11-05` stdio and Streamable HTTP servers initialize successfully, while a legacy HTTP+SSE-only server is rejected with a clear unsupported-transport error. | Protocol matrix fixtures for stdio, Streamable HTTP, and legacy two-endpoint SSE. |
 | SC-019 | Renaming a server or changing command/args/url revokes persistent grants once; removing a server clears all grants for it. | Grant store fixture with one stable server and two tools; mutate display name, command, URL, then remove. |
+| SC-020 | README, Docs.md, and CHANGELOG document MCP setup, identity model, transports, security posture, troubleshooting, bundle impact, and final verification status. | Human review of Phase 7 documentation against implemented behavior and this spec. |
 
 ## Requirements Traceability table (FR/NFR/SC × test surface)
 
@@ -312,7 +318,8 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 | FR-027 | SC-013 | Fake-timer timeout tests |
 | FR-028 | SC-014 | Oversized payload/stderr cap tests |
 | FR-029 | SC-018 | Protocol/transport compatibility matrix |
-| FR-030 | SC-004 | Approval modal safe-rendering tests |
+| FR-030 | SC-020 | README/Docs.md/CHANGELOG documentation review |
+| FR-031 | SC-004 | Approval modal safe-rendering tests |
 | NFR-001 | SC-013 | Async discovery/performance check |
 | NFR-002 | SC-006, SC-007, SC-010, SC-014 | Failure-mode tests |
 | NFR-003 | SC-003, SC-004, SC-009, SC-017 | Security unit tests/manual review |
@@ -336,7 +343,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 
 - The vault root is available at stdio spawn time and is the safest default `cwd`; users who need another working directory can override per server. [SpecResearch §5.1]
 - `child_process.spawn` is available in Obsidian desktop's Electron/Node environment and can be invoked with `shell: false`; Windows `npx` workflows can be represented explicitly as `cmd` plus `["/c", "npx", ...]`. [SpecResearch §2a]
-- The SDK v1.x client can be bundled through existing esbuild infrastructure and client-only imports can tree-shake server-side paths; if the gzip delta exceeds 80 KB, NFR-005's waiver process applies. [SpecResearch §3]
+- The exact `@modelcontextprotocol/sdk@1.29.0` client can be bundled through existing esbuild infrastructure and client-only imports can tree-shake server-side paths; if the gzip delta exceeds 80 KB, NFR-005's waiver process applies. [SpecResearch §3]
 - The current safety policy exports a top-level `decideSafety(...)` function and `SafetyState`; implementation may refactor names, but the spec anchors behavior to approval-gate outcomes rather than a class method.
 - Config-time URL host classification is sufficient for v0.5; runtime DNS rebinding protections beyond configured host/IP checks are future hardening unless planning identifies a low-risk additive check.
 - MCP tool annotations and server instructions are untrusted context hints, not security policy inputs. [SpecResearch §5.3, §7.3]
@@ -346,13 +353,14 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 ### In Scope
 
 - Manual MCP server configuration in Settings for stdio and Streamable HTTP.
-- Static HTTP `Authorization` header entry/storage/redaction.
+- Static HTTP `Authorization` header entry/storage/redaction and plaintext/sync warning.
 - Stdio subprocess launch, environment filtering, PATH amendment, stderr diagnostics, bounded I/O, shutdown, and reconnect.
 - MCP initialize/initialized lifecycle, version/capability negotiation, bounded `tools/list` pagination, `tools/call`, cancellation, and `notifications/tools/list_changed` refresh.
 - SDK registration of MCP tools under `mcp__<server-id>__<tool-name>` synthetic ids with preamble display attribution.
 - Universal approval-gate integration, stable server/tool grants, safe approval prompt rendering, and non-undoable MCP calls.
 - Crash/disconnect/timeout/oversized-payload recovery and local diagnostics.
 - v0.4 baseline preservation.
+- README, Docs.md, and CHANGELOG updates for MCP setup, security, troubleshooting, and release notes.
 
 ### Out of Scope
 
@@ -378,7 +386,7 @@ MCP servers are powerful and untrusted by default. A usable v0.5 must therefore 
 | Tool name collisions cause spoofing or wrong-server execution. | Built-in tool spoofing or cross-server confusion. | FR-009 synthetic ids, reserved `mcp__` prefix, built-in collision rejection, and atomic refresh. |
 | Mutable display names keep stale auto-approve grants. | User may trust a renamed/repointed server unintentionally. | FR-012 keys grants by stable server/tool identity and revokes on rename/command/args/url changes. |
 | Auto-reconnect loops consume resources. | Battery/CPU churn and noisy UI. | FR-018 bounded schedule, five attempts per five minutes, terminal crashloop state, manual reset. |
-| MCP prompt text injects markdown/HTML into approval UI. | User deception in the approval modal. | FR-030 escapes user-controlled strings and truncates args. |
+| MCP prompt text injects markdown/HTML into approval UI. | User deception in the approval modal. | FR-031 escapes user-controlled strings and truncates args. |
 | SDK bundle delta exceeds target. | Larger plugin package and slower load. | NFR-005 uses 80 KB gzip as sanity check with CHANGELOG waiver and tree-shaking mitigation. |
 | v0.4 behavior regresses when MCP is unused. | Existing users lose trust. | FR-026 and NFR-007 require the existing 724/724 baseline and no-MCP smoke coverage. |
 
