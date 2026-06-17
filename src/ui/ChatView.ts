@@ -942,13 +942,17 @@ export class ChatView extends ItemView {
           // disappears. tool_call_complete (or tool.execution_*) will
           // overwrite this immediately if execution proceeds.
           const newOutcome =
-            ev.choice.kind === "reject" ? "denied" : "approved";
+            ev.choice.kind === "reject"
+              ? "denied"
+              : ev.choice.kind === "cancelled"
+                ? "cancelled"
+                : "approved";
           state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: newOutcome,
             detail:
-              ev.choice.kind === "reject"
+              ev.choice.kind === "reject" || ev.choice.kind === "cancelled"
                 ? (ev.choice.reason ?? "Rejected by user.")
                 : undefined,
             approval: undefined,

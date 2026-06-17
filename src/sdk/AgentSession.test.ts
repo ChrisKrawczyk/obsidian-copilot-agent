@@ -1091,6 +1091,121 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     await agent.dispose();
   });
 
+  test("cancels in-flight MCP approval by exact server id and is idempotent", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = (prompt: string) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+    const { agent } = makeSafetyAgent(h, {
+      defaultMode: "require-approval",
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const eventsPromise = (async () => {
+      const seen: unknown[] = [];
+      for await (const ev of agent.sendMessageStreaming("trigger")) seen.push(ev);
+      return seen;
+    })();
+    await new Promise((r) => setTimeout(r, 5));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-pending-cancel",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(agent.hasPendingApprovals()).toBe(true);
+
+    agent.cancelPendingMcpApprovalsForServer("server", "Wrong server.");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(agent.hasPendingApprovals()).toBe(true);
+
+    agent.cancelPendingMcpApprovalsForServer(mcpServerId, "MCP server disabled.");
+    expect(() =>
+      agent.cancelPendingMcpApprovalsForServer(mcpServerId, "MCP server disabled."),
+    ).not.toThrow();
+    const result = await permission;
+    expect(result).toEqual({
+      kind: "reject",
+      feedback: "MCP server disabled.",
+    });
+    expect(agent.hasPendingApprovals()).toBe(false);
+
+    resolveSend({ data: { content: "done" } });
+    const events = await eventsPromise;
+    expect(
+      events.find(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string }).type === "approval_resolved",
+      ),
+    ).toMatchObject({
+      choice: { kind: "cancelled", reason: "MCP server disabled." },
+    });
+    expect(
+      events.find(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string; id?: string }).type === "tool_call_complete" &&
+          (ev as { id?: string }).id === "tc-mcp-pending-cancel",
+      ),
+    ).toMatchObject({
+      outcome: "cancelled",
+      errorMessage: "MCP server disabled.",
+    });
+    expect(
+      events.some(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string; outcome?: string }).type === "tool_call_complete" &&
+          (ev as { outcome?: string }).outcome === "completed",
+      ),
+    ).toBe(false);
+    await agent.dispose();
+  });
+
+  test("server cancellation clears resolved MCP approvals with NUL-separated cache keys", async () => {
+    const h = makeFakeSdk();
+    const mcpAutoApprove = {
+      [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+    };
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove,
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const request = {
+      toolCallId: "tc-mcp-cache-cancel",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    };
+    expect((await h.permissionHandler!(request)).kind).toBe("approve-once");
+    delete mcpAutoApprove[formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)];
+
+    agent.cancelPendingMcpApprovalsForServer(mcpServerId);
+
+    expect((await h.permissionHandler!(request)).kind).toBe("reject");
+    await agent.dispose();
+  });
+
   test("resolved approval cache clears on MCP epoch rotation, disable, disconnect, and crashloop", async () => {
     for (const state of ["epoch", "disable", "disconnect", "crashloop"]) {
       const h = makeFakeSdk();

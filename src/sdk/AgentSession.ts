@@ -205,7 +205,19 @@ export type StreamEvent =
 export type ApprovalChoice =
   | { kind: "approve-once" }
   | { kind: "approve-for-session" }
-  | { kind: "reject"; reason?: string };
+  | { kind: "reject"; reason?: string }
+  | { kind: "cancelled"; reason?: string };
+
+type PendingApprovalDeferred = {
+  resolve: (choice: ApprovalChoice) => void;
+  promise: Promise<ApprovalChoice>;
+};
+
+type PendingMcpApproval = {
+  deferred: PendingApprovalDeferred;
+  toolName?: string;
+  trustEpoch?: string;
+};
 
 /**
  * Public adapter surface. The rest of the codebase consumes this — the
@@ -446,10 +458,17 @@ export class CopilotAgentSession implements AgentSession {
    */
   private readonly pendingApprovals = new Map<
     string,
-    {
-      resolve: (choice: ApprovalChoice) => void;
-      promise: Promise<ApprovalChoice>;
-    }
+    PendingApprovalDeferred
+  >();
+
+  /**
+   * In-flight MCP approval prompts indexed by exact stable server id.
+   * Resolved approval cache entries are keyed differently, so server
+   * lifecycle cancellation must not rely on scanning that cache.
+   */
+  private readonly pendingMcpApprovalsByServer = new Map<
+    string,
+    Map<string, PendingMcpApproval>
   >();
 
   /**
@@ -1528,7 +1547,7 @@ export class CopilotAgentSession implements AgentSession {
         "priorChoice:",
         prior.kind,
       );
-      if (prior.kind === "reject") {
+      if (prior.kind === "reject" || prior.kind === "cancelled") {
         return { kind: "reject", feedback: prior.reason ?? "Rejected." };
       }
       return { kind: "approve-once" };
@@ -1596,15 +1615,24 @@ export class CopilotAgentSession implements AgentSession {
     if (!this.currentStreamPush) {
       return { kind: "reject", feedback: "No UI available to confirm tool call." };
     }
-    this.currentStreamPush({ type: "approval_prompt", toolCall: pendingCall });
-
     const deferred = makeDeferred<ApprovalChoice>();
     this.pendingApprovals.set(toolCallId, deferred);
+    if (input.source === "mcp" && input.mcpServerId) {
+      this.registerPendingMcpApproval(input.mcpServerId, toolCallId, {
+        deferred,
+        toolName: input.mcpToolName,
+        trustEpoch: input.mcpTrustEpoch,
+      });
+    }
+    this.currentStreamPush({ type: "approval_prompt", toolCall: pendingCall });
     let choice: ApprovalChoice;
     try {
       choice = await deferred.promise;
     } finally {
       this.pendingApprovals.delete(toolCallId);
+      if (input.source === "mcp" && input.mcpServerId) {
+        this.unregisterPendingMcpApproval(input.mcpServerId, toolCallId);
+      }
     }
     this.resolvedApprovals.set(toolCallId, {
       ...choice,
@@ -1618,6 +1646,11 @@ export class CopilotAgentSession implements AgentSession {
       id: toolCallId,
       choice,
     });
+
+    if (choice.kind === "cancelled") {
+      const reason = choice.reason ?? "Cancelled.";
+      return this.recordCancellation(toolCallId, normalised, source, argsPreview, reason);
+    }
 
     if (choice.kind === "reject") {
       const reason = choice.reason ?? "Rejected by user.";
@@ -1768,6 +1801,33 @@ export class CopilotAgentSession implements AgentSession {
     return { kind: "reject", feedback: reason };
   }
 
+  private recordCancellation(
+    toolCallId: string,
+    normalised: PermissionRequest,
+    source: "custom" | "mcp" | "builtin",
+    argsPreview: string | undefined,
+    reason: string,
+  ): SdkPermissionResult {
+    const call: AssistantToolCall = {
+      id: toolCallId,
+      kind: normalised.kind,
+      name: normalised.toolName,
+      source,
+      outcome: "cancelled",
+      detail: reason,
+      argsPreview,
+    };
+    this.toolCallsThisTurn.push(call);
+    this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
+    this.currentStreamPush?.({
+      type: "tool_call_complete",
+      id: toolCallId,
+      outcome: "cancelled",
+      errorMessage: reason,
+    });
+    return { kind: "reject", feedback: reason };
+  }
+
   resolveApproval(toolCallId: string, choice: ApprovalChoice): void {
     const deferred = this.pendingApprovals.get(toolCallId);
     if (!deferred) return;
@@ -1795,13 +1855,16 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   public cancelPendingMcpApprovalsForServer(serverId: string, reason = "MCP server disconnected."): void {
-    for (const [toolCallId, deferred] of this.pendingApprovals) {
-      const cached = this.resolvedApprovals.get(toolCallId);
-      if (cached?.mcpCacheKey?.startsWith(`${serverId}:`)) {
-        deferred.resolve({ kind: "reject", reason });
-        this.pendingApprovals.delete(toolCallId);
-      }
+    this.clearResolvedMcpApprovalsForServer(serverId);
+    const pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) return;
+    const cancelled: ApprovalChoice = { kind: "cancelled", reason };
+    for (const [toolCallId, pending] of [...pendingForServer]) {
+      pending.deferred.resolve(cancelled);
+      this.pendingApprovals.delete(toolCallId);
+      pendingForServer.delete(toolCallId);
     }
+    if (pendingForServer.size === 0) this.pendingMcpApprovalsByServer.delete(serverId);
   }
 
   private cancelAllPendingApprovals(reason: string): void {
@@ -1811,6 +1874,36 @@ export class CopilotAgentSession implements AgentSession {
       deferred.resolve(reject);
     }
     this.pendingApprovals.clear();
+    this.pendingMcpApprovalsByServer.clear();
+  }
+
+  private registerPendingMcpApproval(
+    serverId: string,
+    toolCallId: string,
+    pending: PendingMcpApproval,
+  ): void {
+    let pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) {
+      pendingForServer = new Map();
+      this.pendingMcpApprovalsByServer.set(serverId, pendingForServer);
+    }
+    pendingForServer.set(toolCallId, pending);
+  }
+
+  private unregisterPendingMcpApproval(serverId: string, toolCallId: string): void {
+    const pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) return;
+    pendingForServer.delete(toolCallId);
+    if (pendingForServer.size === 0) this.pendingMcpApprovalsByServer.delete(serverId);
+  }
+
+  private clearResolvedMcpApprovalsForServer(serverId: string): void {
+    const prefix = `${serverId}\u0000`;
+    for (const [toolCallId, cached] of this.resolvedApprovals) {
+      if (cached.mcpCacheKey?.startsWith(prefix)) {
+        this.resolvedApprovals.delete(toolCallId);
+      }
+    }
   }
 }
 
