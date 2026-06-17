@@ -6,11 +6,14 @@ import {
 } from "./approvalText";
 
 describe("approvalText MCP helpers", () => {
-  test("escapes HTML, markdown metacharacters, and control characters", () => {
+  test("keeps HTML and markdown readable while neutralizing control characters", () => {
     const out = escapeMcpPlainText("<b>*run*</b>\u0001");
-    expect(out).toContain("&lt;b&gt;");
-    expect(out).toContain("\\*run\\*");
+    expect(out).toContain("<b>*run*</b>");
     expect(out).toContain("\\u0001");
+  });
+
+  test("renders typical JSON arguments without entity or markdown escapes", () => {
+    expect(escapeMcpPlainText('{"path":"<a>foo"}')).toBe('{"path":"<a>foo"}');
   });
 
   test("leaves short text unmodified by truncation", () => {

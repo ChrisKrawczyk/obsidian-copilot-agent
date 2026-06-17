@@ -65,6 +65,47 @@ describe("McpManager", () => {
     expect(persisted.join("\n")).not.toContain("sid");
     expect(persisted.join("\n")).not.toContain("abc");
   });
+
+  test.each([
+    ["name", (server: McpServerConfig) => ({ ...server, name: "Renamed" })],
+    ["command", (server: McpServerConfig) => ({ ...server, command: "python" })],
+    ["args", (server: McpServerConfig) => ({ ...server, args: ["next.js"] })],
+    ["url", () => httpConfig("https://example.com/next")],
+    ["transport", () => httpConfig("https://example.com/mcp")],
+  ] as const)("enable recreates runtime after %s edit", async (_label, mutate) => {
+    let server: McpServerConfig = config("s1");
+    const seen: McpServerConfig[] = [];
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: (cfg) => {
+        seen.push(cfg);
+        return fakeRuntime(cfg, [tool(cfg, "a")]);
+      },
+    });
+    await manager.enable(server.id);
+    server = mutate(server) as McpServerConfig;
+    await manager.enable(server.id);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toMatchObject(server);
+  });
+
+  test("manual reconnect recreates runtime after config edit", async () => {
+    let server: McpServerConfig = config("s1");
+    const seen: string[] = [];
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: (cfg) => {
+        seen.push(cfg.transport === "stdio" ? cfg.command : cfg.url);
+        return fakeRuntime(cfg, [tool(cfg, "a")]);
+      },
+    });
+    await manager.enable(server.id);
+    server = { ...server, command: "python" };
+    await manager.manualReconnect(server.id);
+    expect(seen).toEqual(["node", "python"]);
+  });
 });
 
 function config(id: string): McpServerConfig {
@@ -76,6 +117,17 @@ function config(id: string): McpServerConfig {
     transport: "stdio",
     command: "node",
     args: [],
+  };
+}
+
+function httpConfig(url: string): McpServerConfig {
+  return {
+    id: normalizeServerId("s1"),
+    name: "s1",
+    enabled: true,
+    trustEpoch: "epoch_test" as McpServerConfig["trustEpoch"],
+    transport: "http",
+    url,
   };
 }
 
@@ -91,6 +143,7 @@ function tool(server: McpServerConfig, name: string): McpToolInventoryEntry {
 function fakeRuntime(server: McpServerConfig, tools: McpToolInventoryEntry[]) {
   return {
     connect: async () => ({ serverId: server.id, tools }),
+    reconnect: async () => ({ serverId: server.id, tools }),
     snapshot: () => ({ id: server.id, status: "connected", toolCount: tools.length }),
     disable: async () => undefined,
     unload: async () => undefined,

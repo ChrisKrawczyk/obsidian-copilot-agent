@@ -299,6 +299,7 @@ export interface AgentSession {
    */
   hasPendingApprovals(): boolean;
   cancelPendingMcpApprovalsForServer(serverId: string, reason?: string): void;
+  cancelMcpCallsForServer(serverId: string, reason?: string): void;
   /**
    * v0.4 Phase 5 (S1 — deferred-init contract): true iff `init()`
    * resolved successfully but `createSession()` was NOT issued because
@@ -470,6 +471,8 @@ export class CopilotAgentSession implements AgentSession {
     string,
     Map<string, PendingMcpApproval>
   >();
+  private readonly activeMcpCallsByServer = new Map<string, Set<string>>();
+  private readonly lifecycleCancelledMcpCallIds = new Set<string>();
 
   /**
    * Memo of approval choices already resolved for a given toolCallId in
@@ -603,6 +606,8 @@ export class CopilotAgentSession implements AgentSession {
       throw new Error("AgentSession.session missing after init");
     }
     this.toolCallsThisTurn = [];
+    this.activeMcpCallsByServer.clear();
+    this.lifecycleCancelledMcpCallIds.clear();
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const bumpIdleTimer = (): void => {
@@ -679,6 +684,8 @@ export class CopilotAgentSession implements AgentSession {
     }
     const session = this.session;
     this.toolCallsThisTurn = [];
+    this.activeMcpCallsByServer.clear();
+    this.lifecycleCancelledMcpCallIds.clear();
 
     const queue: StreamEvent[] = [];
     let resolveWait: (() => void) | null = null;
@@ -755,6 +762,10 @@ export class CopilotAgentSession implements AgentSession {
             };
             this.toolCallsThisTurn.push(existing);
           }
+          if (source === "mcp") {
+            const parsed = parseSyntheticId(d.toolName);
+            if (parsed) this.registerActiveMcpCall(parsed.serverId, d.toolCallId);
+          }
           push({ type: "tool_call_start", toolCall: { ...existing } });
         });
       } catch (e) {
@@ -764,6 +775,7 @@ export class CopilotAgentSession implements AgentSession {
         unsubToolComplete = session.on("tool.execution_complete", (event) => {
           const d = event?.data;
           if (!d || typeof d.toolCallId !== "string") return;
+          if (this.lifecycleCancelledMcpCallIds.has(d.toolCallId)) return;
           bumpIdleTimer();
           const existing = this.toolCallsThisTurn.find(
             (c) => c.id === d.toolCallId,
@@ -779,6 +791,7 @@ export class CopilotAgentSession implements AgentSession {
             d.result?.detailedContent ?? d.result?.content ?? undefined,
           );
           const errorMessage = sanitizeMcpMaybe(existing?.source, d.error?.message);
+          if (existing?.source === "mcp") this.unregisterActiveMcpCall(d.toolCallId);
           if (existing) {
             existing.outcome = outcome;
             // Clear approval metadata once the call has executed; the
@@ -1540,17 +1553,12 @@ export class CopilotAgentSession implements AgentSession {
       if (prior.mcpCacheKey !== currentMcpCacheKey) {
         this.resolvedApprovals.delete(toolCallId);
       } else {
-      console.log(
-        "[copilot-agent] permission re-ask short-circuited",
-        "id:",
-        toolCallId,
-        "priorChoice:",
-        prior.kind,
-      );
-      if (prior.kind === "reject" || prior.kind === "cancelled") {
-        return { kind: "reject", feedback: prior.reason ?? "Rejected." };
-      }
-      return { kind: "approve-once" };
+        // eslint-disable-next-line no-console -- documented redaction seam: approval short-circuit telemetry
+        console.debug(redactSensitive(`[copilot-agent] permission re-ask short-circuited id=${toolCallId} priorChoice=${prior.kind}`));
+        if (prior.kind === "reject" || prior.kind === "cancelled") {
+          return { kind: "reject", feedback: prior.reason ?? "Rejected." };
+        }
+        return { kind: "approve-once" };
       }
     }
 
@@ -1867,6 +1875,29 @@ export class CopilotAgentSession implements AgentSession {
     if (pendingForServer.size === 0) this.pendingMcpApprovalsByServer.delete(serverId);
   }
 
+  public cancelMcpCallsForServer(serverId: string, reason = "MCP server disconnected."): void {
+    this.clearResolvedMcpApprovalsForServer(serverId);
+    const activeForServer = this.activeMcpCallsByServer.get(serverId);
+    if (!activeForServer) return;
+    for (const toolCallId of [...activeForServer]) {
+      this.lifecycleCancelledMcpCallIds.add(toolCallId);
+      const existing = this.toolCallsThisTurn.find((call) => call.id === toolCallId);
+      if (existing) {
+        existing.outcome = "cancelled";
+        existing.detail = reason;
+        existing.approval = undefined;
+      }
+      this.currentStreamPush?.({
+        type: "tool_call_complete",
+        id: toolCallId,
+        outcome: "cancelled",
+        errorMessage: reason,
+      });
+      activeForServer.delete(toolCallId);
+    }
+    if (activeForServer.size === 0) this.activeMcpCallsByServer.delete(serverId);
+  }
+
   private cancelAllPendingApprovals(reason: string): void {
     if (this.pendingApprovals.size === 0) return;
     const reject: ApprovalChoice = { kind: "reject", reason };
@@ -1888,6 +1919,23 @@ export class CopilotAgentSession implements AgentSession {
       this.pendingMcpApprovalsByServer.set(serverId, pendingForServer);
     }
     pendingForServer.set(toolCallId, pending);
+  }
+
+  private registerActiveMcpCall(serverId: string, toolCallId: string): void {
+    let activeForServer = this.activeMcpCallsByServer.get(serverId);
+    if (!activeForServer) {
+      activeForServer = new Set();
+      this.activeMcpCallsByServer.set(serverId, activeForServer);
+    }
+    activeForServer.add(toolCallId);
+  }
+
+  private unregisterActiveMcpCall(toolCallId: string): void {
+    for (const [serverId, activeForServer] of this.activeMcpCallsByServer) {
+      activeForServer.delete(toolCallId);
+      if (activeForServer.size === 0) this.activeMcpCallsByServer.delete(serverId);
+    }
+    this.lifecycleCancelledMcpCallIds.delete(toolCallId);
   }
 
   private unregisterPendingMcpApproval(serverId: string, toolCallId: string): void {

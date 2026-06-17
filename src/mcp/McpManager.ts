@@ -29,6 +29,7 @@ export class McpManager {
   private listeners = new Set<() => void>();
   private connectPromises = new Map<McpServerId, Promise<void>>();
   private generations = new Map<McpServerId, number>();
+  private runtimeIdentityKeys = new Map<McpServerId, string>();
   private reconnectPolicies = new Map<McpServerId, McpReconnectPolicy>();
   private notificationQueue = new McpNotificationQueue({ refresh: (serverId) => this.refreshInventory(serverId) });
   private unloading = false;
@@ -47,6 +48,7 @@ export class McpManager {
   }
 
   private async enableInternal(serverId: McpServerId, config: McpServerConfig): Promise<void> {
+    await this.rebindIfRuntimeIdentityChanged(config);
     const runtime = this.getOrCreate(config);
     try {
       const inventory = await runtime.connect();
@@ -108,6 +110,7 @@ export class McpManager {
   private async performManualReconnect(serverId: McpServerId, config: McpServerConfig): Promise<void> {
     this.inventories.delete(serverId);
     await this.settle(serverId);
+    await this.rebindIfRuntimeIdentityChanged(config);
     const runtime = this.getOrCreate(config);
     try {
       runtime.clearVolatileSession?.();
@@ -136,6 +139,7 @@ export class McpManager {
       this.policy(serverId).cancel();
       this.inventories.delete(serverId);
       this.runtimes.delete(serverId);
+      this.runtimeIdentityKeys.delete(serverId);
       await this.settle(serverId);
       if (runtime) await runtime.unload();
       this.emit();
@@ -147,6 +151,7 @@ export class McpManager {
     this.notificationQueue.cancel();
     for (const policy of this.reconnectPolicies.values()) policy.cancel();
     this.runtimes.clear();
+    this.runtimeIdentityKeys.clear();
     this.inventories.clear();
     await withTimeout(Promise.all(
       entries.map(async ([serverId, runtime]) => {
@@ -261,7 +266,23 @@ export class McpManager {
       ? this.options.runtimeFactory(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) })
       : new McpServerRuntime(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) });
     this.runtimes.set(config.id, runtime);
+    this.runtimeIdentityKeys.set(config.id, runtimeIdentityKey(config));
     return runtime;
+  }
+
+  private async rebindIfRuntimeIdentityChanged(config: McpServerConfig): Promise<void> {
+    const existing = this.runtimes.get(config.id);
+    if (!existing) return;
+    const nextKey = runtimeIdentityKey(config);
+    if (this.runtimeIdentityKeys.get(config.id) === nextKey) return;
+    this.bumpGeneration(config.id);
+    this.notificationQueue.cancel(config.id);
+    this.inventories.delete(config.id);
+    this.runtimes.delete(config.id);
+    this.runtimeIdentityKeys.delete(config.id);
+    await this.settle(config.id);
+    await existing.unload();
+    this.emit();
   }
 
   private find(serverId: McpServerId): McpServerConfig {
@@ -403,4 +424,21 @@ function sanitizeSnapshot(snapshot: McpServerRuntimeSnapshot): McpServerRuntimeS
 
 function stringifyError(err: unknown): string {
   return redactSensitive(err instanceof Error ? err.message : String(err));
+}
+
+function runtimeIdentityKey(config: McpServerConfig): string {
+  return JSON.stringify(
+    config.transport === "stdio"
+      ? {
+          name: config.name,
+          transport: config.transport,
+          command: config.command,
+          args: config.args,
+        }
+      : {
+          name: config.name,
+          transport: config.transport,
+          url: config.url,
+        },
+  );
 }

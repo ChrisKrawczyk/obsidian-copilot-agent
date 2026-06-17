@@ -9,17 +9,19 @@ export function truncateMcpText(
   return `${text.slice(0, maxLength)}${MCP_TEXT_TRUNCATION_MARKER}`;
 }
 
+/**
+ * Prepare MCP server-provided text for plain `<pre>.textContent` rendering.
+ * `textContent` does not parse HTML and `<pre>` does not parse Markdown, so
+ * readability is best preserved by only normalizing line endings and making
+ * non-printable control characters visible.
+ */
 export function escapeMcpPlainText(value: unknown): string {
   const text = typeof value === "string" ? value : String(value ?? "");
   return text
     .replace(/\r\n?/g, "\n")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (ch) => {
       return `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`;
-    })
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/([\\`*_{}\[\]()#+.!|-])/g, "\\$1");
+    });
 }
 
 export function formatMcpApprovalText(value: unknown): string {

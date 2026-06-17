@@ -61,6 +61,14 @@ describe("mcpServerFormLogic", () => {
     expect(validateMcpServerForm({ id: "c", transport: "stdio", command: "node", callTimeoutSeconds: MCP_CALL_TIMEOUT_MAX_SECONDS + 1 }, ctx).errors.join(" ")).toMatch(/300 seconds or less/);
   });
 
+  test("stores tool call timeout as canonical milliseconds while reporting seconds to UI", () => {
+    const result = validateMcpServerForm({ id: "timeout", transport: "stdio", command: "node", callTimeoutSeconds: 5 }, ctx);
+    expect(result.ok).toBe(true);
+    expect(result.callTimeoutSeconds).toBe(5);
+    expect(result.config).toMatchObject({ callTimeoutMs: 5_000 });
+    expect(result.config).not.toHaveProperty("callTimeoutSeconds");
+  });
+
   test("redacts Authorization in display unless reveal is requested", () => {
     expect(buildHeaderDisplay({ authorization: "Bearer secret" })[0]).toMatchObject({ name: "Authorization", value: "••••••••", redacted: true });
     expect(buildHeaderDisplay({ authorization: "Bearer secret" }, true)[0]).toMatchObject({ value: "Bearer secret", redacted: false });

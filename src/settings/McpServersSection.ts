@@ -37,7 +37,6 @@ export class McpServersSection {
   private unsubs: Array<() => void> = [];
   private domCleanups: Array<() => void> = [];
   private lastGrantNoticeEpochByServer = new Map<string, string>();
-  private authStorageNoticeShown = false;
 
   constructor(private readonly options: McpServersSectionOptions) {}
 
@@ -71,7 +70,7 @@ export class McpServersSection {
     child(root, "h3", { text: "MCP servers" });
     child(root, "p", {
       cls: "setting-item-description",
-      text: "Configure MCP servers. Tools are not exposed to chat until the MCP tool bridge phase.",
+      text: "Connected MCP servers expose their tools to chat. Each tool call is gated by an approval prompt unless you grant it (scoped per server, tool, and trust epoch).",
     });
     const addButton = child(root, "button", { text: "Add server", attr: { "aria-label": "Add MCP server" } });
     on(addButton, "click", () => this.openForm());
@@ -168,7 +167,7 @@ export class McpServersSection {
     });
     const cwd = input(modal, "Working directory", existing?.transport === "stdio" ? existing.cwd ?? this.options.vaultRoot : this.options.vaultRoot);
     const env = textarea(modal, "Environment", existing?.transport === "stdio" && existing.env ? envToText(existing.env) : "");
-    const timeout = input(modal, "Tool call timeout seconds", String(numberField(existing, "callTimeoutSeconds") ?? MCP_CALL_TIMEOUT_DEFAULT_SECONDS));
+    const timeout = input(modal, "Tool call timeout seconds", String(callTimeoutSeconds(existing)));
     timeout.type = "number";
     const privateConfirm = checkbox(modal, PRIVATE_NETWORK_CONFIRMATION_COPY, false);
     const message = child(modal, "div", { attr: { role: "alert", "aria-label": "MCP server form message" } });
@@ -216,9 +215,9 @@ export class McpServersSection {
     if (denyKeys.length > 0) {
       this.notify(`Explicit MCP env keys override the denylist: ${denyKeys.join(", ")}`);
     }
-    if (!existing && config.transport === "http" && config.authorization && !this.authStorageNoticeShown) {
-      this.authStorageNoticeShown = true;
+    if (shouldShowAuthorizationNotice(existing, config) && !this.options.store.hasAuthorizationNoticeShown()) {
       this.notify(AUTHORIZATION_STORAGE_NOTICE);
+      await this.options.store.markAuthorizationNoticeShown();
     }
     await this.handleTrustEpochChange(meta, config.name, config.trustEpoch);
     if (config.enabled) {
@@ -370,4 +369,20 @@ function stringField(server: McpServerConfig, key: string): string | undefined {
 function numberField(server: McpServerConfig | undefined, key: string): number | undefined {
   const value = server ? (server as unknown as Record<string, unknown>)[key] : undefined;
   return typeof value === "number" ? value : undefined;
+}
+
+function callTimeoutSeconds(server: McpServerConfig | undefined): number {
+  const ms = numberField(server, "callTimeoutMs");
+  if (ms && Number.isFinite(ms) && ms > 0) return Math.floor(ms / 1000);
+  const legacySeconds = numberField(server, "callTimeoutSeconds");
+  return legacySeconds ?? MCP_CALL_TIMEOUT_DEFAULT_SECONDS;
+}
+
+function shouldShowAuthorizationNotice(
+  existing: McpServerConfig | undefined,
+  next: McpServerConfig,
+): boolean {
+  if (next.transport !== "http" || !next.authorization) return false;
+  if (!existing) return true;
+  return existing.transport !== "http" || !existing.authorization;
 }

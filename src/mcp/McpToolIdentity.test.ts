@@ -57,6 +57,30 @@ describe("McpToolIdentity", () => {
       ).toBeNull();
   });
 
+  it.each(["disconnected", "error", "reconnecting", "crashloop"] as const)(
+    "returns no metadata when runtime status is %s",
+    (status) => {
+      const id = normalizeServerId("Server_One");
+      const trustEpoch = "epoch_1" as McpTrustEpoch;
+      const servers = [{
+        id,
+        name: "Server One",
+        enabled: true,
+        trustEpoch,
+        transport: "stdio" as const,
+        command: "node",
+        args: [],
+      }];
+      expect(
+        resolveMcpToolSourceMetadata(
+          formatSyntheticId(id, "read"),
+          servers,
+          new Map([[id, status]]),
+        ),
+      ).toBeNull();
+    },
+  );
+
   it("round-trips format and parse symmetrically", () => {
     const id = normalizeServerId("Server_One");
     const synthetic = formatSyntheticId(id, " Tool Name__Case ");

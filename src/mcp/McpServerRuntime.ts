@@ -292,7 +292,7 @@ export class McpServerRuntime {
   private request(method: string, params: unknown, timeoutMs: number, signal?: AbortSignal): Promise<unknown> {
     const transport = this.transport;
     if (!transport) return Promise.reject(new Error("MCP transport is not connected."));
-    const id = this.nextId++;
+    const id = `oca-${this.nextId++}`;
     let settled = false;
     const cleanup = (): void => {
       settled = true;

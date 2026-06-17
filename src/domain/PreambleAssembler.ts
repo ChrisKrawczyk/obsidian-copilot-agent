@@ -38,7 +38,7 @@ export interface PreambleInput {
    */
   excludeRawFs?: boolean;
   mcp?: {
-    tools: readonly Pick<McpRegisteredTool, "syntheticId" | "serverName" | "description" | "instructions">[];
+    tools: readonly Pick<McpRegisteredTool, "syntheticId" | "serverName" | "toolName" | "description" | "instructions">[];
   };
 }
 
@@ -135,7 +135,7 @@ export function assemblePreamble(input: PreambleInput): string {
 
 function appendMcpInventory(
   inventoryBlock: string,
-  mcpTools: readonly Pick<McpRegisteredTool, "syntheticId" | "serverName" | "description" | "instructions">[] | undefined,
+  mcpTools: readonly Pick<McpRegisteredTool, "syntheticId" | "serverName" | "toolName" | "description" | "instructions">[] | undefined,
 ): string {
   if (!mcpTools || mcpTools.length === 0) return inventoryBlock;
   const lines = [
@@ -146,7 +146,7 @@ function appendMcpInventory(
   ];
   const instructionsSeen = new Set<string>();
   for (const tool of mcpTools) {
-    lines.push(`- \`${tool.syntheticId}\` (MCP / ${tool.serverName}): ${truncateMcpText(tool.description ?? "")}`);
+    lines.push(`- \`${tool.toolName}\` (MCP / ${tool.serverName}) — call as \`${tool.syntheticId}\`: ${truncateMcpText(tool.description ?? "")}`);
     if (tool.instructions && !instructionsSeen.has(tool.serverName)) {
       instructionsSeen.add(tool.serverName);
       lines.push(`  Instructions from ${tool.serverName}: ${truncateMcpText(tool.instructions)}`);

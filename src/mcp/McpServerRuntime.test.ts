@@ -125,8 +125,39 @@ describe("McpServerRuntime", () => {
     controller.abort();
     await expect(call).rejects.toMatchObject({ name: "CancelledError" });
     const cancel = transport.sentMessages.find((message) => (message as { method?: string }).method === "notifications/cancelled") as { params?: unknown } | undefined;
-    expect(cancel?.params).toEqual({ requestId: 3, reason: "user_cancelled" });
+    expect(cancel?.params).toEqual({ requestId: "oca-3", reason: "user_cancelled" });
     expect(JSON.stringify(cancel)).not.toContain("do-not-send");
+  });
+
+  test("tools/call honors per-server callTimeoutMs", async () => {
+    const transport = new HangingCallTransport();
+    const rt = runtime(transport, { ...config(), callTimeoutMs: 5_000 });
+    await rt.connect();
+    vi.useFakeTimers();
+    try {
+      const call = rt.callTool("echo", {});
+      const expectation = expect(call).rejects.toThrow(/tools\/call.*timed out/);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("numeric server-originated ids do not collide with prefixed client request ids", async () => {
+    const transport = new HangingCallTransport();
+    const rt = runtime(transport);
+    await rt.connect();
+    vi.useFakeTimers();
+    try {
+      const call = rt.callTool("echo", {});
+      const expectation = expect(call).rejects.toThrow(/tools\/call.*timed out/);
+      transport.onmessage?.({ jsonrpc: "2.0", id: 1, result: { content: "wrong" } } as JSONRPCMessage);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("unload mid-handshake aborts initialize and never publishes connected", async () => {

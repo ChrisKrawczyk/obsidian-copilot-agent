@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -220,7 +221,8 @@ function findOnPath(command: string, env: Record<string, string>): string | null
   const pathValue = pathKey ? env[pathKey] : "";
   for (const entry of pathValue.split(path.delimiter)) {
     if (!entry) continue;
-    return path.join(entry, command);
+    const candidate = path.join(entry, command);
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
 }

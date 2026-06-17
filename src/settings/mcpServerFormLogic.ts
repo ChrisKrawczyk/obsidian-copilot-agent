@@ -27,6 +27,7 @@ export interface McpServerFormInput {
   authorization?: string;
   headers?: Record<string, string>;
   callTimeoutSeconds?: number;
+  callTimeoutMs?: number;
   privateNetworkConfirmed?: boolean;
   revealSensitive?: boolean;
   rejectUnauthorized?: never;
@@ -72,7 +73,10 @@ export function validateMcpServerForm(
   const warnings: string[] = [];
   const headerDisplay = buildHeaderDisplay(input, input.revealSensitive === true);
   const authorization = normalizeAuthorization(input);
-  const callTimeoutSeconds = input.callTimeoutSeconds ?? MCP_CALL_TIMEOUT_DEFAULT_SECONDS;
+  const callTimeoutSeconds = input.callTimeoutSeconds ??
+    (typeof input.callTimeoutMs === "number"
+      ? Math.floor(input.callTimeoutMs / 1000)
+      : MCP_CALL_TIMEOUT_DEFAULT_SECONDS);
   let normalizedId: McpServerId | undefined;
   let confirmationRequired = false;
   let hostClass: HostClass | undefined;
@@ -132,7 +136,7 @@ export function validateMcpServerForm(
         args,
         ...(input.env && Object.keys(input.env).length > 0 ? { env: { ...input.env } } : {}),
         ...(cwd !== context.vaultRoot ? { cwd } : {}),
-        callTimeoutSeconds,
+        callTimeoutMs: callTimeoutSeconds * 1000,
       } as McpServerConfig;
     } else if (input.transport === "http") {
       const rawUrl = input.url?.trim() ?? "";
@@ -157,7 +161,7 @@ export function validateMcpServerForm(
             transport: "http",
             url: validation.url.href,
             ...(authorization ? { authorization } : {}),
-            callTimeoutSeconds,
+            callTimeoutMs: callTimeoutSeconds * 1000,
           } as McpServerConfig;
         } catch (err) {
           errors.push(err instanceof Error ? err.message : String(err));

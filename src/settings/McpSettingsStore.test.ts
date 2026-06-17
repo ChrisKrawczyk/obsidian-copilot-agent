@@ -99,6 +99,28 @@ describe("McpSettingsStore", () => {
     });
   });
 
+  it("migrates legacy callTimeoutSeconds to canonical callTimeoutMs", async () => {
+    const server = { ...stdio(), callTimeoutSeconds: 120 };
+    const io = memoryIo({ mcpServers: [server] });
+    const store = new McpSettingsStore(io);
+    const loaded = await store.load();
+    expect(loaded[0]).toMatchObject({ callTimeoutMs: 120_000 });
+    expect((loaded[0] as unknown as Record<string, unknown>).callTimeoutSeconds).toBeUndefined();
+    await store.save();
+    const saved = (io.peek() as { mcpServers: Record<string, unknown>[] }).mcpServers[0];
+    expect(saved.callTimeoutMs).toBe(120_000);
+    expect(saved.callTimeoutSeconds).toBeUndefined();
+  });
+
+  it("persists authorization notice flag", async () => {
+    const io = memoryIo({ mcpServers: [] });
+    const store = new McpSettingsStore(io);
+    await store.load();
+    expect(store.hasAuthorizationNoticeShown()).toBe(false);
+    await store.markAuthorizationNoticeShown();
+    expect((io.peek() as { mcpAuthorizationNoticeShown: boolean }).mcpAuthorizationNoticeShown).toBe(true);
+  });
+
   it("never serializes runtime-only fields including Mcp-Session-Id", async () => {
     const server = {
       ...http(),

@@ -81,7 +81,8 @@ async function flush(): Promise<void> {
 }
 
 async function mount(initial: McpServerConfig[] = [], statuses: McpServerRuntimeSnapshot[] = []) {
-  const store = new McpSettingsStore(io({ mcpServers: initial }));
+  const backing = io({ mcpServers: initial });
+  const store = new McpSettingsStore(backing);
   await store.load();
   const notices: string[] = [];
   const mgr = manager(statuses);
@@ -89,7 +90,7 @@ async function mount(initial: McpServerConfig[] = [], statuses: McpServerRuntime
   const root = new FakeElement();
   const section = new McpServersSection({ store, manager: mgr as never, safetyStore: safety, vaultRoot: "C:\\vault", pathExists: (p) => p === "C:\\vault", notify: (m) => notices.push(m) });
   section.mount(root as never);
-  return { root, section, store, mgr, safety, notices };
+  return { root, section, store, mgr, safety, notices, backing };
 }
 
 describe("McpServersSection", () => {
@@ -211,6 +212,64 @@ describe("McpServersSection", () => {
       await flush();
     }
     expect(ctx.notices.filter((n) => n === AUTHORIZATION_STORAGE_NOTICE)).toHaveLength(1);
+    expect((ctx.backing.peek() as { mcpAuthorizationNoticeShown?: boolean }).mcpAuthorizationNoticeShown).toBe(true);
+  });
+
+  test("Authorization storage Notice fires when editing HTTP server to add auth", async () => {
+    const base = { id: normalizeServerId("http"), name: "HTTP", enabled: true, transport: "http" as const, url: "https://example.com/mcp" };
+    const server = { ...base, trustEpoch: computeTrustEpoch(base) };
+    const ctx = await mount([server]);
+    ctx.root.byAria("Edit HTTP").click();
+    ctx.root.byAria("Authorization").value = "Bearer secret";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n === AUTHORIZATION_STORAGE_NOTICE)).toHaveLength(1);
+    expect((ctx.backing.peek() as { mcpAuthorizationNoticeShown?: boolean }).mcpAuthorizationNoticeShown).toBe(true);
+  });
+
+  test("Authorization storage Notice persists across reload and does not refire", async () => {
+    const ctx = await mount();
+    ctx.root.byAria("Add MCP server").click();
+    ctx.root.byAria("Server id").value = "h1";
+    ctx.root.byAria("Transport").value = "http";
+    ctx.root.byAria("URL").value = "https://example.com/h1";
+    ctx.root.byAria("Authorization").value = "Bearer secret";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+
+    const store = new McpSettingsStore(ctx.backing);
+    await store.load();
+    const notices: string[] = [];
+    const root = new FakeElement();
+    const section = new McpServersSection({
+      store,
+      manager: manager() as never,
+      safetyStore: { revokeGrantsForServer: vi.fn(async () => undefined) },
+      vaultRoot: "C:\\vault",
+      pathExists: (p) => p === "C:\\vault",
+      notify: (m) => notices.push(m),
+    });
+    section.mount(root as never);
+    root.byAria("Add MCP server").click();
+    root.byAria("Server id").value = "h2";
+    root.byAria("Transport").value = "http";
+    root.byAria("URL").value = "https://example.com/h2";
+    root.byAria("Authorization").value = "Bearer second";
+    root.byAria("Save MCP server").click();
+    await flush();
+    expect(notices.filter((n) => n === AUTHORIZATION_STORAGE_NOTICE)).toHaveLength(0);
+  });
+
+  test("preexisting auth suppresses later Authorization storage Notices", async () => {
+    const ctx = await mount([http()]);
+    ctx.root.byAria("Add MCP server").click();
+    ctx.root.byAria("Server id").value = "h2";
+    ctx.root.byAria("Transport").value = "http";
+    ctx.root.byAria("URL").value = "https://example.com/h2";
+    ctx.root.byAria("Authorization").value = "Bearer second";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n === AUTHORIZATION_STORAGE_NOTICE)).toHaveLength(0);
   });
 
   test("trust-epoch grant-revocation Notice fires once per epoch change", async () => {

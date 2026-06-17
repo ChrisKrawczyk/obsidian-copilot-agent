@@ -1009,6 +1009,25 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     await agent.dispose();
   });
 
+  test("persistent MCP grant requires approval when runtime metadata is unavailable", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove: {
+        [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+      },
+      getMcpToolSourceMetadata: () => null,
+    });
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-mcp-disconnected",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    expect(result.kind).toBe("reject");
+    if (result.kind === "reject") expect(result.feedback).toMatch(/metadata|No UI/i);
+    await agent.dispose();
+  });
+
   test("approve-for-session grants exact MCP server/tool/epoch only", async () => {
     const h = makeFakeSdk();
     let resolveSend!: (value: unknown) => void;

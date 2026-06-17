@@ -1,4 +1,3 @@
-import { Notice } from "obsidian";
 import type { McpServerId, McpServerRuntimeSnapshot, McpToolInventoryEntry } from "./McpTypes";
 import { parseSyntheticId, isValidMcpToolName } from "./McpToolIdentity";
 import { redactSensitive } from "./redactSensitive";
@@ -77,11 +76,6 @@ export function buildMcpToolRegistrySnapshot(input: McpToolRegistryInput): McpTo
       if (reason) {
         rejected.push({ serverId, toolName: tool.toolName, reason });
         input.notify?.(redactSensitive(`[Copilot Agent] MCP tool rejected: ${reason}.`));
-        try {
-          new Notice(redactSensitive(`[Copilot Agent] MCP tool rejected: ${reason}.`), 8000);
-        } catch {
-          // Notice is unavailable in unit tests.
-        }
         continue;
       }
       accepted.push(Object.freeze({ ...tool, ...(instructionsByServer[serverId] ? { instructions: instructionsByServer[serverId] } : {}) }));

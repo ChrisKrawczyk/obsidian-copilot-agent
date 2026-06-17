@@ -10,6 +10,7 @@ import { redactSensitive } from "../mcp/redactSensitive";
 
 interface PersistedShapeWithMcp {
   mcpServers?: unknown;
+  mcpAuthorizationNoticeShown?: unknown;
   [topLevelKey: string]: unknown;
 }
 
@@ -36,6 +37,7 @@ const RUNTIME_KEYS = new Set([
 export class McpSettingsStore {
   private tail: Promise<void> = Promise.resolve();
   private cached: McpServerConfig[] = [];
+  private authorizationNoticeShown = false;
   private listeners = new Set<(servers: McpServerConfig[]) => void>();
   private lastDropNotice = "";
 
@@ -54,6 +56,7 @@ export class McpSettingsStore {
     const entries = raw && typeof raw === "object" ? raw.mcpServers : undefined;
     if (!Array.isArray(entries)) {
       this.cached = [];
+      this.authorizationNoticeShown = raw?.mcpAuthorizationNoticeShown === true;
       return this.snapshot();
     }
 
@@ -74,6 +77,9 @@ export class McpSettingsStore {
       valid.push(parsed.config);
     }
     this.cached = valid;
+    this.authorizationNoticeShown =
+      raw?.mcpAuthorizationNoticeShown === true ||
+      valid.some((server) => server.transport === "http" && !!server.authorization);
     this.notifyDroppedOnce(dropped);
     return this.snapshot();
   }
@@ -89,6 +95,16 @@ export class McpSettingsStore {
 
   async save(servers: McpServerConfig[] = this.cached): Promise<void> {
     this.cached = sanitizeAndDedupeOrThrow(servers);
+    await this.persist();
+  }
+
+  hasAuthorizationNoticeShown(): boolean {
+    return this.authorizationNoticeShown;
+  }
+
+  async markAuthorizationNoticeShown(): Promise<void> {
+    if (this.authorizationNoticeShown) return;
+    this.authorizationNoticeShown = true;
     await this.persist();
   }
 
@@ -196,6 +212,7 @@ export class McpSettingsStore {
         fresh && typeof fresh === "object" ? (fresh as PersistedShapeWithMcp) : {};
       await this.io.saveData({
         ...base,
+        mcpAuthorizationNoticeShown: this.authorizationNoticeShown,
         mcpServers: snap.map(toPersistedServerConfig),
       });
     });
@@ -255,6 +272,7 @@ function parseServerConfig(
     return { ok: false, label };
   }
   const base = stripRuntimeFields(raw);
+  const callTimeoutMs = normalizeCallTimeoutMs(raw);
   if (raw.transport === "stdio") {
     if (typeof raw.command !== "string" || !Array.isArray(raw.args)) {
       return { ok: false, label: id };
@@ -267,6 +285,7 @@ function parseServerConfig(
     if (cwd === null) return { ok: false, label: id };
     const config = {
       ...base,
+      ...(callTimeoutMs ? { callTimeoutMs } : {}),
       id,
       name: raw.name,
       enabled: raw.enabled,
@@ -289,6 +308,7 @@ function parseServerConfig(
     }
     const config = {
       ...base,
+      ...(callTimeoutMs ? { callTimeoutMs } : {}),
       id,
       name: raw.name,
       enabled: raw.enabled,
@@ -322,6 +342,7 @@ function stripRuntimeFields(raw: Record<string, unknown>): Record<string, unknow
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
     if (RUNTIME_KEYS.has(key)) continue;
+    if (key === "callTimeoutSeconds") continue;
     if (key === "headers" && value && typeof value === "object" && !Array.isArray(value)) {
       cleaned.headers = Object.fromEntries(
         Object.entries(value as Record<string, unknown>).filter(
@@ -333,6 +354,16 @@ function stripRuntimeFields(raw: Record<string, unknown>): Record<string, unknow
     cleaned[key] = value;
   }
   return cleaned;
+}
+
+function normalizeCallTimeoutMs(raw: Record<string, unknown>): number | undefined {
+  if (typeof raw.callTimeoutMs === "number" && Number.isFinite(raw.callTimeoutMs) && raw.callTimeoutMs > 0) {
+    return Math.floor(raw.callTimeoutMs);
+  }
+  if (typeof raw.callTimeoutSeconds === "number" && Number.isFinite(raw.callTimeoutSeconds) && raw.callTimeoutSeconds > 0) {
+    return Math.floor(raw.callTimeoutSeconds * 1000);
+  }
+  return undefined;
 }
 
 function toPersistedServerConfig(server: McpServerConfig): McpServerConfig {

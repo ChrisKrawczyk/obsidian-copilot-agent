@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 import { describe, expect, test, vi } from "vitest";
 import { StdioTransport, resolveCommandForSpawn } from "./StdioTransport";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
@@ -38,14 +39,34 @@ describe("StdioTransport", () => {
   });
 
   test("resolves Windows .cmd through cmd.exe while preserving metacharacters as args", () => {
+    const exists = vi.spyOn(fs, "existsSync").mockImplementation((candidate) => String(candidate) === "C:\\bin\\npx.cmd");
     const resolved = resolveCommandForSpawn(
       "npx.cmd",
       { PATH: "C:\\bin" },
       "win32",
       ["server", "& notepad"],
     );
-    expect(resolved.command).toBe("cmd.exe");
-    expect(resolved.args).toEqual(["/d", "/s", "/c", "C:\\bin\\npx.cmd", "server", "& notepad"]);
+    try {
+      expect(resolved.command).toBe("cmd.exe");
+      expect(resolved.args).toEqual(["/d", "/s", "/c", "C:\\bin\\npx.cmd", "server", "& notepad"]);
+    } finally {
+      exists.mockRestore();
+    }
+  });
+
+  test("falls back to cmd.exe lookup when PATH candidates do not exist", () => {
+    const exists = vi.spyOn(fs, "existsSync").mockReturnValue(false);
+    try {
+      const resolved = resolveCommandForSpawn(
+        "npx.cmd",
+        { PATH: ["C:\\nope1", "C:\\nope2", "C:\\Windows\\system32"].join(";") },
+        "win32",
+        ["server"],
+      );
+      expect(resolved).toEqual({ command: "cmd.exe", args: ["/d", "/s", "/c", "npx.cmd", "server"] });
+    } finally {
+      exists.mockRestore();
+    }
   });
 
   test("captures redacted 64 KiB stderr ring with truncation marker", async () => {

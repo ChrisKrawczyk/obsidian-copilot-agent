@@ -1,4 +1,4 @@
-import type { McpServerConfig, McpServerId, McpTrustEpoch } from "./McpTypes";
+import type { McpRuntimeStatus, McpServerConfig, McpServerId, McpTrustEpoch } from "./McpTypes";
 
 const PREFIX = "mcp__";
 const FORBIDDEN_TOOL_CHARS = /[\u0000-\u001f\u007f/\\]/;
@@ -38,12 +38,14 @@ export function resolveMcpToolSourceMetadata(
     McpServerConfig,
     "id" | "name" | "enabled" | "trustEpoch"
   >[],
+  statusByServer?: ReadonlyMap<McpServerId, McpRuntimeStatus>,
 ): McpToolSourceMetadata | null {
   if (!syntheticId) return null;
   const parsed = parseSyntheticId(syntheticId);
   if (!parsed) return null;
   const server = servers.find((entry) => entry.id === parsed.serverId);
   if (!server || server.enabled === false) return null;
+  if (statusByServer && statusByServer.get(server.id) !== "connected") return null;
   return {
     source: "mcp",
     stableServerId: server.id,

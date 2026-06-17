@@ -194,7 +194,7 @@ export default class CopilotAgentPlugin extends Plugin {
       settleTrackedCalls: async (serverId) => {
         await Promise.all(Array.from(liveRuntimes).map(async ({ session }) => {
           session.cancelPendingMcpApprovalsForServer(serverId, "MCP server disconnected.");
-          await session.cancelCurrent();
+          session.cancelMcpCallsForServer(serverId, "MCP server disconnected.");
         }));
       },
       onForcedKill: (event) => {
@@ -485,6 +485,7 @@ export default class CopilotAgentPlugin extends Plugin {
             resolveMcpToolSourceMetadata(
               typeof req.toolName === "string" ? req.toolName : undefined,
               mcpSettingsStore.snapshot(),
+              new Map(mcpManager.statusSnapshot().map((snapshot) => [snapshot.id, snapshot.status])),
             ),
           extractVaultPath: (req) => {
             const r = req as { toolName?: unknown; args?: { path?: unknown } };
