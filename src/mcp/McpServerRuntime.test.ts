@@ -15,7 +15,7 @@ import {
 } from "./McpServerRuntime";
 
 describe("McpServerRuntime", () => {
-  test("initialize sends advertised version and empty client capabilities", async () => {
+  test("initialize sends advertised version and roots capability", async () => {
     const transport = new FakeTransport({
       initialize: {
         protocolVersion: "2025-06-18",
@@ -27,7 +27,7 @@ describe("McpServerRuntime", () => {
     const init = transport.requests.find((r) => r.method === "initialize");
     expect(init?.params).toMatchObject({
       protocolVersion: MCP_ADVERTISED_PROTOCOL_VERSION,
-      capabilities: {},
+      capabilities: { roots: { listChanged: false } },
     });
     expect(transport.notifications).toContain("notifications/initialized");
   });

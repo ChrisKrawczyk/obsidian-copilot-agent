@@ -298,6 +298,12 @@ export class ChatView extends ItemView {
       cls: "copilot-agent-status",
       text: "…",
     });
+    const settingsBtn = titleRow.createEl("button", {
+      cls: "copilot-agent-settings-button clickable-icon",
+      attr: { "aria-label": "Open Copilot Agent settings", title: "Open Copilot Agent settings" },
+    });
+    setIcon(settingsBtn, "settings");
+    settingsBtn.addEventListener("click", () => this.openSettings());
 
     this.listEl = root.createDiv({ cls: "copilot-agent-messages" });
     this.renderer = new MessageRenderer(

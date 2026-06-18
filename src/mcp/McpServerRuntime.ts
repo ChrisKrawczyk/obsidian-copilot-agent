@@ -1,6 +1,7 @@
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { pathToFileURL } from "node:url";
 import type {
   McpHttpServerConfig,
   McpRuntimeStatus,
@@ -99,7 +100,9 @@ export class McpServerRuntime {
         "initialize",
         {
           protocolVersion: MCP_ADVERTISED_PROTOCOL_VERSION,
-          capabilities: {},
+          capabilities: {
+            roots: { listChanged: false },
+          },
           clientInfo: { name: "obsidian-copilot-agent", version: "0.5.0" },
         },
         MCP_INITIALIZE_TIMEOUT_MS,
@@ -160,8 +163,19 @@ export class McpServerRuntime {
 
   async disable(): Promise<void> {
     this.lifecycleEpoch++;
-    await this.close();
     this.status = "disabled";
+    const transport = this.transport;
+    this.sessionId = undefined;
+    this.transport = null;
+    this.rejectPending(new Error("MCP transport closed."));
+    if (transport) {
+      // Update UI immediately; tear down the child in the background. On
+      // Windows the close sequence (stdin.end → SIGTERM → forceKill) can take
+      // up to 10s for ill-behaved servers and would otherwise block the
+      // settings UI.
+      void this.deleteHttpSessionBestEffort().catch(() => undefined);
+      void transport.close().catch(() => undefined);
+    }
   }
 
   async unload(): Promise<void> {
@@ -358,7 +372,11 @@ export class McpServerRuntime {
       this.options.onListChanged?.(this.config.id);
       return;
     }
-    const maybe = message as { id?: string | number; result?: unknown; error?: { message?: string; code?: number | string; data?: unknown } };
+    const maybe = message as { id?: string | number; method?: string; result?: unknown; error?: { message?: string; code?: number | string; data?: unknown } };
+    if (maybe.id !== undefined && maybe.method !== undefined) {
+      this.handleInboundRequest(maybe.id, maybe.method);
+      return;
+    }
     if (maybe.id === undefined) return;
     const pending = this.pending.get(maybe.id);
     if (!pending) return;
@@ -368,6 +386,41 @@ export class McpServerRuntime {
     } else {
       pending.resolve(maybe.result);
     }
+  }
+
+  private handleInboundRequest(id: string | number, method: string): void {
+    const transport = this.transport;
+    if (!transport) return;
+    let result: unknown;
+    if (method === "roots/list") {
+      result = { roots: this.advertisedRoots() };
+    } else if (method === "ping") {
+      result = {};
+    } else {
+      void transport.send({
+        jsonrpc: "2.0",
+        id,
+        error: { code: -32601, message: `Method not found: ${method}` },
+      } as JSONRPCMessage).catch(() => undefined);
+      return;
+    }
+    void transport.send({ jsonrpc: "2.0", id, result } as JSONRPCMessage).catch(() => undefined);
+  }
+
+  private advertisedRoots(): Array<{ uri: string; name?: string }> {
+    if (this.config.transport !== "stdio") return [];
+    const cwd = this.config.cwd ?? this.options.vaultRoot;
+    if (!cwd) return [];
+    // Emit a URI form that round-trips through BOTH the spec-compliant
+    // `fileURLToPath` AND the buggy `slice(7)` parser in
+    // @modelcontextprotocol/server-filesystem (see upstream PR #3353):
+    //   file://<forward-slash path with literal spaces, no percent-encoding>
+    // The standard `pathToFileURL` form (`file:///C:/...%20...`) breaks the
+    // buggy parser on any Windows path with a space (OneDrive, "Program
+    // Files", etc.). Two leading slashes + no encoding is accepted by Node's
+    // URL parser too — `fileURLToPath` resolves it to the correct path.
+    const uri = pathToCompatibleFileUri(cwd) ?? pathToFileUri(cwd);
+    return [{ uri, name: this.config.name }];
   }
 
   private async close(): Promise<void> {
@@ -383,7 +436,7 @@ export class McpServerRuntime {
     const safe = sanitizeError(err);
     this.status = "error";
     const stderr = this.stderrTail();
-    this.lastError = redactSensitive(`${safe.message}${safe.stack ? `\n${safe.stack}` : ""}${stderr ? `\nstderr:\n${stderr}` : ""}`);
+    this.lastError = redactSensitive(`${safe.message}${safe.stack ? `\n${safe.stack}` : ""}${stderr ? `\nServer log:\n${stderr}` : ""}`);
   }
 
   private stderrTail(): string | undefined {
@@ -621,6 +674,29 @@ function truncate(text: string, max: number): string | undefined {
   if (!text) return undefined;
   if (text.length <= max) return redactSensitive(text);
   return redactSensitive(`${text.slice(0, max)}\n[truncated]`);
+}
+
+function pathToFileUri(p: string): string {
+  try {
+    return pathToFileURL(p).href;
+  } catch {
+    let normalized = p.replace(/\\/g, "/");
+    if (/^[a-zA-Z]:/.test(normalized)) normalized = `/${normalized}`;
+    if (!normalized.startsWith("/")) normalized = `/${normalized}`;
+    return `file://${encodeURI(normalized)}`;
+  }
+}
+
+function pathToCompatibleFileUri(p: string): string | null {
+  // Produce `file://C:/path with spaces/...` (two slashes, no encoding) for
+  // Windows absolute paths. This form is accepted by both Node's URL parser
+  // (`fileURLToPath` returns the correct path) and by the buggy `slice(7)`
+  // parser in @modelcontextprotocol/server-filesystem. For POSIX absolute
+  // paths, return null and fall back to the standard pathToFileURL form
+  // (which already handles them correctly).
+  const normalized = p.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalized)) return `file://${normalized}`;
+  return null;
 }
 
 export { MCP_STDIO_FRAME_LIMIT_BYTES };

@@ -31,9 +31,18 @@ export function createMcpSdkTools(snapshot: McpToolRegistrySnapshot, options: Mc
         }
         const statuses = options.manager.statusSnapshot?.();
         const status = statuses?.find((snapshot) => snapshot.id === entry.serverId);
-        if (statuses && (!status || status.status !== "connected")) throw cancelledError("MCP server is disabled, removed, or disconnected.");
+        const unavailable = (reason: string): Error => {
+          const err = new Error(
+            `MCP server "${entry.serverName}" is ${reason}. All tools from this server (including "${entry.toolName}") are unavailable in this session. ` +
+              "Do not retry these tools — inform the user that the server needs to be re-enabled in plugin settings.",
+          );
+          err.name = "CancelledError";
+          (err as Error & { cancelled?: boolean }).cancelled = true;
+          return err;
+        };
+        if (statuses && (!status || status.status !== "connected")) throw unavailable("disabled, removed, or disconnected");
         if ((status as typeof status & { enabled?: boolean } | undefined)?.enabled === false) {
-          throw cancelledError("MCP server is disabled, removed, or disconnected.");
+          throw unavailable("disabled");
         }
         const callArgs = args && typeof args === "object" ? args as Record<string, unknown> : {};
         const raw = await withCancellationAndLateDebug(

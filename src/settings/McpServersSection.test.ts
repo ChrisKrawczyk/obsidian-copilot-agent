@@ -97,7 +97,7 @@ describe("McpServersSection", () => {
   test("add, edit, remove, enable, disable, and reconnect flows", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "alpha";
+    ctx.root.byAria("Server ID").value = "alpha";
     ctx.root.byAria("Display name").value = "Alpha";
     ctx.root.byAria("Command").value = "node";
     ctx.root.byAria("Save MCP server").click();
@@ -129,7 +129,7 @@ describe("McpServersSection", () => {
   test("private-network confirmation copy blocks save until confirmed", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "priv";
+    ctx.root.byAria("Server ID").value = "priv";
     ctx.root.byAria("Display name").value = "Private";
     ctx.root.byAria("Transport").value = "http";
     ctx.root.byAria("URL").value = "https://192.168.1.2/mcp";
@@ -144,7 +144,7 @@ describe("McpServersSection", () => {
   test("metadata-host errors render in the form", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "meta";
+    ctx.root.byAria("Server ID").value = "meta";
     ctx.root.byAria("Transport").value = "http";
     ctx.root.byAria("URL").value = "https://169.254.169.254/mcp";
     ctx.root.byAria("Save MCP server").click();
@@ -158,7 +158,7 @@ describe("McpServersSection", () => {
     expect(error.innerHTML).toBe("");
   });
 
-  test("stderr and last-error render redacted plain text in pre blocks", async () => {
+  test("server log and last-error render redacted plain text in pre blocks", async () => {
     const ctx = await mount([stdio()], [{
       id: normalizeServerId("alpha"),
       status: "crashloop",
@@ -167,7 +167,7 @@ describe("McpServersSection", () => {
       toolCount: 0,
     }]);
     const error = ctx.root.byAria("Last error for Alpha");
-    const stderr = ctx.root.byAria("stderr for Alpha");
+    const stderr = ctx.root.byAria("Server log for Alpha");
     expect(error.tagName).toBe("pre");
     expect(stderr.tagName).toBe("pre");
     expect(`${error.textContent}\n${stderr.textContent}`).toContain("[REDACTED]");
@@ -180,7 +180,7 @@ describe("McpServersSection", () => {
   test("denylist-env warning and one-shot Notice on save", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "env";
+    ctx.root.byAria("Server ID").value = "env";
     ctx.root.byAria("Command").value = "node";
     ctx.root.byAria("Environment").value = "GITHUB_TOKEN=x";
     ctx.root.byAria("Save MCP server").click();
@@ -192,7 +192,7 @@ describe("McpServersSection", () => {
   test("denylist-env Notice does not fire without denylisted keys", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "env";
+    ctx.root.byAria("Server ID").value = "env";
     ctx.root.byAria("Command").value = "node";
     ctx.root.byAria("Environment").value = "SAFE_KEY=x";
     ctx.root.byAria("Save MCP server").click();
@@ -204,7 +204,7 @@ describe("McpServersSection", () => {
     const ctx = await mount();
     for (const id of ["h1", "h2"]) {
       ctx.root.byAria("Add MCP server").click();
-      ctx.root.byAria("Server id").value = id;
+      ctx.root.byAria("Server ID").value = id;
       ctx.root.byAria("Transport").value = "http";
       ctx.root.byAria("URL").value = `https://example.com/${id}`;
       ctx.root.byAria("Authorization").value = "Bearer secret";
@@ -230,7 +230,7 @@ describe("McpServersSection", () => {
   test("Authorization storage Notice persists across reload and does not refire", async () => {
     const ctx = await mount();
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "h1";
+    ctx.root.byAria("Server ID").value = "h1";
     ctx.root.byAria("Transport").value = "http";
     ctx.root.byAria("URL").value = "https://example.com/h1";
     ctx.root.byAria("Authorization").value = "Bearer secret";
@@ -251,7 +251,7 @@ describe("McpServersSection", () => {
     });
     section.mount(root as never);
     root.byAria("Add MCP server").click();
-    root.byAria("Server id").value = "h2";
+    root.byAria("Server ID").value = "h2";
     root.byAria("Transport").value = "http";
     root.byAria("URL").value = "https://example.com/h2";
     root.byAria("Authorization").value = "Bearer second";
@@ -263,7 +263,7 @@ describe("McpServersSection", () => {
   test("preexisting auth suppresses later Authorization storage Notices", async () => {
     const ctx = await mount([http()]);
     ctx.root.byAria("Add MCP server").click();
-    ctx.root.byAria("Server id").value = "h2";
+    ctx.root.byAria("Server ID").value = "h2";
     ctx.root.byAria("Transport").value = "http";
     ctx.root.byAria("URL").value = "https://example.com/h2";
     ctx.root.byAria("Authorization").value = "Bearer second";

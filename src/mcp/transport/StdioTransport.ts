@@ -155,13 +155,13 @@ export class StdioTransport implements Transport {
     } catch {
       // best effort; fall through to signal sequence
     }
-    if (await this.waitForClose(5_000)) return;
+    if (await this.waitForClose(1_500)) return;
     try {
       child.kill("SIGTERM");
     } catch {
       // best effort; forced kill follows
     }
-    if (await this.waitForClose(5_000)) return;
+    if (await this.waitForClose(1_500)) return;
     this.forceKill(child, "Stubborn MCP stdio child did not exit after stdin close and SIGTERM.");
   }
 

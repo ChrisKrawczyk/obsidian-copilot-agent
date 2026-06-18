@@ -69,6 +69,17 @@ export class McpManager {
 
   async disable(serverId: McpServerId): Promise<void> {
     const runtime = this.runtimes.get(serverId);
+    // Idempotency guard: if there's no runtime, or the runtime is already in
+    // its terminal disabled state with no inventory, this is a no-op. This
+    // matters because the settings store subscriber re-invokes reconcile (and
+    // hence disable) on every persist; without this short-circuit, the chain
+    // becomes a self-feeding loop that freezes the UI.
+    if (!runtime && !this.inventories.has(serverId) && !this.reconnectPolicies.has(serverId)) {
+      return;
+    }
+    if (runtime && runtime.snapshot().status === "disabled" && !this.inventories.has(serverId)) {
+      return;
+    }
     this.bumpGeneration(serverId);
     this.notificationQueue.cancel(serverId);
     this.policy(serverId).cancel();

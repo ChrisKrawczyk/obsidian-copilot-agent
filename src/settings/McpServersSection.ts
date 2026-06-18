@@ -37,6 +37,8 @@ export class McpServersSection {
   private unsubs: Array<() => void> = [];
   private domCleanups: Array<() => void> = [];
   private lastGrantNoticeEpochByServer = new Map<string, string>();
+  private formOpen = false;
+  private renderQueuedWhileFormOpen = false;
 
   constructor(private readonly options: McpServersSectionOptions) {}
 
@@ -53,6 +55,8 @@ export class McpServersSection {
 
   dispose(): void {
     this.disposed = true;
+    this.formOpen = false;
+    this.renderQueuedWhileFormOpen = false;
     for (const unsub of this.unsubs.splice(0)) unsub();
     this.disposeDom();
   }
@@ -65,6 +69,10 @@ export class McpServersSection {
 
   private render(): void {
     if (this.disposed || !this.root) return;
+    if (this.formOpen) {
+      this.renderQueuedWhileFormOpen = true;
+      return;
+    }
     const root = this.root;
     empty(root);
     child(root, "h3", { text: "MCP servers" });
@@ -109,8 +117,8 @@ export class McpServersSection {
     if (runtime?.stderrTail) {
       child(row, "pre", {
         cls: "copilot-agent-mcp-stderr",
-        attr: { role: "status", "aria-label": `stderr for ${server.name}` },
-        text: `stderr:\n${redactSensitive(runtime.stderrTail)}`,
+        attr: { role: "status", "aria-label": `Server log for ${server.name}` },
+        text: `Server log:\n${redactSensitive(runtime.stderrTail)}`,
       });
     }
     const denyWarnings = server.transport === "stdio"
@@ -143,18 +151,47 @@ export class McpServersSection {
 
   private openForm(existing?: McpServerConfig): void {
     if (!this.root) return;
+    this.formOpen = true;
+    const closeForm = (modal: HTMLElement): void => {
+      modal.remove();
+      this.formOpen = false;
+      if (this.renderQueuedWhileFormOpen) {
+        this.renderQueuedWhileFormOpen = false;
+        this.render();
+      }
+    };
     const modal = child(this.root, "div", {
       cls: "copilot-agent-mcp-modal",
       attr: { role: "dialog", "aria-label": existing ? "Edit MCP server" : "Add MCP server" },
     });
     child(modal, "h4", { text: existing ? "Edit MCP server" : "Add MCP server" });
-    const id = input(modal, "Server id", existing?.id ?? "");
-    const name = input(modal, "Display name", existing?.name ?? "");
-    const transport = select(modal, "Transport", ["stdio", "http"], existing?.transport ?? "stdio");
-    const command = input(modal, "Command", existing?.transport === "stdio" ? existing.command : "");
-    const args = input(modal, "Arguments", existing?.transport === "stdio" ? existing.args.join(" ") : "");
-    const url = input(modal, "URL", existing?.transport === "http" ? existing.url : "");
-    const authorization = input(modal, "Authorization", existing?.transport === "http" ? displaySensitiveValue(existing.authorization, false) : "");
+    const id = input(modal, "Server ID", existing?.id ?? "", {
+      placeholder: "fs-vault",
+      hint: "Stable internal slug used for approvals and the tool-name prefix. Lowercase letters, digits, '-' or '_'. Hard to change later — pick something you'll keep.",
+    });
+    const name = input(modal, "Display name", existing?.name ?? "", {
+      placeholder: "Filesystem (vault)",
+      hint: "Human-readable label shown in settings and approval prompts.",
+    });
+    const transport = select(modal, "Transport", ["stdio", "http"], existing?.transport ?? "stdio", {
+      hint: "stdio: spawn a local process. http: connect to a remote Streamable HTTP MCP server.",
+    });
+    const command = input(modal, "Command", existing?.transport === "stdio" ? existing.command : "", {
+      placeholder: "cmd  (Windows)  or  npx  (macOS/Linux)",
+      hint: "stdio only. On Windows, use 'cmd' with '/c' in Arguments to run npx-style commands.",
+    });
+    const args = input(modal, "Arguments", existing?.transport === "stdio" ? formatArgs(existing.args) : "", {
+      placeholder: "/c npx -y @modelcontextprotocol/server-filesystem C:\\path\\to\\folder",
+      hint: "Space-separated. Wrap arguments containing spaces or double-quotes in double-quotes.",
+    });
+    const url = input(modal, "URL", existing?.transport === "http" ? existing.url : "", {
+      placeholder: "https://mcp.example.com/",
+      hint: "http only. Must be https unless the host is a loopback address.",
+    });
+    const authorization = input(modal, "Authorization", existing?.transport === "http" ? displaySensitiveValue(existing.authorization, false) : "", {
+      placeholder: "Bearer <token>",
+      hint: "Optional. Sent as the Authorization header. Stored in plaintext in data.json — Obsidian has no secure secret store.",
+    });
     authorization.type = "password";
     authorization.dataset.redacted = existing?.transport === "http" && existing.authorization ? "true" : "false";
     const reveal = checkbox(modal, "Reveal sensitive fields", false);
@@ -165,15 +202,22 @@ export class McpServersSection {
         authorization.dataset.redacted = reveal.checked ? "false" : "true";
       }
     });
-    const cwd = input(modal, "Working directory", existing?.transport === "stdio" ? existing.cwd ?? this.options.vaultRoot : this.options.vaultRoot);
-    const env = textarea(modal, "Environment", existing?.transport === "stdio" && existing.env ? envToText(existing.env) : "");
-    const timeout = input(modal, "Tool call timeout seconds", String(callTimeoutSeconds(existing)));
+    const cwd = input(modal, "Working directory", existing?.transport === "stdio" ? existing.cwd ?? this.options.vaultRoot : this.options.vaultRoot, {
+      hint: "stdio only. Defaults to the vault root.",
+    });
+    const env = textarea(modal, "Environment", existing?.transport === "stdio" && existing.env ? envToText(existing.env) : "", {
+      placeholder: "KEY=value\nANOTHER_KEY=value",
+      hint: "stdio only. One KEY=value per line. Explicit entries override the built-in denylist.",
+    });
+    const timeout = input(modal, "Tool call timeout seconds", String(callTimeoutSeconds(existing)), {
+      hint: "Max time a single tool call may run before being cancelled.",
+    });
     timeout.type = "number";
     const privateConfirm = checkbox(modal, PRIVATE_NETWORK_CONFIRMATION_COPY, false);
     const message = child(modal, "div", { attr: { role: "alert", "aria-label": "MCP server form message" } });
     const save = child(modal, "button", { text: "Save", attr: { "aria-label": "Save MCP server" } });
     const cancel = child(modal, "button", { text: "Cancel", attr: { "aria-label": "Cancel MCP server edit" } });
-    on(cancel, "click", () => modal.remove());
+    on(cancel, "click", () => closeForm(modal));
     on(save, "click", () => {
       const authValue = authorization.dataset.redacted === "true" && existing?.transport === "http"
         ? existing.authorization
@@ -203,7 +247,7 @@ export class McpServersSection {
         return;
       }
       void this.saveForm(result.config, existing, result.denylistEnvWarnings.map((w) => w.key)).then(() => {
-        modal.remove();
+        closeForm(modal);
       }).catch((err: unknown) => setText(message, err instanceof Error ? err.message : String(err)));
     });
   }
@@ -229,6 +273,13 @@ export class McpServersSection {
     await this.options.store.setEnabled(server.id, enabled);
     if (enabled) await this.options.manager.enable(server.id);
     else await this.options.manager.disable(server.id);
+    // The SDK locks the tool list at session creation; mid-session toggles
+    // don't refresh it. Prompt the user to start a new conversation so the
+    // model sees the updated tool roster.
+    this.notify(
+      `MCP server "${server.name}" ${enabled ? "enabled" : "disabled"}. ` +
+        "Start a new conversation in the chat for the tool change to take effect.",
+    );
   }
 
   private async remove(server: McpServerConfig): Promise<void> {
@@ -290,27 +341,46 @@ function statusDisplay(status: string): { icon: string; label: string } {
   }
 }
 
-function input(parent: DomEl, labelText: string, value: string): HTMLInputElement {
+interface FieldOptions {
+  hint?: string;
+  placeholder?: string;
+}
+
+function labelWithCaption(parent: DomEl, labelText: string): DomEl {
   const label = child(parent, "label");
-  setText(label, labelText);
+  const caption = child(label, "span", { cls: "copilot-agent-mcp-field-caption" });
+  setText(caption, labelText);
+  return label;
+}
+
+function maybeAppendHint(label: DomEl, hint?: string): void {
+  if (!hint) return;
+  const hintEl = child(label, "small", { cls: "copilot-agent-mcp-field-hint" });
+  setText(hintEl, hint);
+}
+
+function input(parent: DomEl, labelText: string, value: string, options: FieldOptions = {}): HTMLInputElement {
+  const label = labelWithCaption(parent, labelText);
   const el = child(label, "input") as HTMLInputElement;
   el.value = value;
   el.setAttribute("aria-label", labelText);
+  if (options.placeholder) el.placeholder = options.placeholder;
+  maybeAppendHint(label, options.hint);
   return el;
 }
 
-function textarea(parent: DomEl, labelText: string, value: string): HTMLTextAreaElement {
-  const label = child(parent, "label");
-  setText(label, labelText);
+function textarea(parent: DomEl, labelText: string, value: string, options: FieldOptions = {}): HTMLTextAreaElement {
+  const label = labelWithCaption(parent, labelText);
   const el = child(label, "textarea") as HTMLTextAreaElement;
   el.value = value;
   el.setAttribute("aria-label", labelText);
+  if (options.placeholder) el.placeholder = options.placeholder;
+  maybeAppendHint(label, options.hint);
   return el;
 }
 
-function select(parent: DomEl, labelText: string, options: string[], value: string): HTMLSelectElement {
-  const label = child(parent, "label");
-  setText(label, labelText);
+function select(parent: DomEl, labelText: string, options: string[], value: string, fieldOptions: FieldOptions = {}): HTMLSelectElement {
+  const label = labelWithCaption(parent, labelText);
   const el = child(label, "select") as HTMLSelectElement;
   for (const option of options) {
     const optionEl = child(el as unknown as DomEl, "option") as HTMLOptionElement;
@@ -319,13 +389,18 @@ function select(parent: DomEl, labelText: string, options: string[], value: stri
   }
   el.value = value;
   el.setAttribute("aria-label", labelText);
+  maybeAppendHint(label, fieldOptions.hint);
   return el;
 }
 
 function checkbox(parent: DomEl, labelText: string, checked: boolean): HTMLInputElement {
-  const el = input(parent, labelText, "") as HTMLInputElement;
+  const label = child(parent, "label", { cls: "copilot-agent-mcp-checkbox" });
+  const el = child(label, "input") as HTMLInputElement;
   el.type = "checkbox";
   el.checked = checked;
+  el.setAttribute("aria-label", labelText);
+  const caption = child(label, "span");
+  setText(caption, labelText);
   return el;
 }
 
@@ -351,6 +426,16 @@ function confirmRemove(name: string): boolean {
 
 function envToText(env: Record<string, string>): string {
   return Object.entries(env).map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
+function formatArgs(args: readonly string[]): string {
+  return args.map(quoteArgIfNeeded).join(" ");
+}
+
+function quoteArgIfNeeded(arg: string): string {
+  if (arg === "") return '""';
+  if (!/[\s"]/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '\\"')}"`;
 }
 
 function parseEnv(raw: string): Record<string, string> | undefined {

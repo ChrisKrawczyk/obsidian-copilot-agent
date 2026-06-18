@@ -167,6 +167,24 @@
 .copilot-agent-status {
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
+  margin-left: auto;
+}
+
+.copilot-agent-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-s);
+}
+
+.copilot-agent-settings-button:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 .copilot-agent-status-error {
@@ -562,4 +580,95 @@
   flex: 0 0 auto;
   font-size: var(--font-ui-small);
   padding: 2px 10px;
+}
+
+/* MCP Servers settings section — visually separate from the preceding
+ * Preamble section (which ends with an indented <details> preview). */
+.copilot-agent-mcp-servers {
+  margin-top: 2em;
+  padding-top: 1em;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.copilot-agent-mcp-servers > h3 {
+  margin-top: 0;
+}
+
+/* MCP server add/edit form — stack labels and inputs with breathing room. */
+.copilot-agent-mcp-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85em;
+  padding: 1em 0;
+}
+.copilot-agent-mcp-modal > h4 {
+  margin: 0 0 0.25em 0;
+}
+.copilot-agent-mcp-modal > label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+.copilot-agent-mcp-field-caption {
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  font-weight: 500;
+}
+.copilot-agent-mcp-field-hint {
+  font-size: var(--font-ui-smaller, 0.8em);
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+.copilot-agent-mcp-modal > label > input,
+.copilot-agent-mcp-modal > label > textarea,
+.copilot-agent-mcp-modal > label > select {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: var(--font-ui-medium);
+  color: var(--text-normal);
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--input-radius, 4px);
+  box-sizing: border-box;
+}
+.copilot-agent-mcp-modal > label > textarea {
+  min-height: 5em;
+  font-family: var(--font-monospace);
+}
+.copilot-agent-mcp-checkbox {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.5em;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+.copilot-agent-mcp-checkbox > input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.copilot-agent-mcp-modal > button {
+  align-self: flex-start;
+  margin-right: 0.5em;
+}
+
+/* MCP last-error / stderr blocks — allow text selection and proper wrapping. */
+.copilot-agent-mcp-last-error,
+.copilot-agent-mcp-stderr {
+  user-select: text;
+  -webkit-user-select: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller, 0.85em);
+  padding: 8px 10px;
+  margin: 6px 0;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-normal);
+}
+.copilot-agent-mcp-last-error {
+  border-left: 3px solid var(--background-modifier-error);
 }
