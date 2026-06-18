@@ -9,6 +9,14 @@ import {
   type SafetyState,
 } from "../domain/SafetyPolicy";
 import { isVaultWriteToolName } from "../tools/WriteTools";
+import { formatMcpApprovalText } from "./approvalText";
+import { redactSensitive } from "../mcp/redactSensitive";
+import {
+  parseSyntheticId,
+  type McpToolSourceMetadata,
+} from "../mcp/McpToolIdentity";
+import type { McpToolRegistrySnapshot } from "../mcp/McpToolRegistry";
+import { normalizeMcpResult } from "../mcp/normalizeMcpResult";
 
 export interface AssistantMessage {
   /** Rendered text from the model. May be empty if the turn produced only tool errors. */
@@ -29,7 +37,7 @@ export interface AssistantToolCall {
    *   - `builtin` — bundled with the CLI runtime (shell, web_fetch, …)
    */
   source?: "custom" | "mcp" | "builtin";
-  outcome: "denied" | "approved" | "completed" | "errored" | "pending_approval";
+  outcome: "denied" | "approved" | "completed" | "errored" | "cancelled" | "pending_approval";
   detail?: string;
   /** Truncated JSON of the tool arguments for display. */
   argsPreview?: string;
@@ -83,6 +91,14 @@ export interface AgentSessionOptions {
      * decision function. Returning undefined means "not a vault path".
      */
     extractVaultPath?: (request: SdkPermissionRequest) => string | undefined;
+    /**
+     * v0.5 Phase 2: synchronous current MCP identity accessor. It must
+     * consult live manager state at decision time; removed, disabled,
+     * disconnected, or crashlooping servers return null.
+     */
+    getMcpToolSourceMetadata?: (
+      request: SdkPermissionRequest,
+    ) => McpToolSourceMetadata | null;
   };
   /** Optional: skip listModels and force a specific model id. */
   preferredModel?: string;
@@ -112,6 +128,8 @@ export interface AgentSessionOptions {
    * no custom tools (legacy Phase 1–4 behaviour).
    */
   tools?: SdkTool[];
+  /** MCP custom-tool snapshot producer. Read only at SDK session boundaries. */
+  mcpTools?: () => readonly SdkTool[] | McpToolRegistrySnapshot | undefined;
   /**
    * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
    * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
@@ -159,7 +177,7 @@ export type StreamEvent =
   | {
       type: "tool_call_complete";
       id: string;
-      outcome: "completed" | "errored" | "denied";
+      outcome: "completed" | "errored" | "denied" | "cancelled";
       content?: string;
       errorMessage?: string;
     }
@@ -187,7 +205,19 @@ export type StreamEvent =
 export type ApprovalChoice =
   | { kind: "approve-once" }
   | { kind: "approve-for-session" }
-  | { kind: "reject"; reason?: string };
+  | { kind: "reject"; reason?: string }
+  | { kind: "cancelled"; reason?: string };
+
+type PendingApprovalDeferred = {
+  resolve: (choice: ApprovalChoice) => void;
+  promise: Promise<ApprovalChoice>;
+};
+
+type PendingMcpApproval = {
+  deferred: PendingApprovalDeferred;
+  toolName?: string;
+  trustEpoch?: string;
+};
 
 /**
  * Public adapter surface. The rest of the codebase consumes this — the
@@ -268,6 +298,8 @@ export interface AgentSession {
    * `swapModel()` if they confirm the switch.
    */
   hasPendingApprovals(): boolean;
+  cancelPendingMcpApprovalsForServer(serverId: string, reason?: string): void;
+  cancelMcpCallsForServer(serverId: string, reason?: string): void;
   /**
    * v0.4 Phase 5 (S1 — deferred-init contract): true iff `init()`
    * resolved successfully but `createSession()` was NOT issued because
@@ -427,11 +459,20 @@ export class CopilotAgentSession implements AgentSession {
    */
   private readonly pendingApprovals = new Map<
     string,
-    {
-      resolve: (choice: ApprovalChoice) => void;
-      promise: Promise<ApprovalChoice>;
-    }
+    PendingApprovalDeferred
   >();
+
+  /**
+   * In-flight MCP approval prompts indexed by exact stable server id.
+   * Resolved approval cache entries are keyed differently, so server
+   * lifecycle cancellation must not rely on scanning that cache.
+   */
+  private readonly pendingMcpApprovalsByServer = new Map<
+    string,
+    Map<string, PendingMcpApproval>
+  >();
+  private readonly activeMcpCallsByServer = new Map<string, Set<string>>();
+  private readonly lifecycleCancelledMcpCallIds = new Set<string>();
 
   /**
    * Memo of approval choices already resolved for a given toolCallId in
@@ -442,7 +483,10 @@ export class CopilotAgentSession implements AgentSession {
    * completed, and the new Deferred would never resolve. Instead, we
    * short-circuit with the prior choice.
    */
-  private readonly resolvedApprovals = new Map<string, ApprovalChoice>();
+  private readonly resolvedApprovals = new Map<
+    string,
+    ApprovalChoice & { mcpCacheKey?: string }
+  >();
 
   /**
    * Phase 2 (Chat UX + Vault Tools): true until the first
@@ -562,6 +606,8 @@ export class CopilotAgentSession implements AgentSession {
       throw new Error("AgentSession.session missing after init");
     }
     this.toolCallsThisTurn = [];
+    this.activeMcpCallsByServer.clear();
+    this.lifecycleCancelledMcpCallIds.clear();
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const bumpIdleTimer = (): void => {
@@ -638,6 +684,8 @@ export class CopilotAgentSession implements AgentSession {
     }
     const session = this.session;
     this.toolCallsThisTurn = [];
+    this.activeMcpCallsByServer.clear();
+    this.lifecycleCancelledMcpCallIds.clear();
 
     const queue: StreamEvent[] = [];
     let resolveWait: (() => void) | null = null;
@@ -695,7 +743,10 @@ export class CopilotAgentSession implements AgentSession {
           let existing = this.toolCallsThisTurn.find(
             (c) => c.id === d.toolCallId,
           );
-          const argsPreview = stringifyArgsForPreview(d.arguments);
+          const argsPreview =
+            source === "mcp"
+              ? stringifyMcpArgsForPreview(d.arguments)
+              : stringifyArgsForPreview(d.arguments);
           if (existing) {
             existing.source = source;
             existing.argsPreview = argsPreview;
@@ -711,6 +762,10 @@ export class CopilotAgentSession implements AgentSession {
             };
             this.toolCallsThisTurn.push(existing);
           }
+          if (source === "mcp") {
+            const parsed = parseSyntheticId(d.toolName);
+            if (parsed) this.registerActiveMcpCall(parsed.serverId, d.toolCallId);
+          }
           push({ type: "tool_call_start", toolCall: { ...existing } });
         });
       } catch (e) {
@@ -720,16 +775,23 @@ export class CopilotAgentSession implements AgentSession {
         unsubToolComplete = session.on("tool.execution_complete", (event) => {
           const d = event?.data;
           if (!d || typeof d.toolCallId !== "string") return;
+          if (this.lifecycleCancelledMcpCallIds.has(d.toolCallId)) return;
           bumpIdleTimer();
           const existing = this.toolCallsThisTurn.find(
             (c) => c.id === d.toolCallId,
           );
-          const outcome: "completed" | "errored" = d.success
+          const errorText = typeof d.error?.message === "string" ? d.error.message : "";
+          const outcome: "completed" | "errored" | "cancelled" = d.success
             ? "completed"
-            : "errored";
-          const resultContent =
-            d.result?.detailedContent ?? d.result?.content ?? undefined;
-          const errorMessage = d.error?.message;
+            : isAbortError(d.error) || /cancel/i.test(errorText)
+              ? "cancelled"
+              : "errored";
+          const resultContent = sanitizeMcpMaybe(
+            existing?.source,
+            d.result?.detailedContent ?? d.result?.content ?? undefined,
+          );
+          const errorMessage = sanitizeMcpMaybe(existing?.source, d.error?.message);
+          if (existing?.source === "mcp") this.unregisterActiveMcpCall(d.toolCallId);
           if (existing) {
             existing.outcome = outcome;
             // Clear approval metadata once the call has executed; the
@@ -1024,6 +1086,19 @@ export class CopilotAgentSession implements AgentSession {
     return combined;
   }
 
+  private toolsForSession(): SdkTool[] | undefined {
+    const base = this.toolsList ? [...this.toolsList] : [];
+    let mcp: readonly SdkTool[] | McpToolRegistrySnapshot | undefined;
+    try {
+      mcp = this.opts.mcpTools?.();
+    } catch (e) {
+      console.warn("[AgentSession] MCP tools snapshot callback threw", e);
+    }
+    const mcpTools = Array.isArray(mcp) ? mcp : undefined;
+    const combined = [...base, ...(mcpTools ?? [])];
+    return combined.length > 0 ? combined : undefined;
+  }
+
   /**
    * Test probe — returns the text most recently handed to
    * `session.sendAndWait` for the first send and the most recent
@@ -1063,7 +1138,7 @@ export class CopilotAgentSession implements AgentSession {
       model: this.selectedModel,
       availableTools: ["builtin:*", "custom:*", "mcp:*"],
       streaming: true,
-      tools: this.toolsList,
+      tools: this.toolsForSession(),
       onPermissionRequest: (request: SdkPermissionRequest) =>
         this.handlePermission(request),
     });
@@ -1247,7 +1322,7 @@ export class CopilotAgentSession implements AgentSession {
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
-        tools: this.toolsList,
+        tools: this.toolsForSession(),
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
@@ -1318,7 +1393,7 @@ export class CopilotAgentSession implements AgentSession {
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
         streaming: true,
-        tools: this.toolsList,
+        tools: this.toolsForSession(),
         onPermissionRequest: (request: SdkPermissionRequest) =>
           this.handlePermission(request),
       });
@@ -1399,7 +1474,7 @@ export class CopilotAgentSession implements AgentSession {
       request.toolName,
       this.customToolNames,
     );
-    const argsPreview = previewArgs(request);
+    const argsPreview = previewArgs(request, source);
 
     // Phase 6 path: SafetyPolicy decides.
     if (this.opts.safety) {
@@ -1470,22 +1545,23 @@ export class CopilotAgentSession implements AgentSession {
     // already-handled call; re-prompting would regress the UI from
     // completed back to pending_approval and the new prompt would never
     // be resolved.
+    const safety = this.opts.safety!;
+    const currentMcpCacheKey =
+      source === "mcp" ? this.getCurrentMcpCacheKey(request, safety) : undefined;
     const prior = this.resolvedApprovals.get(toolCallId);
     if (prior) {
-      console.log(
-        "[copilot-agent] permission re-ask short-circuited",
-        "id:",
-        toolCallId,
-        "priorChoice:",
-        prior.kind,
-      );
-      if (prior.kind === "reject") {
-        return { kind: "reject", feedback: prior.reason ?? "Rejected." };
+      if (prior.mcpCacheKey !== currentMcpCacheKey) {
+        this.resolvedApprovals.delete(toolCallId);
+      } else {
+        // eslint-disable-next-line no-console -- documented redaction seam: approval short-circuit telemetry
+        console.debug(redactSensitive(`[copilot-agent] permission re-ask short-circuited id=${toolCallId} priorChoice=${prior.kind}`));
+        if (prior.kind === "reject" || prior.kind === "cancelled") {
+          return { kind: "reject", feedback: prior.reason ?? "Rejected." };
+        }
+        return { kind: "approve-once" };
       }
-      return { kind: "approve-once" };
     }
 
-    const safety = this.opts.safety!;
     const config = safety.config();
     const input = this.buildSafetyInput(request, safety);
     const decision = decideSafety(input, config, safety.state);
@@ -1494,6 +1570,7 @@ export class CopilotAgentSession implements AgentSession {
       this.resolvedApprovals.set(toolCallId, {
         kind: "reject",
         reason: decision.reason,
+        mcpCacheKey: currentMcpCacheKey,
       });
       return this.recordRejection(
         toolCallId,
@@ -1519,7 +1596,10 @@ export class CopilotAgentSession implements AgentSession {
       };
       this.upsertTurnToolCall(call);
       this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
-      this.resolvedApprovals.set(toolCallId, { kind: "approve-once" });
+      this.resolvedApprovals.set(toolCallId, {
+        kind: "approve-once",
+        mcpCacheKey: currentMcpCacheKey,
+      });
       return { kind: "approve-once" };
     }
 
@@ -1543,17 +1623,29 @@ export class CopilotAgentSession implements AgentSession {
     if (!this.currentStreamPush) {
       return { kind: "reject", feedback: "No UI available to confirm tool call." };
     }
-    this.currentStreamPush({ type: "approval_prompt", toolCall: pendingCall });
-
     const deferred = makeDeferred<ApprovalChoice>();
     this.pendingApprovals.set(toolCallId, deferred);
+    if (input.source === "mcp" && input.mcpServerId) {
+      this.registerPendingMcpApproval(input.mcpServerId, toolCallId, {
+        deferred,
+        toolName: input.mcpToolName,
+        trustEpoch: input.mcpTrustEpoch,
+      });
+    }
+    this.currentStreamPush({ type: "approval_prompt", toolCall: pendingCall });
     let choice: ApprovalChoice;
     try {
       choice = await deferred.promise;
     } finally {
       this.pendingApprovals.delete(toolCallId);
+      if (input.source === "mcp" && input.mcpServerId) {
+        this.unregisterPendingMcpApproval(input.mcpServerId, toolCallId);
+      }
     }
-    this.resolvedApprovals.set(toolCallId, choice);
+    this.resolvedApprovals.set(toolCallId, {
+      ...choice,
+      mcpCacheKey: currentMcpCacheKey,
+    });
 
     // Always emit `approval_resolved` so the UI can transition the
     // pending block to its post-decision state.
@@ -1562,6 +1654,11 @@ export class CopilotAgentSession implements AgentSession {
       id: toolCallId,
       choice,
     });
+
+    if (choice.kind === "cancelled") {
+      const reason = choice.reason ?? "Cancelled.";
+      return this.recordCancellation(toolCallId, normalised, source, argsPreview, reason);
+    }
 
     if (choice.kind === "reject") {
       const reason = choice.reason ?? "Rejected by user.";
@@ -1572,6 +1669,30 @@ export class CopilotAgentSession implements AgentSession {
         argsPreview,
         { decision: "rejected", reason },
       );
+    }
+
+    if (input.source === "mcp") {
+      const latestInput = this.buildSafetyInput(request, safety);
+      if (
+        !latestInput.mcpServerId ||
+        !latestInput.mcpToolName ||
+        !latestInput.mcpTrustEpoch ||
+        latestInput.mcpServerId !== input.mcpServerId ||
+        latestInput.mcpToolName !== input.mcpToolName ||
+        latestInput.mcpTrustEpoch !== input.mcpTrustEpoch
+      ) {
+        const reason =
+          "MCP server metadata changed before dispatch; approval is no longer valid.";
+        this.resolvedApprovals.set(toolCallId, {
+          kind: "reject",
+          reason,
+          mcpCacheKey: this.getCurrentMcpCacheKey(request, safety),
+        });
+        return this.recordRejection(toolCallId, normalised, source, argsPreview, {
+          decision: "rejected",
+          reason,
+        });
+      }
     }
 
     if (choice.kind === "approve-for-session") {
@@ -1587,7 +1708,13 @@ export class CopilotAgentSession implements AgentSession {
             safety.state.grantExtraVault(input.extraVaultRoot);
           break;
         case "mcp":
-          if (input.toolName) safety.state.grantMcp(input.toolName);
+          if (input.mcpServerId && input.mcpToolName && input.mcpTrustEpoch) {
+            safety.state.grantMcp(
+              input.mcpServerId,
+              input.mcpToolName,
+              input.mcpTrustEpoch,
+            );
+          }
           break;
         case "builtin":
           if (input.toolName) safety.state.grantBuiltin(input.toolName);
@@ -1628,9 +1755,13 @@ export class CopilotAgentSession implements AgentSession {
     }
 
     if (kind === "mcp") {
+      const metadata = safety.getMcpToolSourceMetadata?.(request);
       return {
         source: "mcp",
-        toolName: request.serverName ?? toolName ?? "(unknown)",
+        toolName: metadata?.toolName ?? toolName ?? request.serverName ?? "(unknown)",
+        mcpServerId: metadata?.stableServerId,
+        mcpToolName: metadata?.toolName,
+        mcpTrustEpoch: metadata?.trustEpoch,
       };
     }
 
@@ -1639,6 +1770,15 @@ export class CopilotAgentSession implements AgentSession {
     let key = kind;
     if (kind === "custom-tool" && toolName) key = toolName;
     return { source: "builtin", toolName: key };
+  }
+
+  private getCurrentMcpCacheKey(
+    request: SdkPermissionRequest,
+    safety: NonNullable<AgentSessionOptions["safety"]>,
+  ): string | undefined {
+    const metadata = safety.getMcpToolSourceMetadata?.(request);
+    if (!metadata) return undefined;
+    return `${metadata.stableServerId}\u0000${metadata.toolName}\u0000${metadata.trustEpoch}`;
   }
 
   private recordRejection(
@@ -1664,6 +1804,33 @@ export class CopilotAgentSession implements AgentSession {
       type: "tool_call_complete",
       id: toolCallId,
       outcome: "denied",
+      errorMessage: reason,
+    });
+    return { kind: "reject", feedback: reason };
+  }
+
+  private recordCancellation(
+    toolCallId: string,
+    normalised: PermissionRequest,
+    source: "custom" | "mcp" | "builtin",
+    argsPreview: string | undefined,
+    reason: string,
+  ): SdkPermissionResult {
+    const call: AssistantToolCall = {
+      id: toolCallId,
+      kind: normalised.kind,
+      name: normalised.toolName,
+      source,
+      outcome: "cancelled",
+      detail: reason,
+      argsPreview,
+    };
+    this.toolCallsThisTurn.push(call);
+    this.currentStreamPush?.({ type: "tool_call_start", toolCall: call });
+    this.currentStreamPush?.({
+      type: "tool_call_complete",
+      id: toolCallId,
+      outcome: "cancelled",
       errorMessage: reason,
     });
     return { kind: "reject", feedback: reason };
@@ -1695,6 +1862,42 @@ export class CopilotAgentSession implements AgentSession {
     return this.pendingApprovals.size > 0;
   }
 
+  public cancelPendingMcpApprovalsForServer(serverId: string, reason = "MCP server disconnected."): void {
+    this.clearResolvedMcpApprovalsForServer(serverId);
+    const pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) return;
+    const cancelled: ApprovalChoice = { kind: "cancelled", reason };
+    for (const [toolCallId, pending] of [...pendingForServer]) {
+      pending.deferred.resolve(cancelled);
+      this.pendingApprovals.delete(toolCallId);
+      pendingForServer.delete(toolCallId);
+    }
+    if (pendingForServer.size === 0) this.pendingMcpApprovalsByServer.delete(serverId);
+  }
+
+  public cancelMcpCallsForServer(serverId: string, reason = "MCP server disconnected."): void {
+    this.clearResolvedMcpApprovalsForServer(serverId);
+    const activeForServer = this.activeMcpCallsByServer.get(serverId);
+    if (!activeForServer) return;
+    for (const toolCallId of [...activeForServer]) {
+      this.lifecycleCancelledMcpCallIds.add(toolCallId);
+      const existing = this.toolCallsThisTurn.find((call) => call.id === toolCallId);
+      if (existing) {
+        existing.outcome = "cancelled";
+        existing.detail = reason;
+        existing.approval = undefined;
+      }
+      this.currentStreamPush?.({
+        type: "tool_call_complete",
+        id: toolCallId,
+        outcome: "cancelled",
+        errorMessage: reason,
+      });
+      activeForServer.delete(toolCallId);
+    }
+    if (activeForServer.size === 0) this.activeMcpCallsByServer.delete(serverId);
+  }
+
   private cancelAllPendingApprovals(reason: string): void {
     if (this.pendingApprovals.size === 0) return;
     const reject: ApprovalChoice = { kind: "reject", reason };
@@ -1702,6 +1905,53 @@ export class CopilotAgentSession implements AgentSession {
       deferred.resolve(reject);
     }
     this.pendingApprovals.clear();
+    this.pendingMcpApprovalsByServer.clear();
+  }
+
+  private registerPendingMcpApproval(
+    serverId: string,
+    toolCallId: string,
+    pending: PendingMcpApproval,
+  ): void {
+    let pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) {
+      pendingForServer = new Map();
+      this.pendingMcpApprovalsByServer.set(serverId, pendingForServer);
+    }
+    pendingForServer.set(toolCallId, pending);
+  }
+
+  private registerActiveMcpCall(serverId: string, toolCallId: string): void {
+    let activeForServer = this.activeMcpCallsByServer.get(serverId);
+    if (!activeForServer) {
+      activeForServer = new Set();
+      this.activeMcpCallsByServer.set(serverId, activeForServer);
+    }
+    activeForServer.add(toolCallId);
+  }
+
+  private unregisterActiveMcpCall(toolCallId: string): void {
+    for (const [serverId, activeForServer] of this.activeMcpCallsByServer) {
+      activeForServer.delete(toolCallId);
+      if (activeForServer.size === 0) this.activeMcpCallsByServer.delete(serverId);
+    }
+    this.lifecycleCancelledMcpCallIds.delete(toolCallId);
+  }
+
+  private unregisterPendingMcpApproval(serverId: string, toolCallId: string): void {
+    const pendingForServer = this.pendingMcpApprovalsByServer.get(serverId);
+    if (!pendingForServer) return;
+    pendingForServer.delete(toolCallId);
+    if (pendingForServer.size === 0) this.pendingMcpApprovalsByServer.delete(serverId);
+  }
+
+  private clearResolvedMcpApprovalsForServer(serverId: string): void {
+    const prefix = `${serverId}\u0000`;
+    for (const [toolCallId, cached] of this.resolvedApprovals) {
+      if (cached.mcpCacheKey?.startsWith(prefix)) {
+        this.resolvedApprovals.delete(toolCallId);
+      }
+    }
   }
 }
 
@@ -1720,7 +1970,8 @@ export function classifyToolSource(
   toolName: string | undefined,
   customNames: Set<string>,
 ): "custom" | "mcp" | "builtin" {
-  // Strongest signal: name matches a tool we registered.
+  if (toolName && parseSyntheticId(toolName)) return "mcp";
+  // Strongest non-MCP signal: name matches a vault tool we registered.
   if (toolName && customNames.has(toolName)) return "custom";
   // SDK kind hints. `custom-tool` is the wire shape for user-defined
   // tools we may have registered under an alias or via overrides.
@@ -1730,7 +1981,10 @@ export function classifyToolSource(
 }
 
 /** Kind-aware args preview for the UI tool-call block. */
-function previewArgs(request: SdkPermissionRequest): string | undefined {
+function previewArgs(
+  request: SdkPermissionRequest,
+  source?: "custom" | "mcp" | "builtin",
+): string | undefined {
   switch (request.kind) {
     case "shell":
       return request.fullCommandText
@@ -1748,11 +2002,15 @@ function previewArgs(request: SdkPermissionRequest): string | undefined {
       return request.fact ? truncate(request.fact, 200) : undefined;
     case "custom-tool":
     case "mcp":
-      return stringifyArgsForPreview(request.args);
+      return source === "mcp"
+        ? stringifyMcpArgsForPreview(request.args)
+        : stringifyArgsForPreview(request.args);
     default: {
       // Legacy fallback used by tests that pass `arguments` directly.
       const raw = (request as { arguments?: unknown }).arguments;
-      return stringifyArgsForPreview(raw);
+      return source === "mcp"
+        ? stringifyMcpArgsForPreview(raw)
+        : stringifyArgsForPreview(raw);
     }
   }
 }
@@ -1781,7 +2039,11 @@ function buildApprovalSummary(
     case "memory":
       return `Update memory`;
     case "mcp":
-      return `MCP tool ${request.serverName ?? request.toolName ?? ""}`.trim();
+      return formatMcpApprovalText(
+        `MCP tool ${input.mcpToolName ?? request.toolName ?? ""} on ${
+          input.mcpServerId ?? request.serverName ?? "unknown server"
+        }`,
+      );
     case "custom-tool":
       return `${request.toolName ?? "custom tool"}`;
     default:
@@ -1805,6 +2067,9 @@ function buildApprovalDetail(
     case "memory":
       return request.fact;
     case "mcp":
+      return request.args
+        ? formatMcpApprovalText(redactSensitive(safeJson(request.args)))
+        : undefined;
     case "custom-tool":
       return request.args ? safeJson(request.args) : undefined;
     default:
@@ -1841,6 +2106,20 @@ function stringifyArgsForPreview(raw: unknown): string | undefined {
   } catch {
     return String(raw);
   }
+}
+
+function stringifyMcpArgsForPreview(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  return formatMcpApprovalText(redactSensitive(safeJson(raw)));
+}
+
+function sanitizeMcpMaybe(
+  source: "custom" | "mcp" | "builtin" | undefined,
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (source !== "mcp") return value;
+  return normalizeMcpResult(value).content;
 }
 
 function extractText(resp: unknown): string | undefined {
@@ -2026,4 +2305,3 @@ export type SdkPermissionResult =
   | { kind: "approve-once" }
   | { kind: "approve-for-session" }
   | { kind: "reject"; feedback: string };
-

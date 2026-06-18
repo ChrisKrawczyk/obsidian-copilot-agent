@@ -224,7 +224,8 @@ function validateMessage(raw: unknown): PersistedMessage | null {
         outcome !== "denied" &&
         outcome !== "approved" &&
         outcome !== "completed" &&
-        outcome !== "errored"
+        outcome !== "errored" &&
+        outcome !== "cancelled"
       ) {
         return null;
       }

@@ -27,6 +27,12 @@ import { createSearchTools } from "./tools/SearchTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
+import { McpSettingsStore } from "./settings/McpSettingsStore";
+import { McpManager } from "./mcp/McpManager";
+import type { McpServerId } from "./mcp/McpTypes";
+import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
+import { buildMcpToolRegistrySnapshot } from "./mcp/McpToolRegistry";
+import { createMcpSdkTools } from "./mcp/McpToolBridge";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
@@ -38,6 +44,40 @@ import {
   makeRuntimeJournal,
   type ConversationRuntimeFactory,
 } from "./domain/ConversationRuntime";
+
+export interface McpLifecycleController {
+  enableAllConfigured: () => Promise<void>;
+  reconcileConfiguredServers: () => Promise<void>;
+  unload: () => Promise<void>;
+}
+
+export function startMcpLifecycle(manager: Pick<McpLifecycleController, "enableAllConfigured">): Promise<void> {
+  return manager.enableAllConfigured();
+}
+
+export function reconcileMcpLifecycle(manager: Pick<McpLifecycleController, "reconcileConfiguredServers">): Promise<void> {
+  return manager.reconcileConfiguredServers();
+}
+
+export function disposeMcpLifecycle(manager: Pick<McpLifecycleController, "unload">): Promise<void> {
+  return manager.unload();
+}
+
+export async function disableMcpServerLifecycle(
+  manager: Pick<McpManager, "disable">,
+  serverId: McpServerId,
+): Promise<void> {
+  await manager.disable(serverId);
+}
+
+export async function removeMcpServerLifecycle(
+  manager: Pick<McpManager, "remove">,
+  safetyStore: Pick<SafetySettingsStore, "revokeGrantsForServer">,
+  serverId: McpServerId,
+): Promise<void> {
+  await manager.remove(serverId);
+  await safetyStore.revokeGrantsForServer(serverId);
+}
 
 /**
  * Phase 3 wiring:
@@ -56,6 +96,8 @@ export default class CopilotAgentPlugin extends Plugin {
   /** v0.4 Phase 2: disposes the shared CopilotClient backing the
    *  catalog. Safe to call multiple times; idempotent. */
   private disposeSharedSdkClient: (() => Promise<void>) | null = null;
+  mcpSettingsStore: McpSettingsStore | null = null;
+  mcpManager: McpManager | null = null;
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
@@ -85,6 +127,11 @@ export default class CopilotAgentPlugin extends Plugin {
       loadData: () => this.loadData(),
       saveData: (data) => this.saveData(data),
     });
+    const mcpSettingsStore = new McpSettingsStore({
+      loadData: () => this.loadData(),
+      saveData: (data) => this.saveData(data),
+    });
+    this.mcpSettingsStore = mcpSettingsStore;
 
     // v0.3 Phase 3: ConversationsStore. Owns its own top-level
     // `conversations`/`activeConversationId`/`schemaVersion` keys but
@@ -123,9 +170,48 @@ export default class CopilotAgentPlugin extends Plugin {
     } catch (e) {
       console.error("[copilot-agent] safety settings load failed", e);
     }
+    try {
+      await mcpSettingsStore.load();
+    } catch (e) {
+      console.error("[copilot-agent] MCP settings load failed", e);
+    }
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;
     const safetyState = new SafetyState();
+    const vaultRoot =
+      (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.() ??
+      baseDirectory;
+    const liveRuntimes = new Set<{
+      session: AgentSession;
+      conversationId: string;
+    }>();
+    const mcpManager = new McpManager({
+      vaultRoot,
+      serversProvider: () => mcpSettingsStore.snapshot(),
+      notify: (message) => new Notice(message, 8000),
+      persistStatus: (serverId, snapshot) =>
+        mcpSettingsStore.recordStatus(serverId, snapshot).then(() => undefined),
+      settleTrackedCalls: async (serverId) => {
+        await Promise.all(Array.from(liveRuntimes).map(async ({ session }) => {
+          session.cancelPendingMcpApprovalsForServer(serverId, "MCP server disconnected.");
+          session.cancelMcpCallsForServer(serverId, "MCP server disconnected.");
+        }));
+      },
+      onForcedKill: (event) => {
+        // eslint-disable-next-line no-console -- documented redaction seam (Phase 6 forced MCP child shutdown warning)
+        console.warn(`[Copilot Agent] ${event.reason} pid=${event.pid ?? "unknown"} serverId=${event.serverId}`);
+      },
+    });
+    this.mcpManager = mcpManager;
+    const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
+      void reconcileMcpLifecycle(mcpManager).catch((err) => {
+        console.warn("[copilot-agent] MCP lifecycle reconcile failed", err);
+      });
+    });
+    this.register(unsubscribeMcpSettings);
+    void startMcpLifecycle(mcpManager).catch((err) => {
+      console.warn("[copilot-agent] MCP startup failed", err);
+    });
 
     // v0.3 Phase 4: per-conversation runtime architecture. Replaces
     // the single global UndoJournal + AgentSession with a factory the
@@ -282,11 +368,6 @@ export default class CopilotAgentPlugin extends Plugin {
     // that has actually been built. Lazily-uninstantiated runtimes
     // start with `currentToken` at construction time, so they don't
     // need broadcasts.
-    const liveRuntimes = new Set<{
-      session: AgentSession;
-      conversationId: string;
-    }>();
-
     // The factory that ConversationManager uses to materialize a
     // runtime on first activation. Captures all shared deps via
     // closure; binds tools to the per-runtime journal.
@@ -340,6 +421,23 @@ export default class CopilotAgentPlugin extends Plugin {
         now,
         vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
       });
+      const vaultTools = filterRawFsToolsIfGated(
+        [
+          ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+        ],
+        exposeRawFsToolsAtStartup,
+      );
+      const mcpSnapshot = () =>
+        buildMcpToolRegistrySnapshot({
+          inventory: mcpManager.inventorySnapshot(),
+          statuses: mcpManager.statusSnapshot(),
+          builtinToolNames: vaultTools.map((tool) => tool.name),
+          notify: (message) => new Notice(message, 8000),
+        });
 
       const session = new CopilotAgentSession({
         cliPath,
@@ -369,16 +467,9 @@ export default class CopilotAgentPlugin extends Plugin {
         // mid-session does not reach this runtime, nor any future
         // runtime built within this plugin instance — exactly the
         // FR-015 "next session start" semantic.
-        tools: filterRawFsToolsIfGated(
-          [
-            ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-            ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
-          ],
-          exposeRawFsToolsAtStartup,
-        ),
+        tools: vaultTools,
+        mcpTools: () =>
+          createMcpSdkTools(mcpSnapshot(), { manager: mcpManager }) as unknown as import("./sdk/AgentSession").SdkTool[],
         safety: {
           config: () => {
             const snap = safetySettingsStore.snapshot();
@@ -386,9 +477,16 @@ export default class CopilotAgentPlugin extends Plugin {
               fsDefaultMode: snap.defaultMode,
               vaultAllowlist: snap.allowlist,
               builtinAutoApprove: snap.autoApproveBuiltins,
+              mcpAutoApprove: snap.mcpAutoApprove,
             };
           },
           state: safetyState,
+          getMcpToolSourceMetadata: (req) =>
+            resolveMcpToolSourceMetadata(
+              typeof req.toolName === "string" ? req.toolName : undefined,
+              mcpSettingsStore.snapshot(),
+              new Map(mcpManager.statusSnapshot().map((snapshot) => [snapshot.id, snapshot.status])),
+            ),
           extractVaultPath: (req) => {
             const r = req as { toolName?: unknown; args?: { path?: unknown } };
             const tool = typeof r.toolName === "string" ? r.toolName : "";
@@ -416,10 +514,6 @@ export default class CopilotAgentPlugin extends Plugin {
         preamble: () => {
           const va = safetySettingsStore.snapshot().vaultAwareness;
           if (va.mode === "none") return null;
-          const vaultRoot =
-            (
-              this.app.vault.adapter as { getBasePath?: () => string }
-            ).getBasePath?.() ?? baseDirectory;
           const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
           const todayInTimezone = formatTodayInTimezone(new Date(), timezone);
           const text = assemblePreamble({
@@ -429,6 +523,7 @@ export default class CopilotAgentPlugin extends Plugin {
             todayInTimezone,
             customBody: va.customBody,
             excludeRawFs: !exposeRawFsToolsAtStartup,
+            mcp: { tools: mcpSnapshot().tools },
           });
           return text || null;
         },
@@ -655,7 +750,10 @@ export default class CopilotAgentPlugin extends Plugin {
       tokenStore,
       safetySettingsStore,
       modelCatalog,
+      mcpSettingsStore,
+      mcpManager,
     );
+    this.register(() => settingsTab.hide());
     this.addSettingTab(settingsTab);
 
     registerChatView(this, {
@@ -713,15 +811,21 @@ export default class CopilotAgentPlugin extends Plugin {
   async onunload(): Promise<void> {
     console.log("[copilot-agent] Unloading");
     const manager = this.conversationManager;
+    const mcpManager = this.mcpManager;
     const store = this.conversationsStore;
     const disposeShared = this.disposeSharedSdkClient;
     this.conversationManager = null;
+    this.mcpManager = null;
     this.conversationsStore = null;
     this.disposeSharedSdkClient = null;
+    this.mcpSettingsStore = null;
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.
     await flushThenDispose(store, manager);
+    if (mcpManager) {
+      await disposeMcpLifecycle(mcpManager);
+    }
     // v0.4 Phase 2: stop the shared catalog client AFTER the per-
     // conversation runtimes are torn down so we don't race them on
     // shutdown.

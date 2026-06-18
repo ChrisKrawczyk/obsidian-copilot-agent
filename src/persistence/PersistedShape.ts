@@ -30,7 +30,7 @@ export interface PersistedMessage {
     kind: string;
     name?: string;
     source?: "custom" | "mcp" | "builtin";
-    outcome: "denied" | "approved" | "completed" | "errored";
+    outcome: "denied" | "approved" | "completed" | "errored" | "cancelled";
     detail?: string;
     argsPreview?: string;
     resultContent?: string;

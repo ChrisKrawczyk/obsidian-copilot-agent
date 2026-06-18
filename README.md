@@ -2,7 +2,54 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.4 — Phase 1–6 complete. Adds per-conversation model picker with a global default, mid-conversation swap that preserves history, inline recovery banners for catalog failures, lazy resolution for migrated conversations, and deferred SDK-session creation so the plugin recovers from a missing model list without a reload. Builds on v0.3's multi-conversation persistence. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+> **Status:** v0.5 — Adds MCP client support for stdio and Streamable HTTP servers, with settings UI, approval-gated MCP tools, transport security bounds, and bounded crash/reconnect behavior. Builds on v0.4's per-conversation model picker and recovery flows. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+
+## What's new in v0.5
+
+- **MCP client support.** Configure external Model Context Protocol (MCP) servers in Settings → Copilot Agent → MCP Servers. The plugin acts as an MCP client and can connect to stdio or Streamable HTTP servers.
+- **MCP tools in chat.** Connected MCP tools appear alongside built-in tools with `(MCP / <server name>)` attribution and always pass through the approval gate unless you explicitly approve that exact server/tool identity for the current trust epoch.
+- **Transport safety.** stdio servers launch without shell interpolation and filtered env; Streamable HTTP requires TLS for non-loopback hosts, rejects cloud metadata targets, drops `Authorization` on cross-origin redirects, and does not fall back to legacy HTTP+SSE-only servers.
+- **No Undo for MCP calls.** MCP calls may affect external systems, so they intentionally do not get an Undo button. Vault Undo for built-in vault write tools is unchanged.
+
+## MCP server setup (v0.5)
+
+MCP is a protocol for exposing external tools to AI clients; obsidian-copilot-agent is an MCP **client**.
+
+### stdio server setup
+
+Add a stdio server in Settings → Copilot Agent → MCP Servers. Absolute command paths always work. On macOS the plugin prepends `/usr/local/bin` and `/opt/homebrew/bin` to `PATH` for common Homebrew/npm shims. On Windows, prefer the explicit `cmd /c npx ...` form because `npx` resolution differs from Unix shells.
+
+Example using the official filesystem server:
+
+```json
+{
+  "id": "local-filesystem",
+  "name": "Local filesystem",
+  "transport": "stdio",
+  "command": "cmd",
+  "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\you\\Documents"]
+}
+```
+
+### Streamable HTTP server setup
+
+Streamable HTTP servers must use an HTTPS URL unless they are loopback-local. You may provide a static `Authorization` header; it is stored in plaintext in Obsidian plugin data, so avoid synced vaults for sensitive credentials.
+
+```json
+{
+  "id": "team-tools",
+  "name": "Team tools",
+  "transport": "http",
+  "url": "https://mcp.example.com/mcp",
+  "authorization": "Bearer <token>"
+}
+```
+
+Legacy HTTP+SSE-only servers are not supported and there is no fallback path. Private-network URLs such as `192.168.*`, `10.*`, and `172.16.*`-`172.31.*` require a confirmation modal before saving. Cloud metadata IPs are rejected outright.
+
+Security posture: MCP server `instructions` and tool descriptions are **untrusted prompt-injection surfaces**. Review the requested tool name and arguments before approving any MCP tool call.
+
+For the full technical reference, see [`.paw\work\mcp-client\Docs.md`](.paw/work/mcp-client/Docs.md).
 
 ## What's new in v0.4
 
@@ -84,7 +131,7 @@ The plugin enforces a single deny-by-default permission gate that every mutating
 
 - **Custom write tools** (`create_file`, `edit_file`, `delete_file`) → SafetyPolicy.
 - **SDK built-ins** (`shell`, `write`, `view`, `web_fetch`, `memory`, etc.) → SafetyPolicy.
-- **MCP tool calls** (when MCP is wired in a later phase) → SafetyPolicy.
+- **MCP tool calls** → SafetyPolicy.
 
 SafetyPolicy decides among `auto-apply` (no prompt), `require-approval` (chat-inline Approve/Reject), or `reject`, based on:
 
@@ -92,7 +139,7 @@ SafetyPolicy decides among `auto-apply` (no prompt), `require-approval` (chat-in
 2. Per-call session grants ("Approve for session" on a prompt).
 3. Persistent settings — path allowlist (vault-relative directories that skip the prompt) and per-built-in auto-approve toggles.
 
-After any approved write, an **Undo** affordance appears on the tool-call block and reverses the change (in-session only).
+After any approved built-in vault write, an **Undo** affordance appears on the tool-call block and reverses the change. MCP calls intentionally have no Undo because they may affect external systems outside the vault.
 
 ### Read-tool exemption
 
@@ -123,7 +170,7 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brings it to **728** across the new model catalog, per-conversation modelId persistence, picker view-model + keyboard reducer + confirmation copy, the four `canSend` blocked states with precedence, the unavailable-id sentinel row, lazy resolution, and the AgentSession deferred-init recovery cycle.
+166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brought it to 728; v0.5 brings it to **944** across MCP persistence, settings UI, transports, registry, approval, result normalization, cancellation, and resilience coverage.
 
 ## Reference
 

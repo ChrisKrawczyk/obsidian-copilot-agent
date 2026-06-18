@@ -4,6 +4,7 @@ import {
   type SearchMatchView,
   type TagCountView,
 } from "./searchResultRenderer";
+import { truncateMcpText } from "../sdk/approvalText";
 
 /**
  * Callback surface from the chat view into the block. The block emits
@@ -43,11 +44,12 @@ export interface ToolCallBlockHandlers {
  * renderer calls this to decide whether to emit the Undo button.
  */
 export function shouldRenderUndoButton(
-  call: Pick<ToolCall, "outcome" | "undoId" | "undone" | "name">,
+  call: Pick<ToolCall, "outcome" | "undoId" | "undone" | "name" | "source">,
   handlers: Pick<ToolCallBlockHandlers, "onUndo" | "isUndoSuppressed">,
 ): boolean {
   if (call.outcome !== "completed") return false;
   if (!call.undoId) return false;
+  if (call.source === "mcp") return false;
   if (call.undone) return false;
   if (!handlers.onUndo) return false;
   if (call.name && handlers.isUndoSuppressed?.(call.name)) return false;
@@ -196,7 +198,10 @@ function renderApprovalPrompt(
   if (call.approval?.detail) {
     const pre = document.createElement("pre");
     pre.classList.add("copilot-agent-toolcall-approval-detail");
-    pre.textContent = truncate(call.approval.detail, 4000);
+    pre.textContent =
+      call.source === "mcp"
+        ? truncateMcpText(call.approval.detail)
+        : truncate(call.approval.detail, 4000);
     wrap.appendChild(pre);
   }
 
@@ -261,7 +266,7 @@ function makeLabeledPre(label: string, text: string): HTMLElement {
   labelEl.textContent = label;
   const pre = document.createElement("pre");
   pre.classList.add("copilot-agent-toolcall-section-content");
-  pre.textContent = truncate(text, 4000);
+  pre.textContent = truncateMcpText(text);
   wrap.appendChild(labelEl);
   wrap.appendChild(pre);
   return wrap;

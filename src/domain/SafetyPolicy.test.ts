@@ -2,10 +2,17 @@ import { describe, expect, test } from "vitest";
 import {
   decideSafety,
   SafetyState,
+  formatMcpGrantKey,
   isVaultPathAllowlisted,
   normaliseAllowlistEntry,
   type SafetyConfig,
 } from "./SafetyPolicy";
+import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+
+const serverA = "server-a" as McpServerId;
+const serverB = "server-b" as McpServerId;
+const epoch1 = "epoch_1" as McpTrustEpoch;
+const epoch2 = "epoch_2" as McpTrustEpoch;
 
 function cfg(overrides: Partial<SafetyConfig> = {}): SafetyConfig {
   return {
@@ -97,37 +104,99 @@ describe("decideSafety - vault source", () => {
 describe("decideSafety - mcp source", () => {
   test("always require-approval by default (no auto-apply default exists)", () => {
     const r = decideSafety(
-      { source: "mcp", toolName: "my-mcp-server" },
+      {
+        source: "mcp",
+        toolName: "read",
+        mcpServerId: serverA,
+        mcpToolName: "read",
+        mcpTrustEpoch: epoch1,
+      },
       cfg({ fsDefaultMode: "auto-apply-with-undo" }),
       new SafetyState(),
     );
     expect(r.decision).toBe("require-approval");
   });
-  test("per-server toggle in settings auto-approves", () => {
+  test("exact persistent server/tool/epoch key auto-approves", () => {
     const r = decideSafety(
-      { source: "mcp", toolName: "trusted-server" },
-      cfg({ mcpAutoApprove: { "trusted-server": true } }),
+      {
+        source: "mcp",
+        mcpServerId: serverA,
+        mcpToolName: "read",
+        mcpTrustEpoch: epoch1,
+      },
+      cfg({ mcpAutoApprove: { [formatMcpGrantKey(serverA, "read", epoch1)]: true } }),
       new SafetyState(),
     );
     expect(r.decision).toBe("auto-apply");
   });
-  test("per-server session grant auto-approves", () => {
+  test("exact session grant auto-approves", () => {
     const state = new SafetyState();
-    state.grantMcp("trusted-server");
+    state.grantMcp(serverA, "read", epoch1);
     const r = decideSafety(
-      { source: "mcp", toolName: "trusted-server" },
+      {
+        source: "mcp",
+        mcpServerId: serverA,
+        mcpToolName: "read",
+        mcpTrustEpoch: epoch1,
+      },
       cfg(),
       state,
     );
     expect(r.decision).toBe("auto-apply");
   });
-  test("grant for a different server does not leak", () => {
+  test("grant for a different server or tool does not leak", () => {
     const state = new SafetyState();
-    state.grantMcp("trusted-server");
+    state.grantMcp(serverA, "read", epoch1);
+    for (const input of [
+      { mcpServerId: serverB, mcpToolName: "read", mcpTrustEpoch: epoch1 },
+      { mcpServerId: serverA, mcpToolName: "write", mcpTrustEpoch: epoch1 },
+    ]) {
+      const r = decideSafety({ source: "mcp", ...input }, cfg(), state);
+      expect(r.decision).toBe("require-approval");
+    }
+  });
+  test("current-epoch lookup ignores older grants and stale epochs prompt", () => {
+    const state = new SafetyState();
+    state.grantMcp(serverA, "read", epoch1);
+    expect(
+      decideSafety(
+        {
+          source: "mcp",
+          mcpServerId: serverA,
+          mcpToolName: "read",
+          mcpTrustEpoch: epoch2,
+        },
+        cfg({
+          mcpAutoApprove: {
+            [formatMcpGrantKey(serverA, "read", epoch1)]: true,
+          },
+        }),
+        state,
+      ).decision,
+    ).toBe("require-approval");
+  });
+  test("missing trust epoch or metadata fails closed", () => {
+    const state = new SafetyState();
+    state.grantMcp(serverA, "read", epoch1);
+    for (const input of [
+      { source: "mcp" as const, mcpServerId: serverA, mcpToolName: "read" },
+      { source: "mcp" as const, mcpToolName: "read", mcpTrustEpoch: epoch1 },
+      { source: "mcp" as const, mcpServerId: serverA, mcpTrustEpoch: epoch1 },
+    ]) {
+      expect(decideSafety(input, cfg(), state).decision).toBe("require-approval");
+    }
+  });
+  test("readOnlyHint and annotations never bypass MCP approval", () => {
     const r = decideSafety(
-      { source: "mcp", toolName: "untrusted-server" },
-      cfg(),
-      state,
+      {
+        source: "mcp",
+        toolName: "read",
+        mcpServerId: serverA,
+        mcpToolName: "read",
+        mcpTrustEpoch: epoch1,
+      },
+      cfg({ fsDefaultMode: "auto-apply-with-undo" }),
+      new SafetyState(),
     );
     expect(r.decision).toBe("require-approval");
   });
@@ -168,12 +237,12 @@ describe("SafetyState clear()", () => {
   test("clears all grant buckets", () => {
     const s = new SafetyState();
     s.grantVault();
-    s.grantMcp("a");
+    s.grantMcp(serverA, "a", epoch1);
     s.grantBuiltin("shell");
     s.grantExtraVault("/some/root");
     s.clear();
     expect(s.isVaultGranted()).toBe(false);
-    expect(s.isMcpGranted("a")).toBe(false);
+    expect(s.isMcpGranted(serverA, "a", epoch1)).toBe(false);
     expect(s.isBuiltinGranted("shell")).toBe(false);
     expect(s.isExtraVaultGranted("/some/root")).toBe(false);
   });

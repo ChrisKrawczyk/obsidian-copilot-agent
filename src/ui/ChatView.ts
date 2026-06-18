@@ -27,6 +27,8 @@ import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
+import { redactSensitive } from "../mcp/redactSensitive";
+import { truncateMcpText, escapeMcpPlainText } from "../sdk/approvalText";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
 
@@ -296,6 +298,12 @@ export class ChatView extends ItemView {
       cls: "copilot-agent-status",
       text: "…",
     });
+    const settingsBtn = titleRow.createEl("button", {
+      cls: "copilot-agent-settings-button clickable-icon",
+      attr: { "aria-label": "Open Copilot Agent settings", title: "Open Copilot Agent settings" },
+    });
+    setIcon(settingsBtn, "settings");
+    settingsBtn.addEventListener("click", () => this.openSettings());
 
     this.listEl = root.createDiv({ cls: "copilot-agent-messages" });
     this.renderer = new MessageRenderer(
@@ -940,13 +948,17 @@ export class ChatView extends ItemView {
           // disappears. tool_call_complete (or tool.execution_*) will
           // overwrite this immediately if execution proceeds.
           const newOutcome =
-            ev.choice.kind === "reject" ? "denied" : "approved";
+            ev.choice.kind === "reject"
+              ? "denied"
+              : ev.choice.kind === "cancelled"
+                ? "cancelled"
+                : "approved";
           state.upsertToolCall(placeholderId, {
             id: ev.id,
             kind: "tool",
             outcome: newOutcome,
             detail:
-              ev.choice.kind === "reject"
+              ev.choice.kind === "reject" || ev.choice.kind === "cancelled"
                 ? (ev.choice.reason ?? "Rejected by user.")
                 : undefined,
             approval: undefined,
@@ -1185,6 +1197,7 @@ function toPersistedToolCalls(
       (tc) =>
         tc.outcome === "completed" ||
         tc.outcome === "errored" ||
+        tc.outcome === "cancelled" ||
         tc.outcome === "approved" ||
         tc.outcome === "denied",
     )
@@ -1196,12 +1209,21 @@ function toPersistedToolCalls(
       outcome: tc.outcome as
         | "completed"
         | "errored"
+        | "cancelled"
         | "approved"
         | "denied",
-      detail: tc.detail,
-      argsPreview: tc.argsPreview,
-      resultContent: tc.resultContent,
+      detail: sanitizePersistedMcpText(tc.source, tc.detail),
+      argsPreview: sanitizePersistedMcpText(tc.source, tc.argsPreview),
+      resultContent: sanitizePersistedMcpText(tc.source, tc.resultContent),
       undoId: tc.undoId,
       undone: tc.undone,
     }));
+}
+
+function sanitizePersistedMcpText(
+  source: import("../domain/types").ToolCall["source"],
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined || source !== "mcp") return value;
+  return truncateMcpText(escapeMcpPlainText(redactSensitive(value)));
 }

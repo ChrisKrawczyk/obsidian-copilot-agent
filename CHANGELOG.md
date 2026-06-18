@@ -3,6 +3,41 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.0] – Unreleased
+
+### Added
+
+- MCP client support for stdio and Streamable HTTP servers, powered by exact-pinned `@modelcontextprotocol/sdk@1.29.0`; the client advertises protocol `2025-06-18`, accepts `2024-11-05` on supported transports, and rejects legacy HTTP+SSE-only servers.
+- Settings UI for adding, editing, enabling, disabling, removing, inspecting, and reconnecting MCP servers, including static Streamable HTTP `Authorization` support.
+- MCP tools appear in chat with server attribution and the existing approval gate; image/binary results render as placeholders instead of raw base64.
+- Coalesced `notifications/tools/list_changed` refresh and Stop/cancellation handling for MCP `tools/call`.
+
+### Changed
+
+- Safety approval scope for MCP calls now uses the exact `(serverId, toolName, trustEpoch)` tuple, where the trust epoch changes when the server's security-relevant identity changes.
+
+### Security
+
+- stdio child processes run with env denylist filtering; display and persistence sinks redact `Authorization`, `Mcp-Session-Id`, URL userinfo, token query params, and denylisted env values.
+- Streamable HTTP has no TLS bypass options, drops `Authorization` on cross-origin redirects, rejects cloud metadata IPs, requires confirmation for private-network targets, and rejects legacy HTTP+SSE-only fallback.
+- MCP server `instructions` and tool descriptions are treated as untrusted prompt-injection surfaces and cannot alter approval policy.
+
+### Migration
+
+- Legacy v0.4 `mcpAutoApprove` keys are preserved on round-trip but ignored at decision time unless they match the new exact-scope grant key. Users are re-prompted under the `(serverId, toolName, trustEpoch)` grant model.
+
+### Dependencies
+
+- `@modelcontextprotocol/sdk@1.29.0` is exact-pinned with no caret/tilde; future bumps require transport-security re-review.
+
+### Bundle Size
+
+- NFR-005 Phase 3 measurement: pre-SDK `main.js` gzip 83,032 bytes; post-SDK/runtime `main.js` gzip 121,915 bytes; delta +38,883 bytes (≤80 KB target). No waiver required.
+
+### Tests
+
+- Final v0.5 test count: 944 passing. Documentation-only Phase 7 leaves the Phase 6 second-fixup count unchanged.
+
 ## [0.4.0] – 2026-06-12
 
 ### Added

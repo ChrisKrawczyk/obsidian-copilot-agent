@@ -1,6 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   CopilotAgentSession,
+  classifyToolSource,
+  type AgentSessionOptions,
   type SdkClient,
   type SdkModule,
   type SdkPermissionRequest,
@@ -8,7 +10,15 @@ import {
   type SdkSession,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
-import { SafetyState } from "../domain/SafetyPolicy";
+import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
+import { normalizeServerId } from "../mcp/McpIdentity";
+import { McpManager } from "../mcp/McpManager";
+import { formatSyntheticId } from "../mcp/McpToolIdentity";
+import type { McpServerConfig, McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+
+const mcpServerId = "server-a" as McpServerId;
+const mcpEpoch1 = "epoch_1" as McpTrustEpoch;
+const mcpEpoch2 = "epoch_2" as McpTrustEpoch;
 
 interface FakeHandles {
   sdk: SdkModule;
@@ -149,6 +159,109 @@ function makeAgent(
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function attachStreamingHandlers(handles: FakeHandles) {
+  const handlers: {
+    delta?: (event: {
+      type: "assistant.message_delta";
+      data: { deltaContent: string };
+    }) => void;
+    toolStart?: (event: {
+      type: "tool.execution_start";
+      data: {
+        toolCallId: string;
+        toolName: string;
+        arguments?: Record<string, unknown>;
+        mcpServerName?: string;
+      };
+    }) => void;
+    toolComplete?: (event: {
+      type: "tool.execution_complete";
+      data: {
+        toolCallId: string;
+        success: boolean;
+        result?: { content?: string; detailedContent?: string };
+        error?: { code?: string; message: string };
+      };
+    }) => void;
+  } = {};
+  handles.session.on = (eventType, handler) => {
+    if (eventType === "assistant.message_delta") {
+      handlers.delta = handler as typeof handlers.delta;
+      return () => {
+        handlers.delta = undefined;
+      };
+    }
+    if (eventType === "tool.execution_start") {
+      handlers.toolStart = handler as typeof handlers.toolStart;
+      return () => {
+        handlers.toolStart = undefined;
+      };
+    }
+    if (eventType === "tool.execution_complete") {
+      handlers.toolComplete = handler as typeof handlers.toolComplete;
+      return () => {
+        handlers.toolComplete = undefined;
+      };
+    }
+    return () => {};
+  };
+  return handlers;
+}
+
+function mcpTestServer(id: string): McpServerConfig {
+  return {
+    id: normalizeServerId(id),
+    name: id,
+    enabled: true,
+    trustEpoch: "epoch_test" as McpTrustEpoch,
+    transport: "stdio",
+    command: "node",
+    args: [],
+  };
+}
+
+function makeMcpLifecycleManager(
+  agents: Array<{
+    cancelPendingMcpApprovalsForServer: (serverId: string, reason?: string) => void;
+    cancelMcpCallsForServer: (serverId: string, reason?: string) => void;
+  }>,
+  reason: () => string,
+) {
+  const serverX = mcpTestServer("server-x");
+  const serverY = mcpTestServer("server-y");
+  const manager = new McpManager({
+    vaultRoot: "C:\\vault",
+    serversProvider: () => [serverX, serverY],
+    runtimeFactory: (config) =>
+      ({
+        connect: vi.fn(async () => ({ serverId: config.id, tools: [] })),
+        snapshot: () => ({ id: config.id, status: "connected" }),
+        disable: vi.fn(async () => undefined),
+        unload: vi.fn(async () => undefined),
+        callTool: vi.fn(async () => {
+          throw new Error("server disconnected");
+        }),
+      }) as never,
+    settleTrackedCalls: async (serverId) => {
+      for (const agent of agents) {
+        agent.cancelPendingMcpApprovalsForServer(serverId, reason());
+        agent.cancelMcpCallsForServer(serverId, reason());
+      }
+    },
+  });
+  return { manager, serverX: serverX.id, serverY: serverY.id };
+}
+
 describe("CopilotAgentSession", () => {
   test("init() starts client, pings, and creates a session with builtin tools exposed", async () => {
     const h = makeFakeSdk();
@@ -166,6 +279,33 @@ describe("CopilotAgentSession", () => {
     expect(h.permissionHandler).toBeTypeOf("function");
     expect(agent.getModel()).toBe("gpt-4.1");
 
+    await agent.dispose();
+  });
+
+  test("MCP synthetic custom tools are handed to SDK session boundaries", async () => {
+    const h = makeFakeSdk();
+    let capturedTools: unknown;
+    h.client.createSession = async (opts) => {
+      capturedTools = opts.tools;
+      h.permissionHandler = opts.onPermissionRequest;
+      return h.session;
+    };
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => [{ name: formatSyntheticId(mcpServerId, "read__File") }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect((capturedTools as Array<{ name: string }>).map((t) => t.name)).toEqual([
+      "read_file",
+      "mcp__server-a__read__File",
+    ]);
     await agent.dispose();
   });
 
@@ -844,6 +984,10 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       defaultMode?: "auto-apply-with-undo" | "require-approval";
       vaultAllowlist?: string[];
       builtinAutoApprove?: Record<string, boolean>;
+      mcpAutoApprove?: Record<string, boolean>;
+      getMcpToolSourceMetadata?: NonNullable<
+        AgentSessionOptions["safety"]
+      >["getMcpToolSourceMetadata"];
     } = {},
   ) {
     const state = new SafetyState();
@@ -858,9 +1002,10 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
             fsDefaultMode: overrides.defaultMode ?? "auto-apply-with-undo",
             vaultAllowlist: overrides.vaultAllowlist ?? [],
             builtinAutoApprove: overrides.builtinAutoApprove ?? {},
-            mcpAutoApprove: {},
+            mcpAutoApprove: overrides.mcpAutoApprove ?? {},
           }),
           state,
+          getMcpToolSourceMetadata: overrides.getMcpToolSourceMetadata,
         },
       },
       async () => handles.sdk,
@@ -918,6 +1063,591 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
     });
     expect(shellResult.kind).toBe("reject");
     await agent.dispose();
+  });
+
+  test("synthetic MCP ids classify to source mcp", () => {
+    expect(
+      classifyToolSource(
+        "custom-tool",
+        formatSyntheticId(mcpServerId, "read_resource"),
+        new Set(),
+      ),
+    ).toBe("mcp");
+  });
+
+  test("MCP grant lookup reads current trust epoch synchronously at decision time", async () => {
+    const h = makeFakeSdk();
+    let epoch = mcpEpoch1;
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove: {
+        [formatMcpGrantKey(mcpServerId, "read", mcpEpoch2)]: true,
+      },
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: epoch,
+      }),
+    });
+    await agent.init();
+    const toolName = formatSyntheticId(mcpServerId, "read");
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-current-1",
+          kind: "mcp",
+          toolName,
+        })
+      ).kind,
+    ).toBe("reject");
+    epoch = mcpEpoch2;
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-current-2",
+          kind: "mcp",
+          toolName,
+        })
+      ).kind,
+    ).toBe("approve-once");
+    await agent.dispose();
+  });
+
+  test("persistent MCP grant requires approval when runtime metadata is unavailable", async () => {
+    const h = makeFakeSdk();
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove: {
+        [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+      },
+      getMcpToolSourceMetadata: () => null,
+    });
+    await agent.init();
+    const result = await h.permissionHandler!({
+      toolCallId: "tc-mcp-disconnected",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    expect(result.kind).toBe("reject");
+    if (result.kind === "reject") expect(result.feedback).toMatch(/metadata|No UI/i);
+    await agent.dispose();
+  });
+
+  test("approve-for-session grants exact MCP server/tool/epoch only", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = () =>
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    const { agent } = makeSafetyAgent(h, {
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const iter = agent.sendMessageStreaming("trigger")[Symbol.asyncIterator]();
+    const firstEvent = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-session",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await firstEvent;
+    agent.resolveApproval("tc-mcp-session", { kind: "approve-for-session" });
+    expect((await permission).kind).toBe("approve-once");
+
+    expect(
+      (
+        await h.permissionHandler!({
+          toolCallId: "tc-mcp-session-2",
+          kind: "mcp",
+          toolName: formatSyntheticId(mcpServerId, "read"),
+        })
+      ).kind,
+    ).toBe("approve-once");
+    resolveSend({ data: { content: "done" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
+  test("server removed between approval and dispatch rejects before approval reaches SDK", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = () =>
+      new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    let present = true;
+    const { agent } = makeSafetyAgent(h, {
+      getMcpToolSourceMetadata: () =>
+        present
+          ? {
+              source: "mcp",
+              stableServerId: mcpServerId,
+              serverName: "Server A",
+              toolName: "read",
+              trustEpoch: mcpEpoch1,
+            }
+          : null,
+    });
+    await agent.init();
+    const iter = agent.sendMessageStreaming("trigger")[Symbol.asyncIterator]();
+    const firstEvent = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-removed",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await firstEvent;
+    present = false;
+    agent.resolveApproval("tc-mcp-removed", { kind: "approve-once" });
+    const result = await permission;
+    expect(result.kind).toBe("reject");
+    resolveSend({ data: { content: "done" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
+  test("cancels in-flight MCP approval by exact server id and is idempotent", async () => {
+    const h = makeFakeSdk();
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = (prompt: string) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+    const { agent } = makeSafetyAgent(h, {
+      defaultMode: "require-approval",
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const eventsPromise = (async () => {
+      const seen: unknown[] = [];
+      for await (const ev of agent.sendMessageStreaming("trigger")) seen.push(ev);
+      return seen;
+    })();
+    await new Promise((r) => setTimeout(r, 5));
+    const permission = h.permissionHandler!({
+      toolCallId: "tc-mcp-pending-cancel",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(agent.hasPendingApprovals()).toBe(true);
+
+    agent.cancelPendingMcpApprovalsForServer("server", "Wrong server.");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(agent.hasPendingApprovals()).toBe(true);
+
+    agent.cancelPendingMcpApprovalsForServer(mcpServerId, "MCP server disabled.");
+    expect(() =>
+      agent.cancelPendingMcpApprovalsForServer(mcpServerId, "MCP server disabled."),
+    ).not.toThrow();
+    const result = await permission;
+    expect(result).toEqual({
+      kind: "reject",
+      feedback: "MCP server disabled.",
+    });
+    expect(agent.hasPendingApprovals()).toBe(false);
+
+    resolveSend({ data: { content: "done" } });
+    const events = await eventsPromise;
+    expect(
+      events.find(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string }).type === "approval_resolved",
+      ),
+    ).toMatchObject({
+      choice: { kind: "cancelled", reason: "MCP server disabled." },
+    });
+    expect(
+      events.find(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string; id?: string }).type === "tool_call_complete" &&
+          (ev as { id?: string }).id === "tc-mcp-pending-cancel",
+      ),
+    ).toMatchObject({
+      outcome: "cancelled",
+      errorMessage: "MCP server disabled.",
+    });
+    expect(
+      events.some(
+        (ev) =>
+          typeof ev === "object" &&
+          ev !== null &&
+          (ev as { type?: string; outcome?: string }).type === "tool_call_complete" &&
+          (ev as { outcome?: string }).outcome === "completed",
+      ),
+    ).toBe(false);
+    await agent.dispose();
+  });
+
+  test.each([
+    ["disable", "MCP server disabled."],
+    ["disconnect", "MCP server disconnected."],
+  ])(
+    "M3 isolation: server-X %s cancels only matching in-flight MCP calls",
+    async (lifecycleEvent, reason) => {
+      const hA = makeFakeSdk();
+      const hB = makeFakeSdk();
+      const handlersA = attachStreamingHandlers(hA);
+      const handlersB = attachStreamingHandlers(hB);
+      const sendA = deferred<unknown>();
+      const sendB = deferred<unknown>();
+      hA.session.sendAndWait = (prompt) => {
+        hA.sendCalls.push(prompt);
+        return sendA.promise;
+      };
+      hB.session.sendAndWait = (prompt) => {
+        hB.sendCalls.push(prompt);
+        return sendB.promise;
+      };
+
+      const agentA = makeAgent(hA);
+      const agentB = makeAgent(hB);
+      await agentA.init();
+      await agentB.init();
+      const { manager, serverX } = makeMcpLifecycleManager(
+        [agentA, agentB],
+        () => reason,
+      );
+      await manager.enableAllConfigured();
+
+      const iterA = agentA.sendMessageStreaming("session A streaming text")[Symbol.asyncIterator]();
+      const iterB = agentB.sendMessageStreaming("session B uses MCP")[Symbol.asyncIterator]();
+      const firstA = iterA.next();
+      const firstB = iterB.next();
+      await new Promise((r) => setTimeout(r, 0));
+
+      handlersA.delta!({
+        type: "assistant.message_delta",
+        data: { deltaContent: "still " },
+      });
+      expect(await firstA).toEqual({
+        value: { type: "delta", text: "still " },
+        done: false,
+      });
+
+      handlersB.toolStart!({
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "b-mcp-x",
+          toolName: formatSyntheticId(serverX, "read"),
+          mcpServerName: "server-X",
+          arguments: { path: "x.md" },
+        },
+      });
+      expect(await firstB).toMatchObject({
+        value: {
+          type: "tool_call_start",
+          toolCall: {
+            id: "b-mcp-x",
+            source: "mcp",
+            outcome: "approved",
+          },
+        },
+        done: false,
+      });
+
+      const builtInStart = iterB.next();
+      handlersB.toolStart!({
+        type: "tool.execution_start",
+        data: {
+          toolCallId: "b-shell",
+          toolName: "shell",
+          arguments: { command: "echo ok" },
+        },
+      });
+      expect(await builtInStart).toMatchObject({
+        value: {
+          type: "tool_call_start",
+          toolCall: {
+            id: "b-shell",
+            source: "builtin",
+            outcome: "approved",
+          },
+        },
+        done: false,
+      });
+
+      if (lifecycleEvent === "disable") {
+        await manager.disable(serverX);
+      } else {
+        await expect(manager.callTool(serverX, "read", {})).rejects.toThrow(
+          /server disconnected/,
+        );
+      }
+
+      expect(await iterB.next()).toEqual({
+        value: {
+          type: "tool_call_complete",
+          id: "b-mcp-x",
+          outcome: "cancelled",
+          errorMessage: reason,
+        },
+        done: false,
+      });
+      expect(hA.abortCalls).toBe(0);
+      expect(hB.abortCalls).toBe(0);
+
+      const secondA = iterA.next();
+      handlersA.delta!({
+        type: "assistant.message_delta",
+        data: { deltaContent: "streaming" },
+      });
+      expect(await secondA).toEqual({
+        value: { type: "delta", text: "streaming" },
+        done: false,
+      });
+
+      const builtInComplete = iterB.next();
+      handlersB.toolComplete!({
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "b-mcp-x",
+          success: true,
+          result: { content: "late mcp result" },
+        },
+      });
+      handlersB.toolComplete!({
+        type: "tool.execution_complete",
+        data: {
+          toolCallId: "b-shell",
+          success: true,
+          result: { content: "ok" },
+        },
+      });
+      expect(await builtInComplete).toEqual({
+        value: {
+          type: "tool_call_complete",
+          id: "b-shell",
+          outcome: "completed",
+          content: "ok",
+          errorMessage: undefined,
+        },
+        done: false,
+      });
+
+      sendA.resolve({ data: { content: "A done" } });
+      sendB.resolve({ data: { content: "B done" } });
+      expect(await iterA.next()).toMatchObject({
+        value: { type: "complete", content: "A done" },
+        done: false,
+      });
+      expect(await iterB.next()).toMatchObject({
+        value: { type: "complete", content: "B done" },
+        done: false,
+      });
+      expect((await iterA.next()).done).toBe(true);
+      expect((await iterB.next()).done).toBe(true);
+      await agentA.dispose();
+      await agentB.dispose();
+    },
+  );
+
+  test("M3 isolation: server-Y lifecycle cancellation leaves server-X calls in another session running", async () => {
+    const hA = makeFakeSdk();
+    const hB = makeFakeSdk();
+    const handlersA = attachStreamingHandlers(hA);
+    const handlersB = attachStreamingHandlers(hB);
+    const sendA = deferred<unknown>();
+    const sendB = deferred<unknown>();
+    hA.session.sendAndWait = (prompt) => {
+      hA.sendCalls.push(prompt);
+      return sendA.promise;
+    };
+    hB.session.sendAndWait = (prompt) => {
+      hB.sendCalls.push(prompt);
+      return sendB.promise;
+    };
+
+    const agentA = makeAgent(hA);
+    const agentB = makeAgent(hB);
+    await agentA.init();
+    await agentB.init();
+    const { manager, serverX, serverY } = makeMcpLifecycleManager(
+      [agentA, agentB],
+      () => "MCP server disconnected.",
+    );
+    await manager.enableAllConfigured();
+
+    const iterA = agentA.sendMessageStreaming("session A uses server Y")[Symbol.asyncIterator]();
+    const iterB = agentB.sendMessageStreaming("session B uses server X")[Symbol.asyncIterator]();
+    const firstA = iterA.next();
+    const firstB = iterB.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    handlersA.toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "a-mcp-y",
+        toolName: formatSyntheticId(serverY, "lookup"),
+        mcpServerName: "server-Y",
+        arguments: { query: "a" },
+      },
+    });
+    handlersB.toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "b-mcp-x",
+        toolName: formatSyntheticId(serverX, "lookup"),
+        mcpServerName: "server-X",
+        arguments: { query: "b" },
+      },
+    });
+    expect(await firstA).toMatchObject({
+      value: { type: "tool_call_start", toolCall: { id: "a-mcp-y", source: "mcp" } },
+      done: false,
+    });
+    expect(await firstB).toMatchObject({
+      value: { type: "tool_call_start", toolCall: { id: "b-mcp-x", source: "mcp" } },
+      done: false,
+    });
+
+    await manager.disable(serverY);
+
+    expect(await iterA.next()).toEqual({
+      value: {
+        type: "tool_call_complete",
+        id: "a-mcp-y",
+        outcome: "cancelled",
+        errorMessage: "MCP server disconnected.",
+      },
+      done: false,
+    });
+
+    const serverXComplete = iterB.next();
+    handlersA.toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "a-mcp-y",
+        success: true,
+        result: { content: "late y result" },
+      },
+    });
+    handlersB.toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "b-mcp-x",
+        success: true,
+        result: { content: "x result" },
+      },
+    });
+    expect(await serverXComplete).toEqual({
+      value: {
+        type: "tool_call_complete",
+        id: "b-mcp-x",
+        outcome: "completed",
+        content: "x result",
+        errorMessage: undefined,
+      },
+      done: false,
+    });
+    expect(hA.abortCalls).toBe(0);
+    expect(hB.abortCalls).toBe(0);
+
+    sendA.resolve({ data: { content: "A done" } });
+    sendB.resolve({ data: { content: "B done" } });
+    expect(await iterA.next()).toMatchObject({
+      value: { type: "complete", content: "A done" },
+      done: false,
+    });
+    expect(await iterB.next()).toMatchObject({
+      value: { type: "complete", content: "B done" },
+      done: false,
+    });
+    expect((await iterA.next()).done).toBe(true);
+    expect((await iterB.next()).done).toBe(true);
+    await agentA.dispose();
+    await agentB.dispose();
+  });
+
+  test("server cancellation clears resolved MCP approvals with NUL-separated cache keys", async () => {
+    const h = makeFakeSdk();
+    const mcpAutoApprove = {
+      [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+    };
+    const { agent } = makeSafetyAgent(h, {
+      mcpAutoApprove,
+      getMcpToolSourceMetadata: () => ({
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      }),
+    });
+    await agent.init();
+    const request = {
+      toolCallId: "tc-mcp-cache-cancel",
+      kind: "mcp",
+      toolName: formatSyntheticId(mcpServerId, "read"),
+    };
+    expect((await h.permissionHandler!(request)).kind).toBe("approve-once");
+    delete mcpAutoApprove[formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)];
+
+    agent.cancelPendingMcpApprovalsForServer(mcpServerId);
+
+    expect((await h.permissionHandler!(request)).kind).toBe("reject");
+    await agent.dispose();
+  });
+
+  test("resolved approval cache clears on MCP epoch rotation, disable, disconnect, and crashloop", async () => {
+    for (const state of ["epoch", "disable", "disconnect", "crashloop"]) {
+      const h = makeFakeSdk();
+      let metadata:
+        | {
+            source: "mcp";
+            stableServerId: typeof mcpServerId;
+            serverName: string;
+            toolName: string;
+            trustEpoch: McpTrustEpoch;
+          }
+        | null = {
+        source: "mcp",
+        stableServerId: mcpServerId,
+        serverName: "Server A",
+        toolName: "read",
+        trustEpoch: mcpEpoch1,
+      };
+      const { agent } = makeSafetyAgent(h, {
+        mcpAutoApprove: {
+          [formatMcpGrantKey(mcpServerId, "read", mcpEpoch1)]: true,
+        },
+        getMcpToolSourceMetadata: () => metadata,
+      });
+      await agent.init();
+      const request = {
+        toolCallId: `tc-mcp-cache-${state}`,
+        kind: "mcp",
+        toolName: formatSyntheticId(mcpServerId, "read"),
+      };
+      expect((await h.permissionHandler!(request)).kind).toBe("approve-once");
+      metadata =
+        state === "epoch"
+          ? { ...metadata!, trustEpoch: mcpEpoch2 }
+          : null;
+      expect((await h.permissionHandler!(request)).kind).toBe("reject");
+      await agent.dispose();
+    }
   });
 
   test("built-in toggle auto-approves matching kind", async () => {
