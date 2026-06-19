@@ -90,7 +90,12 @@ function run(cmd, args, opts = {}) {
   }
   console.log(`  $ ${display}${cwd ? `  (cwd: ${cwd})` : ""}`);
   try {
-    return execFileSync(cmd, args, { cwd: cwd ?? repoRoot, stdio: ["ignore", "pipe", "inherit"], encoding: "utf8" });
+    return execFileSync(cmd, args, {
+      cwd: cwd ?? repoRoot,
+      stdio: ["ignore", "pipe", "inherit"],
+      encoding: "utf8",
+      shell: process.platform === "win32",
+    });
   } catch (err) {
     if (allowFailure) return "";
     console.error(`[bootstrap-v0.5.0] command failed: ${display}`);
@@ -132,7 +137,11 @@ function main() {
     changelogSection = execFileSync(
       process.platform === "win32" ? "npx.cmd" : "npx",
       ["tsx", "scripts/release/extract-release-notes.mjs", TARGET_VERSION],
-      { cwd: repoRoot, encoding: "utf8" },
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        shell: process.platform === "win32",
+      },
     );
   }
   const releaseBody = buildBootstrapReleaseBody(changelogSection);
