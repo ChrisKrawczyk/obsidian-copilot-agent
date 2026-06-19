@@ -5,6 +5,16 @@
  * Usage:
  *   tsx scripts/release/assemble-assets.mjs <version> [--bootstrap] [--dry-run] [--out <dir>]
  *
+ * IMPORTANT — this script is REPO-ROOT-BOUND. It resolves the repo root
+ * from its own __dirname (`scripts/release/`), not from `process.cwd()`.
+ * Invoking it from a worktree (`cwd=C:\path\to\worktree`) will:
+ *   - read `main.js` / `manifest.json` / `styles.css` from the SOURCE repo,
+ *     not the worktree (so the build output of the worktree is ignored), and
+ *   - write `release-assets/` into the SOURCE repo.
+ * For worktree-based historical builds (see `bootstrap-v0.5.0.mjs`),
+ * do asset assembly INLINE via `validateReleaseAssets` from
+ * `src/release/releaseAssets.ts` instead of chaining to this script.
+ *
  * Behavior (per Phase 3 spec lines 425-436):
  *   1. Assert build output `main.js` exists at repo root after `npm run build`.
  *   2. Assert `manifest.json` and `styles.css` exist at repo root.

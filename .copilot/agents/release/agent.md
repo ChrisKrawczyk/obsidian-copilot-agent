@@ -56,3 +56,21 @@ Any non-zero exit from a sub-command halts the agent. Report:
 3. A pointer to `RELEASING.md` for manual recovery if the automated path is insufficient.
 
 Never push to `main` or create a tag on your own initiative outside the documented skill sequence.
+
+## Common gotchas (captured from prior releases)
+
+Read this list before starting any release — these failures have happened and now have known fixes:
+
+1. **`gh release create --target` rejects short SHAs** (HTTP 422 `Release.target_commitish is invalid`). Resolve to the full 40-char SHA via `git rev-parse <sha>` before passing. The standard skill path doesn't invoke `gh release create --target` (it relies on tag-triggered workflows), but `bootstrap-v0.5.0.mjs` does and now resolves upfront.
+
+2. **`gh auth switch` can flip back between processes** on multi-account hosts. Always run `gh auth status | Select-String "Active account: true"` immediately before any `gh` mutation. If the wrong account is active, run `gh auth switch --user <correct-account>` first.
+
+3. **Windows `execFileSync` + `.cmd` shims** (e.g. `npm.cmd`, `npx.cmd`) need `shell: process.platform === "win32"` or you get `spawnSync EINVAL`. Affects helper scripts that spawn npm/npx; not the maintainer-invoked `npm run` path.
+
+4. **`scripts/release/assemble-assets.mjs` is repo-root-bound** — it resolves paths from its own `__dirname`, not `process.cwd()`. Do NOT invoke it from a worktree expecting it to read the worktree's build output. For historical/worktree builds, use `validateReleaseAssets` from `src/release/releaseAssets.ts` inline.
+
+5. **The Linux release workflow tests every code path** including Windows-specific ones. Code that uses `path.join` / `path.delimiter` while emulating a different platform (e.g. `findOnPath` in `StdioTransport.ts`) must use `path.win32` / `path.posix` explicitly so cross-platform tests pass on Ubuntu CI. Production behavior on real Windows hosts is unaffected.
+
+6. **Pre-releases (versions containing `-`, e.g. `0.6.0-rc.1`) are auto-marked `prerelease: true`** by `release.yml`. BRAT users testing pre-releases must check "Enable beta versions" when adding the plugin or BRAT will skip the tag.
+
+7. **The repo must be public for BRAT to fetch it.** BRAT cannot reach private GitHub repos anonymously. If you ever flip it back to private, BRAT installs will break with "repository not found".
