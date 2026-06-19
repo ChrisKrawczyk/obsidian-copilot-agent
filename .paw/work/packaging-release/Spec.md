@@ -126,8 +126,9 @@ Cross-platform binary acquisition and the release agent are scope expansions vs 
 - FR-026: The existing developer deploy workflow continues to work unchanged: when a binary is already present in the plugin folder at the pinned version (placed there by the dev toolchain), the fetcher does not re-download or interfere. (Stories: P1)
 
 **CHANGELOG**
-- FR-027: A `CHANGELOG.md` file exists in the repo root. The first entry covers v0.6.0 and is authored as part of this work. Earlier versions are not backfilled. (Stories: P1, P5)
-- FR-028: The CHANGELOG follows a simple, conventional format (e.g. "Keep a Changelog" or close variant). The format is documented in `RELEASING.md`. (Stories: P5)
+- FR-027: A `CHANGELOG.md` file exists in the repo root. The existing v0.5.0 entry (currently marked "Unreleased") is updated to its release date corresponding to the merge of PR #5 into `main`. A new v0.6.0 entry covering this work is added above it. Pre-v0.5 versions are not backfilled. (Stories: P1, P5)
+- FR-028: The CHANGELOG follows a simple, conventional format (the existing "loosely based on Keep a Changelog" format is preserved). The format is documented in `RELEASING.md`. (Stories: P5)
+- FR-031: As part of this work, a GitHub Release for **v0.5.0** is published with the BRAT-compliant assets built from the v0.5.0 merge commit, so BRAT users can install or pin to v0.5.0. This is a one-time bootstrap action; subsequent releases flow through the release agent and CI. (Stories: P1)
 
 ### Key Entities
 
@@ -150,7 +151,7 @@ Cross-platform binary acquisition and the release agent are scope expansions vs 
 - SC-002: A clean Obsidian vault on Windows, with no Node toolchain installed, can install the plugin via BRAT from the published v0.6.0 release and reach a successful chat exchange without any terminal commands. (FR-011, FR-012, FR-016, FR-019, FR-020, FR-022)
 - SC-003: The same end-to-end install-via-BRAT flow succeeds on macOS arm64 and Linux x64 (libc) test environments. (FR-019, FR-020, FR-021)
 - SC-004: When the release agent's preflight detects a dirty tree, failing tests, or a non-monotonic version bump, it refuses to proceed and reports the failure clearly. (FR-007)
-- SC-005: The GitHub Release page for v0.6.0 lists exactly three assets at the release root — `main.js`, `manifest.json`, `styles.css` — and its body reflects the v0.6.0 CHANGELOG entry. (FR-012, FR-013)
+- SC-005: The GitHub Releases page lists releases for both **v0.5.0** (bootstrapped retroactively) and **v0.6.0**. The v0.6.0 release lists exactly three assets at the release root — `main.js`, `manifest.json`, `styles.css` — and its body reflects the v0.6.0 CHANGELOG entry. (FR-012, FR-013, FR-031)
 - SC-006: A first-time reader of `RELEASING.md` can ship a release without consulting any other source. (FR-003, FR-005, FR-006)
 - SC-007: Existing developer commands and workflows behave identically after this work as before. (FR-029)
 - SC-008: The plugin's test suite remains at 100% pass on the baseline plus any new tests added by this work. (FR-030)
@@ -163,7 +164,7 @@ Cross-platform binary acquisition and the release agent are scope expansions vs 
 - **The pinned binary version is the version of `@github/copilot` declared by the installed `@github/copilot-sdk` at build time.** This version is captured into the build at build time so the fetcher knows what to ask for. Runtime override of the pinned version is not supported in v0.6.0.
 - **Maintainer (Chris) operates with two `gh` accounts.** The release agent's GitHub Actions monitoring uses whichever account is currently selected; the agent does not manage `gh auth switch`. Documented as a release-doc note.
 - **No code signing of binaries.** The plugin code itself is not signed; the downloaded native binary is whatever upstream `@github/copilot-<plat>-<arch>` ships (which is signed by GitHub at the npm registry level via integrity checksums but not by us). SmartScreen / Gatekeeper / similar OS warnings on first run are accepted; documented in README install section.
-- **CHANGELOG starts fresh at v0.6.0.** Pre-v0.6 history is not backfilled. Released versions before this work did not exist as tags.
+- **CHANGELOG already contains a v0.5.0 entry** (`CHANGELOG.md` exists at the start of this work, with a "Unreleased" v0.5.0 entry from the MCP work that merged to `main`). The v0.5.0 entry is marked released as part of this work. v0.6.0 is added on top. Pre-v0.5 versions are not backfilled.
 - **BRAT is the primary distribution channel for v0.6.0.** Community Plugins catalog submission is explicitly Phase C and out of scope here.
 - **Plugin folder is writable by the Obsidian process.** Read-only or write-blocked plugin folders surface a fetcher error; we do not work around platform-level access controls.
 - **The plugin is `isDesktopOnly: true`.** Mobile Obsidian is not supported and is not in scope.
