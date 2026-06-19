@@ -50,6 +50,13 @@ Iteration-2 review: Gemini and Opus PASS; GPT-5.4 FAIL with 4 follow-on blocking
 
 Opus iter-2 also flagged a non-blocking NOTE on the v0.5.0 bootstrap manifest substitution — already mitigated via the v0.5.0 release-body edge note (line ~519); transparency is preserved.
 
+### Plan Review Iteration 3 (post-iter-3 revisions)
+
+GPT-5.4 iter-3 caught two residual issues; both surgically fixed:
+
+- **iter3-B1 (residual "best-effort" wording)**: removed from the Phase 5 smoke-test step 1 and the Phase 6 RELEASING.md outline. The detailed SC-003 note (which explains how access will be arranged) is retained.
+- **iter3-I1 (Phase 2 manual success criterion contradicted the marker-missing fallback)**: the Settings/Retry manual criterion now distinguishes three explicit scenarios: marker-missing-only (no re-download — fallback path), binary-deleted (re-download), and version-mismatched marker (re-download).
+
 ---
 
 ## Overview
@@ -348,7 +355,7 @@ After copying `copilot.exe` from `node_modules` into the vault plugin folder, wr
 
 - With `copilot.exe` present in the vault plugin folder at the pinned version, the plugin loads exactly as before (no Notice, no download) — verified by checking the dev console.
 - With `copilot.exe` deleted from the vault plugin folder, reloading the plugin shows a "Downloading…" Notice that updates as bytes stream in; after ~30–90s the binary appears at the final path with `0755` permissions on POSIX or just present on Windows; chat works.
-- Settings → Copilot Agent shows the CLI binary section reporting the installed version; deleting the marker file and clicking Retry re-downloads cleanly.
+- Settings → Copilot Agent shows the CLI binary section reporting the installed version. **Marker-missing fallback**: deleting only the marker file (leaving the binary in place) and reloading shows the binary as installed (the trust-and-record fallback rewrites the marker silently) — `Retry` does **not** trigger a re-download. **Re-fetch path**: deleting the binary file (with or without the marker) and clicking Retry re-downloads cleanly to the final path. **Version-mismatch path**: hand-editing the marker to a different version triggers a re-download on next reload (per FR-020 / Spec P4).
 - **Settings reachability after fetch failure (resolves B1)**: Block the network at the OS level (or point npm at `127.0.0.1:9` via env var) and reload the plugin. The "Downloading…" Notice transitions to a "network" error Notice. Open Settings → Copilot Agent → CliBinarySection reports the failure with a redacted reason and a Retry button. Restore the network and click Retry; the download succeeds and the rest of the plugin (chat, MCP) becomes available without a second reload (or, if simpler to implement, after a manual reload — decision: re-running `ensureCliBinaryReady()` from Retry succeeds in fetch but full runtime construction may still require a reload, which is acceptable and documented in the Notice copy).
 - Disabling the network mid-download leaves no partial file at the final path; the Settings status updates to a "network" error message; clicking Retry while the network is still down does not loop or crash; restoring the network and clicking Retry succeeds.
 
@@ -499,7 +506,7 @@ Phase 6 then expands this file into the comprehensive maintainer doc. The minimu
 
 Documented in the Phase 5 minimum `RELEASING.md` and re-stated in the Phase 6 expanded version. The procedure:
 
-1. Spin up a clean Obsidian vault (Windows; macOS and Linux are best-effort given maintainer hardware).
+1. Spin up a clean Obsidian vault on each SC-003 target platform (Windows, macOS arm64, Linux x64).
 2. Install BRAT from Community Plugins.
 3. `Add Beta Plugin → ChrisKrawczyk/obsidian-copilot-agent`.
 4. Wait for BRAT to fetch assets; verify the vault plugin folder contains exactly `main.js`, `manifest.json`, `styles.css` (no extra files).
@@ -585,7 +592,7 @@ The Phase 5 minimum runbook is expanded in this phase into the comprehensive mai
 - **CHANGELOG format**: documents the Keep-a-Changelog-loose convention currently in use (`## [version] - date` headings, `### Added/Changed/Fixed/Security/Migration/Dependencies/Bundle Size/Tests` sub-sections). (FR-028)
 - **Recovery procedures**: dirty tree, failed CI, accidentally tagged from non-`main`, partial state mid-bump. Each maps to a documented manual cleanup. (FR-010, R8)
 - **Trust chain note**: the fetcher pins to `PINNED_BINARY_VERSION` (baked at build time from `@github/copilot`'s installed version), verifies sha512 from npm registry metadata, and writes only inside the plugin folder. Upgrading the binary version requires bumping `@github/copilot-sdk` (or its transitive `@github/copilot` pin) and re-releasing. (R1)
-- **Smoke test procedure**: the eight-step BRAT install verification from Phase 5, plus the cross-platform best-effort matrix.
+- **Smoke test procedure**: the eight-step BRAT install verification from Phase 5, executed on each SC-003 target platform (Windows, macOS arm64, Linux x64) before tagging the stable release.
 - **Two-`gh`-account note**: the maintainer's release agent uses whichever `gh` account is currently selected; verify with `gh auth status` before invoking. (Spec assumption.)
 - **Dry-run mode**: how to invoke the agent with `--dry-run` (or "dry-run release …") to exercise the full flow on a feature branch without mutating remote state — useful for testing changes to the agent or skills.
 - **v0.5.0 reproducibility note**: v0.5.0 is published from a non-reproducible-from-source manifest (per Phase 5 bootstrap); this is documented for transparency. (Resolves Opus N1.)
