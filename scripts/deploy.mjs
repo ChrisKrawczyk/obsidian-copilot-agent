@@ -25,7 +25,7 @@
  * (it's ~150 MB and changes only when @github/copilot-sdk is bumped).
  * Run with `--with-binary` to force-copy the platform binary as well.
  */
-import { existsSync, readFileSync, copyFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, copyFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -90,4 +90,26 @@ for (const rel of files) {
 }
 
 console.log(`deploy: copied ${copied} file(s) → ${target}`);
+
+if (withBinary) {
+  // v0.6 Phase 2: keep dev-deploy honest with the new BinaryFetcher
+  // marker convention. After copying copilot.exe (or copilot), write
+  // <plugin-dir>/.copilot-binary-version so isInstalled() recognises
+  // the binary as the pinned version and skips re-acquisition.
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(repoRoot, "node_modules", "@github", "copilot", "package.json"), "utf8"),
+    );
+    const version = typeof pkg?.version === "string" ? pkg.version : null;
+    if (version) {
+      writeFileSync(join(target, ".copilot-binary-version"), version, "utf8");
+      console.log(`  ✓ .copilot-binary-version  (${version})`);
+    } else {
+      console.warn("deploy: @github/copilot/package.json has no version; skipping marker");
+    }
+  } catch (err) {
+    console.warn(`deploy: could not write .copilot-binary-version: ${err?.message ?? err}`);
+  }
+}
+
 console.log("Reload Obsidian: command palette → 'Reload app without saving'.");

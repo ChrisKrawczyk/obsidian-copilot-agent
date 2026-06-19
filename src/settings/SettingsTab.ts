@@ -20,11 +20,19 @@ import type { ModelCatalog, ModelCatalogState } from "../sdk/ModelCatalog";
 import type { McpSettingsStore } from "./McpSettingsStore";
 import type { McpManager } from "../mcp/McpManager";
 import { McpServersSection } from "./McpServersSection";
+import { CliBinarySection, type CliBinaryHostPlugin } from "./CliBinarySection";
+import { PINNED_BINARY_VERSION } from "../sdk/pinnedBinaryVersion";
 
 /**
  * Phase 3 settings. Surfaces the auth state machine + persistence toggle.
  * Subscribes to AuthController and re-renders the connection row when
  * state changes; cleans up the subscription on `hide()` to avoid leaks.
+ *
+ * v0.6 Phase 2: all dependencies past `app` + `plugin` are late-bound to
+ * support the three-band onload() ordering (the settings tab is registered
+ * in Band A before binary acquisition; remaining deps are attached in
+ * Band C). When called pre-attach, `display()` renders only the CLI
+ * binary section + a placeholder note for the rest.
  */
 export class CopilotAgentSettingTab extends PluginSettingTab {
   private unsubscribe?: () => void;
@@ -34,26 +42,87 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
   private connectionDescEl?: HTMLElement;
   private connectionBtnSetting?: Setting;
   private mcpSection?: McpServersSection;
+  private cliBinarySection?: CliBinarySection;
+  private readonly pluginRef: Plugin;
+
+  private authController?: AuthController;
+  private tokenStore?: TokenStore;
+  private safetyStore?: SafetySettingsStore;
+  private modelCatalog?: ModelCatalog;
+  private mcpSettingsStore?: McpSettingsStore;
+  private mcpManager?: McpManager;
 
   constructor(
     app: App,
     plugin: Plugin,
-    private readonly authController: AuthController,
-    private readonly tokenStore: TokenStore,
-    private readonly safetyStore?: SafetySettingsStore,
-    private readonly modelCatalog?: ModelCatalog,
-    private readonly mcpSettingsStore?: McpSettingsStore,
-    private readonly mcpManager?: McpManager,
+    authController?: AuthController,
+    tokenStore?: TokenStore,
+    safetyStore?: SafetySettingsStore,
+    modelCatalog?: ModelCatalog,
+    mcpSettingsStore?: McpSettingsStore,
+    mcpManager?: McpManager,
   ) {
     super(app, plugin);
+    this.pluginRef = plugin;
+    this.authController = authController;
+    this.tokenStore = tokenStore;
+    this.safetyStore = safetyStore;
+    this.modelCatalog = modelCatalog;
+    this.mcpSettingsStore = mcpSettingsStore;
+    this.mcpManager = mcpManager;
+  }
+
+  /**
+   * v0.6 Phase 2: Band C invokes this to attach the deps that require a
+   * loaded CLI binary. If the settings pane is currently open, re-render
+   * so newly-bound sections appear without the user having to navigate
+   * away and back.
+   */
+  attachLateDeps(deps: {
+    authController: AuthController;
+    tokenStore: TokenStore;
+    safetyStore: SafetySettingsStore;
+    modelCatalog: ModelCatalog;
+    mcpSettingsStore: McpSettingsStore;
+    mcpManager: McpManager;
+  }): void {
+    this.authController = deps.authController;
+    this.tokenStore = deps.tokenStore;
+    this.safetyStore = deps.safetyStore;
+    this.modelCatalog = deps.modelCatalog;
+    this.mcpSettingsStore = deps.mcpSettingsStore;
+    this.mcpManager = deps.mcpManager;
+    if (this.containerEl && this.containerEl.isConnected) {
+      this.display();
+    }
   }
 
   display(): void {
     const { containerEl } = this;
     this.mcpSection?.dispose();
     this.mcpSection = undefined;
+    this.cliBinarySection?.dispose();
+    this.cliBinarySection = undefined;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Copilot Agent" });
+
+    // ---- CLI binary section (always available, even pre-Band-C) ----
+    this.cliBinarySection = new CliBinarySection({
+      plugin: this.pluginRef as unknown as CliBinaryHostPlugin,
+      pinnedVersion: PINNED_BINARY_VERSION,
+    });
+    this.cliBinarySection.mount(containerEl);
+
+    if (!this.authController || !this.tokenStore) {
+      containerEl.createEl("p", {
+        cls: "setting-item-description",
+        text:
+          "Other settings (connection, safety, MCP servers) become available " +
+          "once the Copilot CLI binary has finished loading. " +
+          "If the binary download failed, click Retry above; otherwise reload Obsidian.",
+      });
+      return;
+    }
 
     // ---- Connection ----
     const conn = containerEl.createDiv({ cls: "copilot-agent-settings-conn" });
@@ -66,7 +135,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
       .setDesc("");
 
     // ---- Persistence toggle ----
-    const snap = this.tokenStore.snapshot();
+    const snap = this.tokenStore!.snapshot();
     new Setting(containerEl)
       .setName("Save token between sessions")
       .setDesc(
@@ -78,7 +147,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
       )
       .addToggle((toggle) =>
         toggle.setValue(snap.persistEnabled).onChange(async (value) => {
-          await this.authController.setPersistEnabled(value);
+          await this.authController!.setPersistEnabled(value);
         }),
       );
 
@@ -194,9 +263,8 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Copilot CLI binary")
       .setDesc(
-        "Place the platform-specific binary (copilot.exe on Windows, " +
-          "copilot on macOS/Linux) in this plugin's directory. See " +
-          "README → 'Installing the Copilot CLI binary'.",
+        "Manage the platform-specific binary above (auto-downloaded on first " +
+          "launch; Retry from the CLI binary section at top to re-acquire).",
       );
 
     // ---- Phase 2 (Chat UX + Vault Tools): Vault awareness ----
@@ -220,9 +288,11 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
 
     // Subscribe AFTER all DOM is built so the first render lands correctly.
     this.unsubscribe?.();
-    this.unsubscribe = this.authController.subscribe((state) =>
-      this.renderConnection(state),
-    );
+    if (this.authController) {
+      this.unsubscribe = this.authController.subscribe((state) =>
+        this.renderConnection(state),
+      );
+    }
   }
 
   private renderVaultAwarenessSection(containerEl: HTMLElement): void {
@@ -476,7 +546,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
       this.connectionBtnSetting.addButton((btn) =>
         btn
           .setButtonText("Cancel")
-          .onClick(() => this.authController.cancelConnect()),
+          .onClick(() => this.authController!.cancelConnect()),
       );
     } else if (state.kind === "connected") {
       this.connectionBtnSetting.addButton((btn) =>
@@ -484,13 +554,14 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           .setButtonText("Disconnect")
           .setWarning()
           .onClick(async () => {
-            await this.authController.disconnect();
+            await this.authController!.disconnect();
           }),
       );
     }
   }
 
   private openDeviceFlowModal(): void {
+    if (!this.authController) return;
     const modal = new DeviceFlowModal(this.app, this.authController);
     // Kick off connect FIRST so the synchronous state gate transitions to
     // `connecting` before the modal subscribes on open(). Otherwise the

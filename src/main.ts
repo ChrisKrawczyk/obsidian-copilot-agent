@@ -11,6 +11,14 @@ import {
   resolveCliBinaryPath,
   getAbsolutePluginDir,
 } from "./sdk/resolveCliBinaryPath";
+import {
+  FetcherError,
+  detectPlatformTuple,
+  ensureInstalled as ensureBinaryInstalled,
+  getRequiredBinaryPath,
+  isInstalled as isBinaryInstalled,
+} from "./sdk/BinaryFetcher";
+import { PINNED_BINARY_VERSION } from "./sdk/pinnedBinaryVersion";
 import { denyAll } from "./domain/PermissionDecision";
 import { registerChatView } from "./ui/ChatViewRegistration";
 import { CopilotAgentSettingTab } from "./settings/SettingsTab";
@@ -98,25 +106,146 @@ export default class CopilotAgentPlugin extends Plugin {
   private disposeSharedSdkClient: (() => Promise<void>) | null = null;
   mcpSettingsStore: McpSettingsStore | null = null;
   mcpManager: McpManager | null = null;
+  /** v0.6 Phase 2: most-recent BinaryFetcher failure, surfaced by the
+   *  Settings tab's CliBinarySection so the user can see why startup
+   *  short-circuited and click Retry. Null on success or before any
+   *  attempt has been made. */
+  binaryFetchError: FetcherError | null = null;
+  /** v0.6 Phase 2: exposed for CliBinarySection. */
+  readonly pinnedBinaryVersion: string = PINNED_BINARY_VERSION;
+  private settingsTab: CopilotAgentSettingTab | null = null;
+
+  /**
+   * v0.6 Phase 2: idempotent CLI binary acquisition. Called from Band B
+   * of `onload()` and also from the Settings tab's Retry button.
+   * Resolves to the binary path on success, null on failure (caller is
+   * expected to read `this.binaryFetchError` for the reason).
+   *
+   * Behavior:
+   *   1. If `isInstalled` reports true, returns the path immediately —
+   *      preserves the dev-deploy fast path (FR-026).
+   *   2. Otherwise constructs a persistent Notice ("Downloading…"),
+   *      runs `BinaryFetcher.ensureInstalled` with byte-progress updates,
+   *      and dismisses the Notice on resolution.
+   *   3. On `FetcherError`, stores the error on the plugin instance and
+   *      displays a 12-second error Notice routed to the user's Settings
+   *      → CliBinarySection. Returns null.
+   */
+  async ensureCliBinaryReady(): Promise<string | null> {
+    try {
+      if (isBinaryInstalled(this, this.pinnedBinaryVersion)) {
+        this.binaryFetchError = null;
+        return getRequiredBinaryPath(this);
+      }
+    } catch (err) {
+      if (err instanceof FetcherError && err.kind === "unsupported-platform") {
+        this.binaryFetchError = err;
+        new Notice(
+          `[Copilot Agent] Unsupported platform. Open Settings → Copilot Agent for details.`,
+          12000,
+        );
+        return null;
+      }
+      // Fall through and treat as a fetch attempt.
+    }
+    const startedAt = Date.now();
+    const progressNotice = new Notice(
+      "[Copilot Agent] Downloading Copilot CLI binary (~150 MB)… preparing",
+      0,
+    );
+    let lastUpdate = 0;
+    try {
+      const path = await ensureBinaryInstalled(
+        this,
+        this.pinnedBinaryVersion,
+        (bytes, total) => {
+          // Throttle setMessage to ~5 Hz so we don't churn the DOM on
+          // fast connections (chunks arrive every few ms).
+          const now = Date.now();
+          if (now - lastUpdate < 200 && bytes < (total ?? Infinity)) return;
+          lastUpdate = now;
+          const pct = total ? Math.min(100, Math.floor((bytes / total) * 100)) : null;
+          const msg =
+            pct !== null
+              ? `[Copilot Agent] Downloading Copilot CLI binary… ${pct}% (${formatBytes(bytes)}/${formatBytes(total ?? bytes)})`
+              : `[Copilot Agent] Downloading Copilot CLI binary… ${formatBytes(bytes)}`;
+          try {
+            (progressNotice as unknown as { setMessage?: (m: string) => void })
+              .setMessage?.(msg);
+          } catch {
+            // Notice.setMessage isn't typed in all Obsidian versions; ignore.
+          }
+        },
+      );
+      // Show a brief success message before dismissing so a sub-second
+      // download (enterprise fast networks) is still visible to the user.
+      try {
+        (progressNotice as unknown as { setMessage?: (m: string) => void })
+          .setMessage?.(`[Copilot Agent] Copilot CLI binary installed (v${this.pinnedBinaryVersion}).`);
+      } catch {
+        // ignore
+      }
+      const elapsedMs = Date.now() - startedAt;
+      const minDisplayMs = 2500;
+      if (elapsedMs < minDisplayMs) {
+        await new Promise((r) => setTimeout(r, minDisplayMs - elapsedMs));
+      }
+      progressNotice.hide();
+      this.binaryFetchError = null;
+      return path;
+    } catch (err) {
+      progressNotice.hide();
+      const fe =
+        err instanceof FetcherError
+          ? err
+          : new FetcherError(
+              "filesystem",
+              err instanceof Error ? err.message : String(err),
+              err,
+            );
+      this.binaryFetchError = fe;
+      console.error("[copilot-agent] CLI binary acquisition failed", fe);
+      new Notice(
+        `[Copilot Agent] Copilot CLI binary download failed (${fe.kind}). Open Settings → Copilot Agent → Retry.`,
+        12000,
+      );
+      return null;
+    }
+  }
 
   async onload(): Promise<void> {
     console.log("[copilot-agent] Loading Phase 3 plugin");
 
-    let cliPath: string;
-    let baseDirectory: string;
-    try {
-      cliPath = resolveCliBinaryPath(this);
-      baseDirectory = getAbsolutePluginDir(this) ?? process.cwd();
-    } catch (err) {
-      console.error("[copilot-agent] CLI resolution failed", err);
-      new Notice(
-        `[Copilot Agent] CLI binary not found: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-        12000,
-      );
+    // === Band A — settings tab registered first so Retry is reachable
+    // even when Band B fails. The tab is constructed with no late-bound
+    // deps; only the CliBinarySection renders pre-attach. ===
+    this.settingsTab = new CopilotAgentSettingTab(this.app, this);
+    this.register(() => this.settingsTab?.hide());
+    this.addSettingTab(this.settingsTab);
+
+    // === Band B + C — deferred behind onLayoutReady so the download
+    // Notice isn't hidden under Obsidian's plugin-loading splash screen,
+    // and so a slow fetch can't trigger the "plugin took too long to
+    // load" warning. We must NOT await onLayoutReady inside onload()
+    // itself — that deadlocks because layout-ready fires after plugins
+    // finish loading. Fire-and-forget the continuation. ===
+    this.app.workspace.onLayoutReady(() => {
+      void this.completeDeferredInit();
+    });
+  }
+
+  private async completeDeferredInit(): Promise<void> {
+    const cliPath = await this.ensureCliBinaryReady();
+    if (!cliPath) {
       return;
     }
+    const baseDirectory = getAbsolutePluginDir(this) ?? process.cwd();
+    // resolveCliBinaryPath remains as the synchronous fast-path probe
+    // for callsites that don't take a Promise; it should agree with
+    // cliPath now that ensureInstalled succeeded.
+    void resolveCliBinaryPath;
+
+    // === Band C — runtime-ready init (existing pre-v0.6 onload body) ===
 
     const tokenStore = new TokenStore({
       loadData: () => this.loadData(),
@@ -743,18 +872,16 @@ export default class CopilotAgentPlugin extends Plugin {
       }
     })();
 
-    const settingsTab = new CopilotAgentSettingTab(
-      this.app,
-      this,
-      controller,
-      tokenStore,
-      safetySettingsStore,
-      modelCatalog,
-      mcpSettingsStore,
-      mcpManager,
-    );
-    this.register(() => settingsTab.hide());
-    this.addSettingTab(settingsTab);
+    if (this.settingsTab) {
+      this.settingsTab.attachLateDeps({
+        authController: controller,
+        tokenStore,
+        safetyStore: safetySettingsStore,
+        modelCatalog,
+        mcpSettingsStore,
+        mcpManager,
+      });
+    }
 
     registerChatView(this, {
       manager: conversationManager,
@@ -841,6 +968,14 @@ export default class CopilotAgentPlugin extends Plugin {
     }
   }
 }
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+void detectPlatformTuple; // re-export anchor; consumed by tests
 
 /**
  * Format `now` as YYYY-MM-DD in the supplied IANA timezone. Used by the

@@ -1,9 +1,10 @@
 {
   "id": "obsidian-copilot-agent",
-  "name": "Copilot Agent (Spike)",
+  "name": "Copilot Agent",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Private development spike: an Obsidian desktop plugin embedding a GitHub Copilot SDK-powered AI agent.",
+  "description": "GitHub Copilot agent for Obsidian, with vault tools, MCP, and OAuth.",
   "author": "Chris Krawczyk",
+  "authorUrl": "https://github.com/ChrisKrawczyk",
   "isDesktopOnly": true
 }

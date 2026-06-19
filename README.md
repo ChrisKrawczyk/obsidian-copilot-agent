@@ -2,7 +2,7 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.5 — Adds MCP client support for stdio and Streamable HTTP servers, with settings UI, approval-gated MCP tools, transport security bounds, and bounded crash/reconnect behavior. Builds on v0.4's per-conversation model picker and recovery flows. Working end-to-end on Windows desktop. Not yet packaged for distribution.
+> **Status:** v0.6 — First release distributed via [BRAT](https://github.com/TfTHacker/obsidian42-brat). Adds an in-plugin Copilot CLI binary fetcher (no manual binary copy required) and the in-repo release tooling (version-bump, GitHub Actions release workflow, release agent under `.copilot/agents/release/`). Builds on v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
 
 ## What's new in v0.5
 
@@ -50,6 +50,15 @@ Legacy HTTP+SSE-only servers are not supported and there is no fallback path. Pr
 Security posture: MCP server `instructions` and tool descriptions are **untrusted prompt-injection surfaces**. Review the requested tool name and arguments before approving any MCP tool call.
 
 For the full technical reference, see [`.paw\work\mcp-client\Docs.md`](.paw/work/mcp-client/Docs.md).
+
+## What's new in v0.6
+
+- **First BRAT-installable release.** No more manual `npm run deploy` for end users. Install via BRAT (`README.md → Install via BRAT`); the plugin fetches its platform-specific Copilot CLI binary from `registry.npmjs.org` on first launch with sha512 verification.
+- **In-plugin binary fetcher** with a progress Notice, atomic-rename on completion, version marker for cache-hit short-circuit on subsequent launches, and a Settings → CLI binary section with **Retry** for failure recovery without a plugin reload. Supports 8 platform tuples (Windows x64/arm64, macOS x64/arm64, Linux glibc/musl x64/arm64); Windows is supported, macOS/Linux ship as alpha.
+- **In-repo release tooling.** `scripts/version-bump.mjs` mutates `package.json`, `manifest.json`, `versions.json`, and stubs a `CHANGELOG.md` section atomically. `.github/workflows/release.yml` (SHA-pinned actions, tag-triggered) builds and publishes the three release assets. The Copilot CLI release agent at `.copilot/agents/release/` orchestrates the end-to-end flow — see [`RELEASING.md`](RELEASING.md).
+- **No runtime behavior changes.** Chat, model picker, MCP, safety, Undo, tools all behave exactly as v0.5. The fetcher's `isInstalled` short-circuit means existing developers with `copilot.exe` already deployed (`npm run deploy --with-binary`) see no Notice and no download.
+
+For the technical reference, see [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md).
 
 ## What's new in v0.4
 
@@ -101,6 +110,38 @@ MCP integration, extra-vault filesystem roots, mid-session settings reload, tag 
 ## What is intentionally NOT in v0.2
 
 Workflow B (tracked as deferred candidates in `.paw/work/copilot-sdk-spike/ImplementationPlan.md`): extra-vault filesystem roots, MCP integration, model selection / cross-restart resume, secure-storage upgrade for tokens (Electron `safeStorage`), multi-conversation support, cross-restart Undo, no-tools chat-only mode, MCP credential UI, user-authored custom tools, headless integration tests, Periodic Notes plugin integration, recurring-task auto-rolling on completion.
+
+## Install via BRAT
+
+This plugin is in beta and distributed via [BRAT (Beta Reviewers Auto-update Tool)](https://github.com/TfTHacker/obsidian42-brat) — not (yet) the official Community Plugins catalog. `v0.6.0` is the first BRAT-installable release.
+
+1. In Obsidian → **Settings → Community plugins**, install and enable **BRAT** from the catalog.
+2. Open the command palette and run **BRAT: Add a beta plugin for testing**.
+3. Paste `ChrisKrawczyk/obsidian-copilot-agent` and confirm.
+4. Once BRAT finishes, go to **Settings → Community plugins** and enable **Copilot Agent**.
+
+### First launch
+
+On the first enable, the plugin fetches the platform-specific Copilot CLI binary from the npm registry (~150 MB, one time). You will see a "Downloading Copilot CLI binary…" Notice with a byte/percent progress indicator. After the download completes, click **Connect** in **Settings → Copilot Agent** to run the GitHub OAuth device-flow sign-in. Subsequent launches reuse the cached binary and do not re-download.
+
+If the download fails (offline, blocked corporate proxy, etc.) you can retry from **Settings → Copilot Agent → CLI binary → Retry** without reloading the plugin.
+
+### Supported platforms
+
+| Platform           | Architectures | Status |
+| ------------------ | ------------- | ------ |
+| Windows            | x64, arm64    | supported (manual smoke tested) |
+| macOS              | x64, arm64    | alpha — please report issues |
+| Linux (glibc)      | x64, arm64    | alpha — please report issues |
+| Linux (musl)       | x64, arm64    | alpha — please report issues |
+
+Platform detection logic is unit-tested for every tuple, but manual end-to-end smoke testing for v0.6.0 is Windows-only. Issues from other platforms are tracked in [GitHub Issues](https://github.com/ChrisKrawczyk/obsidian-copilot-agent/issues).
+
+### Known limitations
+
+- **Desktop only.** The Copilot CLI binary is a native single-executable application and cannot run inside the Obsidian mobile sandbox.
+- **Requires `registry.npmjs.org` reachable** on first launch. Corporate proxies that block the npm registry will surface an actionable error in the Settings → CLI binary section; the binary cannot be sideloaded through this UI in v0.6.0.
+- **OS may flag the downloaded binary on first run.** Windows SmartScreen, macOS Gatekeeper, or Linux equivalents may prompt because the upstream `@github/copilot` SEA is not yet code-signed by GitHub. This is upstream behavior; the binary is verified by sha512 against the npm registry's published metadata before it is moved into the plugin folder.
 
 ## Local development setup
 
@@ -162,6 +203,8 @@ Before any non-private distribution we register a dedicated OAuth App (tracked a
 
 The Copilot SDK delegates model and tool execution to the `@github/copilot` CLI runtime. Obsidian.exe ships with the `ELECTRON_RUN_AS_NODE` Electron fuse disabled for security, so we can't reuse it as the Node interpreter. Instead we ship the platform-specific single-executable application (SEA) the npm package provides.
 
+As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from `@github/copilot-sdk`'s transitive `@github/copilot` dependency. See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
+
 ## Tests
 
 ```
@@ -170,7 +213,11 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brought it to 728; v0.5 brings it to **944** across MCP persistence, settings UI, transports, registry, approval, result normalization, cancellation, and resilience coverage.
+166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brought it to 728; v0.5 brought it to 944; v0.6 brings it to **1107** with binary-fetcher platform detection, version-bump tooling, release-assets validators, bootstrap helpers, and CLI script harnesses.
+
+## Releasing
+
+Cutting a release is documented in [`RELEASING.md`](RELEASING.md). Quick start: ask the Copilot CLI release agent (at [`.copilot/agents/release/`](.copilot/agents/release/)) "release v\<version\>" — the agent walks preflight → version-bump → CHANGELOG draft → tag-and-push → CI monitor → verify. Manual CLI fallback documented alongside.
 
 ## Reference
 

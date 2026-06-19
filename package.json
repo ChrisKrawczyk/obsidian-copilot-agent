@@ -11,7 +11,19 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "deploy": "npm run build && node scripts/deploy.mjs",
-    "deploy:no-build": "node scripts/deploy.mjs"
+    "deploy:no-build": "node scripts/deploy.mjs",
+    "version-bump": "tsx scripts/version-bump.mjs",
+    "version-bump:check": "tsx scripts/version-bump.mjs --check",
+    "release:prepare": "tsx scripts/version-bump.mjs",
+    "release:status": "tsx scripts/release/status.mjs",
+    "release:assemble": "tsx scripts/release/assemble-assets.mjs",
+    "release:assemble:dry": "tsx scripts/release/assemble-assets.mjs --dry-run",
+    "release:bootstrap-v0.5.0": "tsx scripts/release/bootstrap-v0.5.0.mjs",
+    "changelog:extract": "tsx scripts/release/extract-release-notes.mjs",
+    "postinstall": "node scripts/generate-pinned-binary-version.mjs",
+    "pretest": "node scripts/generate-pinned-binary-version.mjs",
+    "pretypecheck": "node scripts/generate-pinned-binary-version.mjs",
+    "prebuild": "node scripts/generate-pinned-binary-version.mjs"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -24,6 +36,7 @@
     "@types/node": "^20.11.0",
     "esbuild": "^0.21.0",
     "obsidian": "^1.5.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.4.0",
     "vitest": "^1.6.1"
   },

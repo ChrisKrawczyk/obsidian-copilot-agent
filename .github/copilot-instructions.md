@@ -61,6 +61,28 @@ mandatory transitions in the PAW agent instructions — particularly:
   yielding to the user.
 - Active workflow context lives in `.paw/work/<work-id>/WorkflowContext.md`.
 
+## Releasing
+
+This repo has in-repo release tooling. Do NOT manually edit `package.json`/
+`manifest.json`/`versions.json` versions when cutting a release. Instead:
+
+- The Copilot CLI release agent at `.copilot/agents/release/` orchestrates
+  the end-to-end flow (preflight, version-bump, CHANGELOG, tag, push,
+  CI monitor, verify). Trigger with "release v\<version\>" in a Copilot
+  CLI session. Re-entrant.
+- Or fall back to `npm run release:prepare <version>` (mutates the four
+  files atomically) followed by manual commit + annotated tag + push.
+- `.github/workflows/release.yml` is tag-triggered and publishes the
+  GitHub Release with `main.js`, `manifest.json`, `styles.css`.
+- See `RELEASING.md` for the full runbook (recovery procedures, trust
+  chain, smoke-test procedure, dry-run mode).
+
+`npm run deploy` is the **dev-time** path and is unchanged by v0.6 — it
+still copies the locally-built artifacts into the vault plugin folder
+resolved from `.deploy-target` or `OBSIDIAN_PLUGIN_DIR`. End users
+install via BRAT (also documented in `README.md`); they do not use
+`npm run deploy`.
+
 ## Project conventions
 
 - TypeScript strict mode. `tsc --noEmit` must stay clean.
