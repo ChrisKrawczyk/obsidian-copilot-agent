@@ -39,7 +39,7 @@
  * Exit codes: 0 = success, 1 = preflight or step failure, 2 = bad args.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -49,6 +49,10 @@ import {
   buildBootstrapReleaseBody,
   resolveHistoricalSha,
 } from "../../src/release/bootstrapRelease.ts";
+import {
+  isWellFormedSourceManifest,
+  validateReleaseAssets,
+} from "../../src/release/releaseAssets.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -160,13 +164,55 @@ function main() {
   run(process.platform === "win32" ? "npm.cmd" : "npm", ["ci"], { dryRun, cwd: worktree });
   run(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], { dryRun, cwd: worktree });
 
-  // 4. Assemble assets in bootstrap mode (synthesizes manifest with version 0.5.0).
+  // 4. Assemble assets inline (read built files from worktree; synthesize
+  //    manifest with version 0.5.0; write into <worktree>/release-assets/;
+  //    validate via the shared validator). We do this inline rather than
+  //    chaining to scripts/release/assemble-assets.mjs because that script
+  //    resolves repoRoot from its own __dirname, so invoking it from the
+  //    worktree's cwd would still write to the source repo and pull in
+  //    the source repo's (wrong, tip-of-branch) main.js.
   console.log("[bootstrap-v0.5.0] assembling release-assets in worktree");
-  run(
-    process.platform === "win32" ? "npx.cmd" : "npx",
-    ["tsx", join(repoRoot, "scripts", "release", "assemble-assets.mjs"), TARGET_VERSION, "--bootstrap"],
-    { dryRun, cwd: worktree },
-  );
+  const stagedDir = join(worktree, "release-assets");
+  if (dryRun) {
+    console.log(`  [dry-run] mkdir ${stagedDir}; copy main.js, manifest.json (synthesized v${TARGET_VERSION}), styles.css`);
+  } else {
+    const worktreeManifestPath = join(worktree, "manifest.json");
+    const worktreeManifest = JSON.parse(readFileSync(worktreeManifestPath, "utf8"));
+    if (!isWellFormedSourceManifest(worktreeManifest)) {
+      console.error(
+        `[bootstrap-v0.5.0] worktree manifest.json is not well-formed (found version: ${JSON.stringify(
+          worktreeManifest?.version ?? null,
+        )})`,
+      );
+      process.exit(1);
+    }
+    const synthesizedManifest = { ...worktreeManifest, version: TARGET_VERSION };
+
+    rmSync(stagedDir, { recursive: true, force: true });
+    mkdirSync(stagedDir, { recursive: true });
+    copyFileSync(join(worktree, "main.js"), join(stagedDir, "main.js"));
+    copyFileSync(join(worktree, "styles.css"), join(stagedDir, "styles.css"));
+    writeFileSync(
+      join(stagedDir, "manifest.json"),
+      JSON.stringify(synthesizedManifest, null, 2) + "\n",
+      "utf8",
+    );
+
+    const versionsMap = JSON.parse(readFileSync(join(repoRoot, "versions.json"), "utf8"));
+    const result = validateReleaseAssets({
+      presentFiles: readdirSync(stagedDir),
+      manifest: synthesizedManifest,
+      versionsMap,
+      targetVersion: TARGET_VERSION,
+      bootstrap: true,
+    });
+    if (!result.ok) {
+      console.error("[bootstrap-v0.5.0] release-assets validation failed:");
+      for (const e of result.errors) console.error(`  - ${e}`);
+      process.exit(1);
+    }
+    console.log(`  staged: ${readdirSync(stagedDir).sort().join(", ")}`);
+  }
 
   // 5. Tag the historical commit (annotated) using the release notes file.
   console.log("[bootstrap-v0.5.0] tagging historical commit");
@@ -178,7 +224,6 @@ function main() {
 
   // 7. Create the GitHub Release pointing at the historical sha.
   console.log("[bootstrap-v0.5.0] creating GitHub Release");
-  const stagedDir = join(worktree, "release-assets");
   const assetPaths = buildAssetPaths(stagedDir);
   run(
     "gh",
