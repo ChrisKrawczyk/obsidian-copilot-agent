@@ -167,7 +167,7 @@ The following items are explicitly **out of scope** for this work (synthesized f
 
 ## Phase Status
 
-- [ ] Phase 1: Version-bump tooling, CHANGELOG/versions.json plumbing, and manifest hygiene
+- [x] Phase 1: Version-bump tooling, CHANGELOG/versions.json plumbing, and manifest hygiene
 - [ ] Phase 2: First-launch in-plugin binary fetcher + Settings UI integration
 - [ ] Phase 3: GitHub Actions release workflow
 - [ ] Phase 4: Copilot CLI release agent and skills
@@ -274,6 +274,7 @@ Pure step-derivation logic lives in `src/release/releaseStatus.ts` (no `gh`/`git
 Add scripts:
 
 - `"version-bump": "tsx scripts/version-bump.mjs"` — direct invocation for the agent / manual fallback.
+- `"version-bump:check": "tsx scripts/version-bump.mjs --check"` — dedicated check-only entry point. (Added in Phase 1 implementation: `npm run X -- --check ...` is unreliable on Windows PowerShell because the `--check` token gets absorbed by `npm` before reaching the script; the `:check` script avoids the issue by embedding the flag in the script definition.)
 - `"release:prepare": "tsx scripts/version-bump.mjs"` — alias matching FR-004's "manual command-line entry point" (named `release:prepare` to disambiguate from the workflow tag-and-push step).
 - `"release:status": "tsx scripts/release/status.mjs"` — agent / manual status probe.
 
@@ -292,11 +293,11 @@ Add scripts:
 
 - `npm test` reports baseline + new tests passing; no existing test regresses.
 - `npm run typecheck` passes (no type errors introduced).
-- `npm run release:prepare 0.6.0` on a clean tree mutates the four files coherently; re-running it is detected and short-circuits with a clear message.
-- `npm run release:prepare 0.0.1` exits non-zero with a "not strictly greater" error.
-- `npm run release:prepare not-a-version` exits non-zero with a parse error.
-- `npm run version-bump -- --check 0.6.0` exits 0; `--check 0.0.1` exits non-zero.
-- `npm run release:status -- --version 0.6.0 --json` returns `{ "step": "not-started" }` on a clean tree without prior release artifacts.
+- `npm run release:prepare -- 0.6.0` on a clean tree mutates the four files coherently; re-running it is detected and short-circuits with a clear idempotent no-op message (exit 0).
+- `npm run release:prepare -- 0.0.1` exits non-zero (exit 2) with a "less than the current version" error.
+- `npm run release:prepare -- not-a-version` exits non-zero (exit 2) with a parse error.
+- `npm run version-bump:check -- 0.6.0` exits 0; `npm run version-bump:check -- 0.0.1` exits non-zero (exit 2). (Phase 4's preflight skill invokes this `:check` script to avoid the Windows-PowerShell `--check` swallow issue documented in the scripts section above.)
+- `npx tsx scripts/release/status.mjs --version 0.6.0 --json` returns `{"step":"not-started","next_action":"run-release-prepare","blockers":[]}` on a clean tree without prior release artifacts.
 
 **Manual:**
 
