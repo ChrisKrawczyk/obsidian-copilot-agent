@@ -168,7 +168,7 @@ The following items are explicitly **out of scope** for this work (synthesized f
 ## Phase Status
 
 - [x] Phase 1: Version-bump tooling, CHANGELOG/versions.json plumbing, and manifest hygiene
-- [ ] Phase 2: First-launch in-plugin binary fetcher + Settings UI integration
+- [x] Phase 2: First-launch in-plugin binary fetcher + Settings UI integration
 - [ ] Phase 3: GitHub Actions release workflow
 - [ ] Phase 4: Copilot CLI release agent and skills
 - [ ] Phase 5: BRAT bootstrap — retroactive v0.5.0 release, README install docs, smoke test, cut v0.6.0

@@ -1,6 +1,8 @@
 import type { Plugin } from "obsidian";
 import { FileSystemAdapter } from "obsidian";
-import { nodeRequire } from "./nodeRequire";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 
 /**
  * Locate the platform-specific Copilot CLI single-executable binary.
@@ -15,11 +17,6 @@ import { nodeRequire } from "./nodeRequire";
  * copies the binary in once; documented in README.
  */
 export function resolveCliBinaryPath(plugin: Plugin): string {
-  const req = nodeRequire();
-  const path = req("node:path") as typeof import("node:path");
-  const fs = req("node:fs") as typeof import("node:fs");
-  const os = req("node:os") as typeof import("node:os");
-
   const platform = os.platform();
   const binaryName = platform === "win32" ? "copilot.exe" : "copilot";
 
@@ -53,9 +50,6 @@ export function getAbsolutePluginDir(plugin: Plugin): string | null {
   const vaultRoot = adapter.getBasePath();
   const rel = plugin.manifest.dir;
   if (!rel) return null;
-
-  const req = nodeRequire();
-  const path = req("node:path") as typeof import("node:path");
   return path.join(vaultRoot, rel);
 }
 

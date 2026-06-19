@@ -15,7 +15,11 @@
     "version-bump": "tsx scripts/version-bump.mjs",
     "version-bump:check": "tsx scripts/version-bump.mjs --check",
     "release:prepare": "tsx scripts/version-bump.mjs",
-    "release:status": "tsx scripts/release/status.mjs"
+    "release:status": "tsx scripts/release/status.mjs",
+    "postinstall": "node scripts/generate-pinned-binary-version.mjs",
+    "pretest": "node scripts/generate-pinned-binary-version.mjs",
+    "pretypecheck": "node scripts/generate-pinned-binary-version.mjs",
+    "prebuild": "node scripts/generate-pinned-binary-version.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

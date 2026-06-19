@@ -86,6 +86,8 @@ export class Notice {
     readonly message?: string,
     readonly timeout?: number,
   ) {}
+  hide(): void {}
+  setMessage(_m: string): void {}
 }
 
 export class Modal {
@@ -105,6 +107,12 @@ export class Menu {
 }
 
 export class MarkdownView {}
+
+export class FileSystemAdapter {
+  getBasePath(): string {
+    return "";
+  }
+}
 
 export type App = unknown;
 
