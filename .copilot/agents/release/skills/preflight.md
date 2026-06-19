@@ -15,7 +15,7 @@ Always run this skill first when the agent starts a release for `<version>`. Re-
 
 1. **Clean working tree.** Run `git status --porcelain`. If output is non-empty, halt and ask the maintainer to commit or stash. _(Skipped in `--dry-run`.)_
 2. **On `main`.** Run `git rev-parse --abbrev-ref HEAD`. If the result is not `main`, halt and ask the maintainer to switch branches. _(Skipped in `--dry-run`.)_
-3. **Up to date with `origin/main`.** Run `git fetch origin main --quiet`, then `git rev-list --count main..origin/main`. If the count is non-zero, halt and ask the maintainer to pull.
+3. **Up to date with `origin/main`.** Run `git fetch origin main --quiet`, then check that local `main` and `origin/main` are at the same commit. Compute both `git rev-list --count main..origin/main` (must be 0 — local is not behind) AND `git rev-list --count origin/main..main` (must be 0 — local is not ahead with unpushed commits). If either count is non-zero, halt and ask the maintainer to pull (behind) or push/reset (ahead). Local-ahead is a hard block: `tag-and-push` would otherwise quietly publish unreviewed commits along with the release.
 4. **TypeScript types are clean.** Run `npm run typecheck`. If non-zero, halt and print stderr.
 5. **Tests pass.** Run `npm test`. If non-zero, halt and print stderr.
 6. **Version is monotonically newer.** Run `npm run version-bump -- --check <version>`. Exit 0 means the version is greater than the current `package.json` `version` (or equals it — interpreted as "already bumped" and treated as OK by the bump skill). Non-zero means the version would be a downgrade or is otherwise invalid; halt and show the script's error message.

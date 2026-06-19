@@ -17,7 +17,7 @@ After `ci-monitor` reports the release workflow succeeded.
 2. **Assert not draft.** If `isDraft` is true, halt with: "verify failed: release v<version> is a draft. Publish manually or re-run the workflow with `gh run rerun <run-id>` after investigating."
 3. **Assert prerelease flag is correct.** If `<version>` contains a `-` (e.g. `0.6.0-rc.1`), assert `isPrerelease` is true. Otherwise assert `isPrerelease` is false. On mismatch, halt with the observed-vs-expected values; the maintainer can fix via the GitHub web UI ("Edit release" → toggle prerelease).
 4. **Assert exactly three assets, named correctly.** Read `assets[].name`. The set must equal exactly `{"main.js", "manifest.json", "styles.css"}`. Extra or missing assets are a hard failure; halt with the observed names. (This is the same exactly-three-files invariant enforced by the Phase 3 `release:assemble` script — the verify skill repeats it here against the published release as a backstop in case GitHub or the upload action behaved unexpectedly.)
-5. **Assert body matches CHANGELOG.** Run `npm run changelog:extract -- <version>` to get the expected body. Compare with `assets.body` byte-for-byte after normalizing line endings to `\n`. On mismatch, surface a unified diff and halt; the maintainer can edit the release body via the GitHub web UI.
+5. **Assert body matches CHANGELOG.** Run `npm run changelog:extract -- <version>` to get the expected body. Compare with the release's top-level `body` field (from the `gh release view` JSON) byte-for-byte after normalizing line endings to `\n`. On mismatch, surface a unified diff and halt; the maintainer can edit the release body via the GitHub web UI.
 6. **Report success.** Print:
 
    ```
