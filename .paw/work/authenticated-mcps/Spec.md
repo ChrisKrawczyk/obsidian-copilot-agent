@@ -7,9 +7,9 @@
 
 The plugin already speaks MCP over both stdio (local tools like Foam and OneDrive) and HTTP (remote tools). The HTTP path today has no credential story — every request goes out anonymously, which makes the entire class of enterprise MCP servers (Microsoft 365 Graph, GitHub Apps, internal company APIs) unreachable. The most valuable of those for an Obsidian-on-Microsoft user is the **Microsoft 365 Graph MCP server**, which exposes the user's mail, calendar, files, and tenant directory to the agent.
 
-The blocker until now has not been the protocol — our HTTP MCP transport already negotiates the right protocol version against the live Microsoft endpoint — but the **credentials**. A static bearer token works for about an hour and then forces the user to copy a fresh token out of a terminal. That cadence destroys the experience for anything beyond a demo.
+The blocker until now has not been the protocol — the plugin's HTTP MCP transport already negotiates the right protocol version against the live Microsoft endpoint — but the **credentials**. A static bearer token works for about an hour and then forces the user to copy a fresh token out of a terminal. That cadence destroys the experience for anything beyond a demo.
 
-This feature introduces a generalized **credential model** for MCP servers and a built-in preset that wires it up to Microsoft 365 Graph. The two credential variants that ship: a **static bearer** (for the simplest "I have a token, just use it" case) and a **command-based credential** that the plugin re-executes whenever the cached token is near expiry. The latter lets the user lean on whatever auth they already have on their machine — `az account get-access-token` for Microsoft, `gh auth token` for GitHub, a custom helper script for anything else — without any in-plugin OAuth flow. The credential model is shaped as a discriminated union so a future in-plugin OAuth 2.1 + PKCE variant slots in without rewriting callers.
+This feature introduces a generalized **credential model** for MCP servers and a built-in preset that wires it up to Microsoft 365 Graph. The two credential variants that ship: a **static bearer** (for the simplest "I have a token, just use it" case) and a **command-based credential** that the plugin re-executes whenever the cached token is near expiry. The latter lets the user lean on whatever token-producing helper they already have on their machine — the Azure CLI's `account get-access-token` command for Microsoft, or any wrapper script the user controls that prints a JSON object containing the bearer token and (optionally) its expiry timestamp. Tools whose native output is a bare token rather than JSON (such as some GitHub CLI sub-commands) are supported by having the user wrap them in a one-line shell helper that emits the expected JSON shape; the plugin itself never accepts a raw-token-on-stdout contract. No in-plugin OAuth flow is involved. The credential model is shaped as a discriminated union so a future in-plugin OAuth 2.1 + PKCE variant slots in without rewriting callers.
 
 The user-visible win: open Settings → MCP servers → Add → pick **Microsoft 365 Graph (via Azure CLI)** → done. The plugin transparently refreshes the token in the background. The user never sees an expiry banner, never pastes a JWT.
 
@@ -35,9 +35,9 @@ Acceptance Scenarios:
 2. Given a connected M365 server and an existing chat, When the user asks a question that requires a Graph tool call, Then the agent issues the call, the call returns successfully, and the response references real data from the user's tenant.
 3. Given an active M365 server whose token expires during a long chat session, When the next tool call goes out, Then the plugin transparently refreshes the token and the tool call succeeds with no user-visible interruption.
 
-### User Story P2 – Connect any token-producing CLI
+### User Story P2 – Connect any token-producing helper
 
-Narrative: A user wants to point the plugin at a non-Microsoft authenticated MCP server (an internal company server, a GitHub MCP, or a self-hosted experiment). They configure the server's URL, choose "Command-based" credentials, paste in the shell command that prints their auth token (and optionally the JSON paths to the token field and the expiry field), and save. The plugin runs the command, parses its output, and uses the resulting bearer token until expiry — at which point it re-runs the command. The same plumbing that powers the M365 preset powers their custom server.
+Narrative: A user wants to point the plugin at a non-Microsoft authenticated MCP server (an internal company server, a self-hosted experiment, or any HTTP MCP server behind a bearer token). They configure the server's URL, choose "Command-based" credentials, paste in the shell command that prints a JSON object containing their auth token (and optionally the JSON paths to the token field and the expiry field), and save. If their preferred CLI prints a bare token instead of JSON (e.g., some GitHub CLI sub-commands), they wrap it in a one-line shell helper that emits the expected JSON shape. The plugin runs the configured command, parses its output, and uses the resulting bearer token until expiry — at which point it re-runs the command. The same plumbing that powers the M365 preset powers their custom server.
 
 Independent Test: Configuring a non-preset HTTP MCP server with a custom credential command results in a connected server whose tools are callable from chat, with at least one observed token refresh logged at debug level.
 
@@ -95,12 +95,23 @@ Acceptance Scenarios:
 - FR-009: The MCP servers settings UI SHALL display per-server credential state including last-resolution outcome, time-to-refresh, and inline error messages with remediation hints when the credential command fails or the server rejects the token. (Stories: P1, P2, P3, P4)
 - FR-010: Credential command output, raw token values, and any JSON containing them SHALL NOT be written to logs, telemetry, or notifications at any log level. (Cross-cutting; all stories)
 - FR-011: The credential refresh model SHALL NOT cause the existing per-server trust-epoch grants to be revoked. A credential rotation is not a server identity change. (Stories: P1, P2, P3)
-- FR-012: The credential configuration schema SHALL reserve an OAuth 2.1 + PKCE shape (variant tag plus the fields a future implementation would need) such that data written today by the settings UI is round-trippable in a future plugin version that implements that variant. (Cross-cutting)
+- FR-012: The credential configuration schema SHALL reserve an `oauth-pkce` discriminated-union variant whose persisted shape includes (at minimum) the following fields, with the listed types and semantics, such that data written today by the settings UI for this variant — should it ever be present in stored configuration — round-trips losslessly through a save / reload / save cycle of any future plugin version that implements OAuth 2.1 + PKCE:
+  - `kind`: string literal `"oauth-pkce"` (variant discriminator)
+  - `authorizationEndpoint`: string URL
+  - `tokenEndpoint`: string URL
+  - `clientId`: string
+  - `tenantId`: optional string (null/absent when not applicable)
+  - `scopes`: array of strings
+  - `redirectUri`: optional string URL
+  - `refreshTokenRef`: optional opaque string handle (the plugin's keychain/secret-store reference; never the token itself)
+  - `pkceMethod`: optional string, one of `"S256"` or `"plain"` (default `"S256"` when absent)
+
+  This release does not write or read values for this variant at runtime; it MUST, however, preserve any such fields it encounters on load and emit them unchanged on save. (Cross-cutting)
 - FR-013: The settings UI SHALL provide a "Test connection" action per HTTP MCP server that performs an MCP `initialize` request and reports success or failure inline, without disturbing the live chat session. (Stories: P1, P2, P3)
-- FR-014: When the credential command fails or times out, the plugin SHALL surface a chat-side error on the next tool invocation that includes a copyable remediation hint specific to the configured variant (e.g., for `az`, the hint includes the `az login` command and the tenant id if known from the prior token). (Story: P4)
+- FR-014: When the credential command fails or times out, the plugin SHALL surface a chat-side error on the next tool invocation that includes a copyable remediation hint specific to the configured variant. For the M365 preset specifically, the hint SHALL be the `az login` command — including `--tenant <id>` when a tenant id is available from a prior successful token resolution for that server, and `az login` alone (without `--tenant`) when no prior tenant id is known (first-run failures, fresh installs, or after a user changes the command). (Story: P4)
 - FR-015: The credential resolver SHALL enforce a maximum command execution time (default 15 seconds, not user-configurable in this release). (Cross-cutting)
 - FR-016: Existing stdio MCP servers (Foam, OneDrive) and unauthenticated HTTP MCP servers SHALL continue to work with no configuration changes. (Cross-cutting)
-- FR-017: The credential layer SHALL operate within the existing `httpPolicy` guardrails (redirect handling, private-IP blocking, allowlist). It SHALL NOT introduce a new path that bypasses these checks. (Cross-cutting)
+- FR-017: The credential layer SHALL operate within the plugin's existing HTTP request guardrails (redirect handling, private-IP blocking, allowlist). It SHALL NOT introduce a new outbound HTTP path that bypasses these checks. (Cross-cutting)
 
 ### Key Entities
 
@@ -120,11 +131,11 @@ Acceptance Scenarios:
 - SC-002: A connected M365 server completes at least one Graph tool call returning tenant-grounded data within 5 seconds of the user's prompt in a real chat turn. (FR-006, FR-008)
 - SC-003: A token whose configured expiry crosses while a chat session is active triggers an automatic re-resolution and the subsequent tool call succeeds with no chat-visible interruption. (FR-005, FR-006)
 - SC-004: When the credential command fails for any reason, the user sees both a settings row error AND a chat-side error on the next tool invocation, each containing a copyable remediation hint. (FR-009, FR-014)
-- SC-005: A custom HTTP MCP server configured with a non-`az` command (e.g., `gh auth token` printing a different JSON shape) can be connected by adjusting the JSON path fields without code changes. (FR-003, FR-004)
+- SC-005: A custom HTTP MCP server configured with a non-`az` command (for example, a one-line shell helper that wraps a token-producing CLI and emits `{ "accessToken": "...", "expiresOn": "..." }` on stdout) can be connected by adjusting only the configured command and optional JSON path fields — no plugin code changes. (FR-003, FR-004)
 - SC-006: No automated test, log file, or notification produced during normal operation, error states, or test runs contains a real access token value or its substring. (FR-010)
 - SC-007: All existing 970+ tests continue to pass; the existing stdio MCP servers (Foam, OneDrive) and any pre-existing unauthenticated HTTP server configurations continue to work with zero configuration changes. (FR-016)
-- SC-008: A user who saved a credential configuration in this release can open the same vault in a future plugin version that implements the OAuth 2.1 + PKCE variant and have their existing credential entries read cleanly (no migration error, no data loss). (FR-012)
-- SC-009: The plugin's `httpPolicy` guardrails (redirect rules, private-IP block, allowlist) apply to every credential-bearing request just as they do to today's unauthenticated requests. (FR-017)
+- SC-008: A user who saved a credential configuration in this release — including, hypothetically, a configuration written manually with the reserved `oauth-pkce` variant fields enumerated in FR-012 — can open the same vault in a future plugin version that implements that variant and have their stored configuration read cleanly (no migration error, no data loss, no field re-encoding). Tests in this release SHALL cover round-tripping the reserved `oauth-pkce` shape through the persistence layer's save → load → save path and asserting byte-equivalence of every enumerated field. (FR-012)
+- SC-009: The plugin's HTTP request guardrails (redirect rules, private-IP block, allowlist) apply to every credential-bearing request just as they do to today's unauthenticated requests. (FR-017)
 
 ## Assumptions
 
@@ -132,7 +143,7 @@ Acceptance Scenarios:
 - The user's tenant admin has granted Azure CLI the `MCP.*` delegated scopes (or otherwise enabled the M365 MCP server for `az`-issued tokens). Tenants where this hasn't happened will see a 403 from the server; the doc covers the admin-side `Grant-EntraBetaMCPServerPermission` step.
 - Credential refresh does not need to share tokens across multiple MCP servers in this release. Each server resolves independently. (Rationale: shared-cache complexity isn't justified until a real use case demands it; today's M365 user has one server entry.)
 - Refresh buffer defaults to 300 seconds. Per-server override allowed via configuration; no global default override in this release.
-- The command-execution path uses direct process spawn, not a shell. The user types `az account get-access-token --scope ...`; the plugin tokenizes this into argv and spawns directly. (Rationale: avoids shell-injection class of bugs; matches how `StdioTransport` already resolves CLI commands on Windows.)
+- The command-execution path uses direct process spawn, not a shell. The user types `az account get-access-token --scope ...`; the plugin tokenizes this into argv and spawns directly. (Rationale: avoids shell-injection class of bugs; matches how the plugin's existing stdio MCP transport already resolves CLI commands on Windows.)
 - For the "Test connection" action, an MCP `initialize` round-trip is sufficient evidence of working credentials. The action does not need to also call `tools/list` or invoke a real tool.
 - The user, not the plugin, is responsible for granting tenant-admin consent. The plugin's role is to surface clear errors when consent is missing and point the user at the relevant remediation docs.
 
@@ -160,11 +171,11 @@ Out of Scope:
 
 ## Dependencies
 
-- Existing HTTP MCP transport (`src/mcp/transport/HttpTransport.ts` or equivalent).
-- Existing `httpPolicy.ts` HTTP guardrails.
-- Existing MCP settings UI (`src/settings/McpServersSection.ts`).
-- Existing plugin settings persistence layer (and its encryption helper if one is in use).
-- Existing process-spawn primitive used by `StdioTransport` (notably the Windows `findOnPath` path resolution behavior).
+- The plugin's existing HTTP MCP transport (must be the integration point; no parallel transport is introduced).
+- The plugin's existing HTTP request guardrails (redirect, private-IP, allowlist).
+- The plugin's existing MCP servers settings panel and its add-server flow.
+- The plugin's existing settings persistence layer (and its encryption helper, if one is in use, for storing static-bearer token values).
+- The plugin's existing process-spawn primitive used by the stdio MCP transport, including its Windows command path-resolution behavior.
 - User-side: Azure CLI installed and signed in (for the M365 preset only).
 - Tenant-side: `MCP.*` scope grant on Azure CLI's app id in the user's Entra tenant.
 
@@ -173,7 +184,7 @@ Out of Scope:
 - **Risk**: A misconfigured credential command leaks secrets into a log file via stderr or stdout. **Mitigation**: FR-010 prohibits any log path that captures command output verbatim. Diagnostic messages are templated and reference field *names* (e.g., "token field not found at path X") not field *values*. Tests assert log output never contains the test token literal.
 - **Risk**: A long-running credential command stalls the plugin's main thread or blocks an in-flight chat turn. **Mitigation**: FR-015 caps execution at 15s; the resolver runs off the UI thread; chat-side errors surface promptly on timeout rather than spinning forever.
 - **Risk**: Token refresh thrashing — a malformed `expiresOn` value causes the plugin to re-run the command on every request. **Mitigation**: Edge-case handling enforces a minimum 5s between consecutive resolutions for the same server; an unparseable expiry is treated as "treat once as opaque and rate-limit retries".
-- **Risk**: The discriminated-union schema chosen today blocks an elegant future OAuth variant. **Mitigation**: FR-012 requires the OAuth shape to be reserved and round-trippable in the persisted schema today; the data shape is reviewed during planning before implementation lands.
+- **Risk**: The discriminated-union schema chosen today blocks an elegant future OAuth variant. **Mitigation**: FR-012 enumerates the exact reserved `oauth-pkce` field set (kind, endpoints, clientId, tenantId, scopes, redirectUri, refreshTokenRef, pkceMethod). SC-008 makes round-tripping these fields through save → load → save a test obligation in this release. Any later OAuth implementation can therefore land as a behavior change on a fixed data shape, not a schema migration.
 - **Risk**: 401-retry loops against a server that always returns 401 saturate the chat with errors. **Mitigation**: FR-007 caps the retry at exactly one re-resolve attempt per failed request; subsequent failures within a short window for the same server surface a single rolled-up error, not one per tool call.
 - **Risk**: Microsoft changes the M365 MCP server endpoint, app id, or scope semantics, breaking the preset. **Mitigation**: The preset is a default users can edit. Settings UI shows the resolved fields; users can pivot to a custom command-based config without a plugin update.
 - **Risk**: A user's tenant has different `MCP.*` scope availability and the preset silently issues a token that gets 403'd. **Mitigation**: FR-014 + the 403 edge case ensure the user sees a clear "scopes not consented" message with a docs link, distinguishing it from generic auth failure.
