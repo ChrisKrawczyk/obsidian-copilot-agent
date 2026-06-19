@@ -3,6 +3,18 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0] - 2026-06-19
+
+Graduation of `v0.6.0-rc.1` to stable. No user-visible code changes since the RC — the RC was validated end-to-end via BRAT install in a clean Obsidian vault (binary download, OAuth sign-in, read tools, approval-gated writes, cache reuse on reload).
+
+Post-RC commits:
+
+- `fix(mcp/stdio)`: `findOnPath` now uses `path.win32` explicitly so the Linux release workflow's cross-platform tests pass. Production behavior on real Windows hosts is unchanged.
+- `docs(release-agent)`: captured publish gotchas from the v0.5.0 retroactive publish and the rc.1 first run into the release agent skills (full-SHA requirement, `gh auth switch` flip, Windows shell quoting, `assemble-assets.mjs` cwd binding, pre-release detection, BRAT public-repo requirement).
+
+See the [v0.6.0-rc.1](#060-rc1---2026-06-19) entry below for the full list of v0.6 changes.
+
+
 ## [0.6.0-rc.1] - 2026-06-19
 
 First BRAT-installable release. The plugin can now be installed end-to-end from a GitHub Release tag without cloning the repo or copying the ~150 MB `copilot.exe` binary by hand. End-to-end release tooling is now in-repo and exercised by the same agent used to cut this release.
