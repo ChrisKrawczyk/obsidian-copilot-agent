@@ -1,0 +1,79 @@
+# Release workflow for obsidian-copilot-agent.
+#
+# Triggered by pushing a tag matching `v*` (e.g. `v0.6.0`, `v0.6.0-rc.1`).
+# Per Phase 3 spec lines 449-463 of the v0.6 packaging/release plan.
+#
+# Third-party actions are pinned to the SHA equivalent to the tagged
+# release we reviewed at authoring time; the trailing `# v<tag>` comment
+# documents the human-readable version for future maintenance.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve tag version
+        id: tagver
+        run: |
+          tag="${GITHUB_REF##*/}"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *"-"* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Assemble release assets
+        run: npm run release:assemble -- ${{ steps.tagver.outputs.version }}
+
+      - name: Extract release notes
+        run: npm run changelog:extract -- ${{ steps.tagver.outputs.version }} release-notes.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ steps.tagver.outputs.tag }}
+          name: v${{ steps.tagver.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ steps.tagver.outputs.prerelease }}
+          files: |
+            release-assets/main.js
+            release-assets/manifest.json
+            release-assets/styles.css

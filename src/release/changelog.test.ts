@@ -68,6 +68,13 @@ describe("extractSection", () => {
     expect(body).toContain("\r\n");
     expect(body).toContain("- Baz");
   });
+
+  it("preserves trailing whitespace lines inside the section", () => {
+    const input =
+      "## [0.5.0] - 2026-06-15\n\n### Added\n\n- Foo\n   \n\n## [0.4.0] - 2026-06-12\n\n### Added\n\n- Baz\n";
+    const body = extractSection(input, "0.5.0");
+    expect(body).toBe("## [0.5.0] - 2026-06-15\n\n### Added\n\n- Foo\n   \n");
+  });
 });
 
 describe("insertStubSection", () => {

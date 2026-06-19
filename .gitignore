@@ -6,6 +6,7 @@ main.js
 *.js.map
 dist/
 build/
+release-assets/
 
 # Environment / secrets
 .env
