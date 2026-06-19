@@ -133,7 +133,7 @@ Cross-platform binary acquisition and the release agent are scope expansions vs 
 ### Key Entities
 
 - **Plugin release version**: a semver-like string (e.g. `0.6.0`) that appears in `package.json`, `manifest.json`, the git tag (`v0.6.0`), the `CHANGELOG.md` heading, and the GitHub Release. All four must match for a release to be valid.
-- **Pinned binary version**: the version of `@github/copilot` (currently `1.0.59`) that the plugin's bundled `@github/copilot-sdk` was built against. This is the version the first-launch fetcher acquires.
+- **Pinned binary version**: the version of `@github/copilot` installed in `node_modules` at build time (which is what `@github/copilot-sdk` resolved to transitively — currently `1.0.59`). This is the version the first-launch fetcher acquires.
 - **Platform tuple**: `<os>-<arch>` where `os ∈ {win32, darwin, linux, linuxmusl}` and `arch ∈ {x64, arm64}`. Identifies which `@github/copilot-<plat>-<arch>` package to fetch.
 - **Release agent**: a Copilot CLI agent definition that orchestrates the release flow. The agent and its skills are discoverable from the release documentation and reside at a conventional location within the repo.
 - **Release skill**: a markdown skill file (one per discrete capability) consumed by the release agent.
@@ -149,7 +149,7 @@ Cross-platform binary acquisition and the release agent are scope expansions vs 
 
 - SC-001: After this work merges, the maintainer can ship v0.6.0 by invoking the release agent and answering its prompts; no manual editing of `package.json`, `manifest.json`, `versions.json`, or `CHANGELOG.md` is required during the release. (FR-001, FR-005, FR-006, FR-008)
 - SC-002: A clean Obsidian vault on Windows, with no Node toolchain installed, can install the plugin via BRAT from the published v0.6.0 release and reach a successful chat exchange without any terminal commands. (FR-011, FR-012, FR-016, FR-019, FR-020, FR-022)
-- SC-003: Platform detection logic for `darwin-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`, `linuxmusl-x64`, and `linuxmusl-arm64` is covered by unit tests. Manual end-to-end smoke testing on macOS and Linux is **deferred** to a follow-up release; v0.6.0 ships those platforms as "alpha — please report issues" per R7. (FR-019, FR-020, FR-021)
+- SC-003: Platform detection logic for all eight tuples named in FR-021 (`win32-x64`, `win32-arm64`, `darwin-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`, `linuxmusl-x64`, `linuxmusl-arm64`) is covered by unit tests. Manual end-to-end smoke testing on macOS and Linux is **deferred** to a follow-up release; v0.6.0 ships those platforms as "alpha — please report issues" per R7. (FR-019, FR-020, FR-021)
 - SC-004: When the release agent's preflight detects a dirty tree, failing tests, or a non-monotonic version bump, it refuses to proceed and reports the failure clearly. (FR-007)
 - SC-005: The GitHub Releases page lists releases for both **v0.5.0** (bootstrapped retroactively) and **v0.6.0**. The v0.6.0 release lists exactly three assets at the release root — `main.js`, `manifest.json`, `styles.css` — and its body reflects the v0.6.0 CHANGELOG entry. (FR-012, FR-013, FR-031)
 - SC-006: A first-time reader of `RELEASING.md` can ship a release without consulting any other source. (FR-003, FR-005, FR-006)

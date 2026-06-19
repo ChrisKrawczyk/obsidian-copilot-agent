@@ -80,6 +80,26 @@ GPT-5.4 ran the planning-docs holistic review and surfaced 5 findings (1 must-fi
 
 Remaining planning-docs reviews (Gemini and Opus) will be re-spawned against these revisions plus the iter-4 SC-003 relaxation.
 
+### Planning Docs Review Iteration 2 (Opus + Gemini holistic bundle review, post-SC-003-relaxation)
+
+Two fresh reviews surfaced 11 distinct findings (5 should-fix, 5 consider, 1 invalid). One consensus across both models. Smart-mode classification routed 6 quick-wins to auto-apply; the 4 interactive items (1 consensus + 3 single-model design tradeoffs) are presented separately to the user.
+
+**Auto-applied quick wins (this commit)**:
+- **S2 (Opus F3)**: Spec SC-003 enumerates all 8 platform tuples (was 6).
+- **S4 (Gemini F2)**: Phase 2 `ensureInstalled` now explicitly stages the *extracted binary* at a separate temp path before the final atomic rename, satisfying FR-025 even on extraction failure.
+- **C3 (Opus F7)**: Phase 5 documents how RC entries collapse into the stable `## [0.6.0]` CHANGELOG section during the rc → stable bump.
+- **C4 (Opus F8)**: Spec wording for "Pinned binary version" aligned with plan's runtime mechanism (read from installed `@github/copilot` in `node_modules`).
+- **C6 (Gemini F4)**: Plan's "pre-v0.5 history" exclusion aligned to spec's "pre-v0.6 history".
+- **C7 (Gemini F5)**: Phase 3's `assemble-assets.mjs` spec now defines the `--bootstrap` flag that Phase 5's bootstrap script uses.
+
+**Discarded**: Opus F4 ("dangling R7 reference") — invalid; Spec defines R1–R10 in `## Risks & Mitigations` (line 209+).
+
+**Interactive (presented to user separately)**:
+- **C1 (Opus F1 + Gemini F1, consensus)**: marker-missing trust-and-record vs Spec edge case "regardless of newer or older". Three resolution paths.
+- **S1 (Opus F2)**: plan's "verbatim from Spec.md Scope" claim — fix attribution or add Out-of-Scope subsection to Spec.
+- **S3 (Opus F5)**: agent-side recovery for "CI fails after tag push" — extend `ci-monitor.md` skill or accept doc-level recovery in `RELEASING.md`.
+- **C2 (Opus F6)**: dry-run mode — add to Spec or accept as plan-only.
+
 ---
 
 ## Overview
@@ -126,7 +146,7 @@ The following items are explicitly **out of scope** for this work (verbatim from
 - Telemetry, install analytics, or release usage tracking.
 - Runtime override of the pinned binary version (users cannot point at a different `@github/copilot` build).
 - `data.json` migration infrastructure (no shape change in this release).
-- Backfilling CHANGELOG entries for pre-v0.5 history.
+- Backfilling CHANGELOG entries for pre-v0.6 history.
 - A web-hosted release notes page outside GitHub Releases.
 - Proxy support or bundled-binary fallback for npm-registry-blocked corporate networks (documented as a known limitation in README).
 - Multi-binary management UI (the fetcher may stage binaries internally, but no version-management UI is exposed).
@@ -291,7 +311,7 @@ A pure-ish class encapsulating fetch lifecycle. Public surface (small, testable)
   3. Binary present and marker is **missing entirely** → **trust-and-record fallback**: treat as installed (return `true`) and write the marker to `pinnedVersion`. This covers the dev-deploy fast path (FR-026) where `scripts/deploy.mjs` historically copied `copilot.exe` from `node_modules` without writing a marker. Trade-off: a stale binary on a pre-marker dev machine is silently accepted on first run; this is acceptable because `npm run deploy` re-copies from `node_modules` on every dev cycle and post-Phase-2 deploys always write the marker.
   4. Binary present and marker is **present but version-mismatched** → `false` (re-fetch). This honors FR-020 ("when the binary is absent or does not match the pinned version") and the upgrade semantics in Spec P4: a real version disagreement always triggers re-acquisition; only the marker-missing case is forgiving.
   5. To complement (3), `scripts/deploy.mjs` is edited (small additive change, **in scope** — see "What We're NOT Doing" carve-out) to write the marker after copying the binary, so dev-deploy flows after this PR have an explicit marker and never trip the fallback.
-- `ensureInstalled(plugin, pinnedVersion, onProgress): Promise<string>` — main entry point. Returns the binary path. If `isInstalled` is true, resolves immediately. Otherwise: detect platform tuple → resolve npm tarball URL + sha512 from registry metadata → stream-download to a temp file under `<plugin-dir>/.copilot-binary-download-<rand>` → verify sha512 → extract the single `copilot{.exe}` entry from the tar.gz → atomically rename into final path → write version marker → chmod 0755 on POSIX.
+- `ensureInstalled(plugin, pinnedVersion, onProgress): Promise<string>` — main entry point. Returns the binary path. If `isInstalled` is true, resolves immediately. Otherwise: detect platform tuple → resolve npm tarball URL + sha512 from registry metadata → stream-download to a temp file under `<plugin-dir>/.copilot-binary-download-<rand>` → verify sha512 → extract the single `copilot{.exe}` entry from the tar.gz **into a temporary staging path** `<plugin-dir>/.copilot-binary-extract-<rand>` (not the final location) → atomically rename the staging path into the final binary path → write version marker → chmod 0755 on POSIX. The staging-then-rename guarantees no partial binary is observable at the final path if extraction fails (per FR-025 / planning-docs-review S4).
 - `detectPlatformTuple(): PlatformTuple` — exported pure helper covering all eight tuples (`{darwin,linux,linuxmusl,win32}-{x64,arm64}`) per FR-021. Linux libc detection uses `process.report.getReport().header.glibcVersionRuntime` (present on glibc, absent on musl) with `ldd --version` fallback (presence of `musl` substring → musl; presence of `GLIBC` or GNU substring → glibc). If neither probe yields a confident result, the helper throws `FetcherError` with `kind: "unsupported-platform"` and a message instructing the user to file an issue with their platform details — we do **not** silently default to glibc, since that risks fetching the wrong tarball on a supported musl system (per plan-review #1).
 - `FetcherError` — typed error class with `kind: "unsupported-platform" | "network" | "integrity" | "extract" | "filesystem" | "registry"` so the UI can route messages without parsing strings.
 
@@ -398,6 +418,7 @@ Single source of truth for "what makes a release":
 - Copies all three to a `release-assets/` directory (created fresh).
 - Asserts manifest version matches the supplied target version; fails with a clear message on mismatch (FR-012 + spec validation).
 - Asserts `versions.json` contains an entry for the target version.
+- **`--bootstrap` mode** (per planning-docs-review C7, used by Phase 5's `bootstrap-v0.5.0.mjs`): when invoked with `--bootstrap`, the manifest-version assertion is loosened — if the source tree's `manifest.json` does not match the supplied target version, the script synthesizes a `manifest.json` in `release-assets/` with the target version (using the tip-of-`main` manifest's other fields). The `versions.json` entry assertion is relaxed similarly: missing entry for the bootstrap target is permitted. All other invariants (exactly-three-files at the release root, build output present) still apply. The `--bootstrap` mode exists exclusively to support the historical v0.5.0 release; standard releases never use it.
 
 Pure validation logic (file-list shape, version match, exactly-three-files invariant) lives in `src/release/releaseAssets.ts`. The orchestration script invokes the validators with concrete file system probes.
 
@@ -576,6 +597,8 @@ To honor FR-018's "executes this procedure before tagging v0.6.0" literally — 
 3. **Execute the eight-step smoke test against the published `v0.6.0-rc.1`** on Windows. Per relaxed SC-003 (see "Cross-platform validation note" below), v0.6.0 manual smoke testing is Windows-only; macOS/Linux are validated via unit tests on platform detection logic only.
 4. If the Windows smoke test passes, invoke the release agent: "release v0.6.0". The agent bumps `0.6.0-rc.1` → `0.6.0` (which is still strictly greater per pre-release semver ordering), tags `v0.6.0`, pushes, CI publishes the stable release, and the agent verifies.
 5. If a smoke test fails on any platform, fix the issue, cut `v0.6.0-rc.2`, and repeat. RC tags are deleted from the GitHub Releases page after the stable release is cut (cosmetic cleanup, not required).
+
+**RC → stable CHANGELOG consolidation (planning-docs-review C3)**: RC tags do not get their own permanent CHANGELOG sections. The version-bump script writes a draft `## [0.6.0-rc.1] - YYYY-MM-DD` stub for the RC; when the maintainer bumps `0.6.0-rc.1` → `0.6.0`, the version-bump script consolidates by collapsing any `-rc.*` entries for the same major.minor.patch into a single `## [0.6.0] - YYYY-MM-DD` entry. The `changelog-draft` skill makes this consolidation visible to the maintainer for review/edit.
 
 This ordering satisfies FR-018 strictly: smoke testing happens **before** tagging the final `v0.6.0`. The RC flow also exercises Phase 3's GitHub Actions workflow end-to-end on a throwaway tag before the public release.
 
