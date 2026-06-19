@@ -112,6 +112,7 @@ Acceptance Scenarios:
 - FR-015: The credential resolver SHALL enforce a maximum command execution time (default 15 seconds, not user-configurable in this release). (Cross-cutting)
 - FR-016: Existing stdio MCP servers (Foam, OneDrive) and unauthenticated HTTP MCP servers SHALL continue to work with no configuration changes. (Cross-cutting)
 - FR-017: The credential layer SHALL operate within the plugin's existing HTTP request guardrails (redirect handling, private-IP blocking, allowlist). It SHALL NOT introduce a new outbound HTTP path that bypasses these checks. (Cross-cutting)
+- FR-018: When the user selects the "Microsoft 365 Graph (via Azure CLI)" preset in the add-server flow, the plugin SHALL run a non-token-issuing preflight check that verifies the configured credential command's executable resolves on PATH (e.g., for the M365 preset, `az --version` or equivalent quick probe). The check SHALL run before the server is saved. If the executable is not found, the settings form SHALL show an inline, non-blocking hint with an actionable install command (on Windows: `winget install Microsoft.AzureCLI`); the user MAY still save the server (it will simply enter an error state on first resolution per FR-009/FR-014), but the hint is surfaced proactively at preset-selection time rather than reactively at first tool call. The preflight check SHALL NOT cause `az login` or any other interactive prompt to run. (Story: P1, P4)
 
 ### Key Entities
 
@@ -136,6 +137,7 @@ Acceptance Scenarios:
 - SC-007: All existing 970+ tests continue to pass; the existing stdio MCP servers (Foam, OneDrive) and any pre-existing unauthenticated HTTP server configurations continue to work with zero configuration changes. (FR-016)
 - SC-008: A user who saved a credential configuration in this release — including, hypothetically, a configuration written manually with the reserved `oauth-pkce` variant fields enumerated in FR-012 — can open the same vault in a future plugin version that implements that variant and have their stored configuration read cleanly (no migration error, no data loss, no field re-encoding). Tests in this release SHALL cover round-tripping the reserved `oauth-pkce` shape through the persistence layer's save → load → save path and asserting byte-equivalence of every enumerated field. (FR-012)
 - SC-009: The plugin's HTTP request guardrails (redirect rules, private-IP block, allowlist) apply to every credential-bearing request just as they do to today's unauthenticated requests. (FR-017)
+- SC-010: A user without Azure CLI installed who selects the M365 preset sees a proactive inline install hint in the settings form before saving — they do not have to save, attempt a chat tool call, and read an error to learn that `az` is missing. (FR-018)
 
 ## Assumptions
 
@@ -145,6 +147,7 @@ Acceptance Scenarios:
 - Refresh buffer defaults to 300 seconds. Per-server override allowed via configuration; no global default override in this release.
 - The command-execution path uses direct process spawn, not a shell. The user types `az account get-access-token --scope ...`; the plugin tokenizes this into argv and spawns directly. (Rationale: avoids shell-injection class of bugs; matches how the plugin's existing stdio MCP transport already resolves CLI commands on Windows.)
 - For the "Test connection" action, an MCP `initialize` round-trip is sufficient evidence of working credentials. The action does not need to also call `tools/list` or invoke a real tool.
+- The preset dropdown in the add-server flow is treated as a flat list of named presets in this release ("Microsoft 365 Graph (via Azure CLI)" being the only entry). A two-level "server → auth method" grouping is not introduced now but the preset registry data shape supports it (each entry carries server + variant metadata) so a future grouping is a pure UI change.
 - The user, not the plugin, is responsible for granting tenant-admin consent. The plugin's role is to surface clear errors when consent is missing and point the user at the relevant remediation docs.
 
 ## Scope
