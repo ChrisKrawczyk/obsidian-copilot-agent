@@ -51,6 +51,15 @@ Security posture: MCP server `instructions` and tool descriptions are **untruste
 
 For the full technical reference, see [`.paw\work\mcp-client\Docs.md`](.paw/work/mcp-client/Docs.md).
 
+## What's new in v0.6
+
+- **First BRAT-installable release.** No more manual `npm run deploy` for end users. Install via BRAT (`README.md → Install via BRAT`); the plugin fetches its platform-specific Copilot CLI binary from `registry.npmjs.org` on first launch with sha512 verification.
+- **In-plugin binary fetcher** with a progress Notice, atomic-rename on completion, version marker for cache-hit short-circuit on subsequent launches, and a Settings → CLI binary section with **Retry** for failure recovery without a plugin reload. Supports 8 platform tuples (Windows x64/arm64, macOS x64/arm64, Linux glibc/musl x64/arm64); Windows is supported, macOS/Linux ship as alpha.
+- **In-repo release tooling.** `scripts/version-bump.mjs` mutates `package.json`, `manifest.json`, `versions.json`, and stubs a `CHANGELOG.md` section atomically. `.github/workflows/release.yml` (SHA-pinned actions, tag-triggered) builds and publishes the three release assets. The Copilot CLI release agent at `.copilot/agents/release/` orchestrates the end-to-end flow — see [`RELEASING.md`](RELEASING.md).
+- **No runtime behavior changes.** Chat, model picker, MCP, safety, Undo, tools all behave exactly as v0.5. The fetcher's `isInstalled` short-circuit means existing developers with `copilot.exe` already deployed (`npm run deploy --with-binary`) see no Notice and no download.
+
+For the technical reference, see [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md).
+
 ## What's new in v0.4
 
 - **Per-conversation model picker** in the chat header. Pick from any chat-capable Copilot model your account can reach; each conversation remembers its own selection. Switching conversations updates the picker label automatically. The picker uses Obsidian's standard menu so it inherits keyboard accessibility.
@@ -194,6 +203,8 @@ Before any non-private distribution we register a dedicated OAuth App (tracked a
 
 The Copilot SDK delegates model and tool execution to the `@github/copilot` CLI runtime. Obsidian.exe ships with the `ELECTRON_RUN_AS_NODE` Electron fuse disabled for security, so we can't reuse it as the Node interpreter. Instead we ship the platform-specific single-executable application (SEA) the npm package provides.
 
+As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from `@github/copilot-sdk`'s transitive `@github/copilot` dependency. See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
+
 ## Tests
 
 ```
@@ -202,7 +213,11 @@ npm run typecheck # tsc --noEmit
 npm run build     # production esbuild
 ```
 
-166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brought it to 728; v0.5 brings it to **944** across MCP persistence, settings UI, transports, registry, approval, result normalization, cancellation, and resilience coverage.
+166 v0.1 tests retained and unchanged; v0.2 added 235 (total 401); v0.3 brought the total to 609; v0.4 brought it to 728; v0.5 brought it to 944; v0.6 brings it to **1107** with binary-fetcher platform detection, version-bump tooling, release-assets validators, bootstrap helpers, and CLI script harnesses.
+
+## Releasing
+
+Cutting a release is documented in [`RELEASING.md`](RELEASING.md). Quick start: ask the Copilot CLI release agent (at [`.copilot/agents/release/`](.copilot/agents/release/)) "release v\<version\>" — the agent walks preflight → version-bump → CHANGELOG draft → tag-and-push → CI monitor → verify. Manual CLI fallback documented alongside.
 
 ## Reference
 
