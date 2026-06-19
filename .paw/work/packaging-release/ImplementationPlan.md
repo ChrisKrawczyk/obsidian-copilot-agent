@@ -57,6 +57,29 @@ GPT-5.4 iter-3 caught two residual issues; both surgically fixed:
 - **iter3-B1 (residual "best-effort" wording)**: removed from the Phase 5 smoke-test step 1 and the Phase 6 RELEASING.md outline. The detailed SC-003 note (which explains how access will be arranged) is retained.
 - **iter3-I1 (Phase 2 manual success criterion contradicted the marker-missing fallback)**: the Settings/Retry manual criterion now distinguishes three explicit scenarios: marker-missing-only (no re-download — fallback path), binary-deleted (re-download), and version-mismatched marker (re-download).
 
+### Plan Review Iteration 4 (post-iter-4 user-driven scope relaxation)
+
+User direction: relax SC-003 because maintainer hardware is Windows-only and macOS/iOS access is not planned for v0.6.0. Spec.md was patched in lockstep:
+
+- **Spec SC-003** changes from "the same end-to-end install-via-BRAT flow succeeds on macOS arm64 and Linux x64" to "platform detection logic for macOS/Linux tuples is unit-tested; manual smoke testing on those platforms is deferred to a follow-up release; v0.6.0 ships them as 'alpha — please report issues' per R7".
+- **Plan Phase 5** smoke test procedure scoped to Windows only; the cross-platform access plan is removed; success criteria list Windows smoke + the unit-test gate for the eight platform tuples.
+- **Plan Phase 6** RELEASING.md outline updated to match.
+- **iter2-B4 / iter3-B1 changelog entries above** are preserved as historical record but their commitments are superseded by this iter-4 relaxation.
+
+This is a deliberate scope reduction, not an oversight. The deferred Phase Candidate "CI-driven cross-platform smoke matrix" remains the natural follow-up to close the gap.
+
+### Planning Docs Review Iteration 1 (GPT-5.4 holistic bundle review)
+
+GPT-5.4 ran the planning-docs holistic review and surfaced 5 findings (1 must-fix, 4 should-fix), all orthogonal to the SC-003 relaxation:
+
+- **Finding 1 (must-fix) — Linux libc fallback**: `detectPlatformTuple` no longer silently assumes glibc when both libc probes fail. Now throws `FetcherError` with `kind: "unsupported-platform"`. Added to the unit-test matrix.
+- **Finding 2 (should-fix) — version comparison baseline**: Spec FR-007 wording aligned with plan: comparison is against `package.json` (kept in lockstep by the version-bump script per FR-001), not an abstract "currently-released version".
+- **Finding 3 (should-fix) — v0.5.0 manifest substitution**: Spec FR-031 reworded to allow normalized release metadata while keeping build outputs from the merge commit, with explicit transparency in the release body.
+- **Finding 4 (should-fix) — v0.5.0 installability**: Spec FR-031 now explicitly flags v0.5.0 as historical-completeness/pinning-only, not a fresh-install vector. The plan's existing edge-note remains and now matches the spec.
+- **Finding 5 (should-fix) — write-blocked folder validation**: Phase 2 manual success criteria + `BinaryFetcher.test.ts` now both cover the `filesystem` error kind explicitly.
+
+Remaining planning-docs reviews (Gemini and Opus) will be re-spawned against these revisions plus the iter-4 SC-003 relaxation.
+
 ---
 
 ## Overview
@@ -269,7 +292,7 @@ A pure-ish class encapsulating fetch lifecycle. Public surface (small, testable)
   4. Binary present and marker is **present but version-mismatched** → `false` (re-fetch). This honors FR-020 ("when the binary is absent or does not match the pinned version") and the upgrade semantics in Spec P4: a real version disagreement always triggers re-acquisition; only the marker-missing case is forgiving.
   5. To complement (3), `scripts/deploy.mjs` is edited (small additive change, **in scope** — see "What We're NOT Doing" carve-out) to write the marker after copying the binary, so dev-deploy flows after this PR have an explicit marker and never trip the fallback.
 - `ensureInstalled(plugin, pinnedVersion, onProgress): Promise<string>` — main entry point. Returns the binary path. If `isInstalled` is true, resolves immediately. Otherwise: detect platform tuple → resolve npm tarball URL + sha512 from registry metadata → stream-download to a temp file under `<plugin-dir>/.copilot-binary-download-<rand>` → verify sha512 → extract the single `copilot{.exe}` entry from the tar.gz → atomically rename into final path → write version marker → chmod 0755 on POSIX.
-- `detectPlatformTuple(): PlatformTuple` — exported pure helper covering all eight tuples (`{darwin,linux,linuxmusl,win32}-{x64,arm64}`) per FR-021. Linux libc detection uses `process.report.getReport().header.glibcVersionRuntime` (present on glibc, absent on musl) with `ldd --version` fallback (graceful: if neither works, assume glibc).
+- `detectPlatformTuple(): PlatformTuple` — exported pure helper covering all eight tuples (`{darwin,linux,linuxmusl,win32}-{x64,arm64}`) per FR-021. Linux libc detection uses `process.report.getReport().header.glibcVersionRuntime` (present on glibc, absent on musl) with `ldd --version` fallback (presence of `musl` substring → musl; presence of `GLIBC` or GNU substring → glibc). If neither probe yields a confident result, the helper throws `FetcherError` with `kind: "unsupported-platform"` and a message instructing the user to file an issue with their platform details — we do **not** silently default to glibc, since that risks fetching the wrong tarball on a supported musl system (per plan-review #1).
 - `FetcherError` — typed error class with `kind: "unsupported-platform" | "network" | "integrity" | "extract" | "filesystem" | "registry"` so the UI can route messages without parsing strings.
 
 The class is implemented using Node builtins only (`node:https`, `node:fs`, `node:path`, `node:os`, `node:zlib`, `node:stream`) reached via `nodeRequire()` from `src/sdk/nodeRequire.ts`, mirroring the existing pattern in `resolveCliBinaryPath.ts:17-21`. No new third-party dependency. Tar extraction uses a minimal in-place extractor restricted to a single named entry — we are not bundling `tar` or `node-tar`.
@@ -333,7 +356,7 @@ After copying `copilot.exe` from `node_modules` into the vault plugin folder, wr
 
 **New tests:**
 
-- `src/sdk/BinaryFetcher.test.ts` — unit tests for `detectPlatformTuple` covering all eight tuples plus unsupported (use `vi.stubGlobal`/`vi.spyOn` against `process.platform`, `process.arch`, and libc detection). Unit tests for path computation, version-marker check, and atomic rename behavior (using `node:fs` against a tmp directory inside the repo). Network and registry calls are exercised against an in-process HTTP fixture (no real network).
+- `src/sdk/BinaryFetcher.test.ts` — unit tests for `detectPlatformTuple` covering all eight tuples plus unsupported (use `vi.stubGlobal`/`vi.spyOn` against `process.platform`, `process.arch`, and libc detection — including the new "neither libc probe yields a result → throws unsupported-platform" case per planning-docs-review #1). Unit tests for path computation, version-marker check, and atomic rename behavior (using `node:fs` against a tmp directory inside the repo). Network and registry calls are exercised against an in-process HTTP fixture (no real network). **Filesystem error path (per planning-docs-review #5)**: a unit test stubs the final atomic rename (or the staging-write step) to throw `EACCES`/`EPERM` and asserts the fetcher surfaces a `FetcherError` with `kind: "filesystem"`, leaves no partial artifact, and is safely retryable.
 - `src/sdk/BinaryFetcher.integrity.test.ts` — verifies a deliberately-mutated tarball fails sha512 verification and leaves no binary at the final path (FR-025).
 - `src/settings/CliBinarySection.test.ts` — mirrors `src/settings/McpServersSection.test.ts:8-94` patterns: fake DOM, injected `notify` array, injected `fetcherFactory` returning canned outcomes. Covers: installed state, missing → Retry → success, missing → Retry → failure with redacted error, unsupported-platform disabled Retry.
 - `src/main.startup.binary.test.ts` — exercises `ensureCliBinaryReady` happy path and failure path against a fake `BinaryFetcher` injected through a plugin seam; verifies `onload` early-return on failure does not construct downstream stores.
@@ -358,6 +381,7 @@ After copying `copilot.exe` from `node_modules` into the vault plugin folder, wr
 - Settings → Copilot Agent shows the CLI binary section reporting the installed version. **Marker-missing fallback**: deleting only the marker file (leaving the binary in place) and reloading shows the binary as installed (the trust-and-record fallback rewrites the marker silently) — `Retry` does **not** trigger a re-download. **Re-fetch path**: deleting the binary file (with or without the marker) and clicking Retry re-downloads cleanly to the final path. **Version-mismatch path**: hand-editing the marker to a different version triggers a re-download on next reload (per FR-020 / Spec P4).
 - **Settings reachability after fetch failure (resolves B1)**: Block the network at the OS level (or point npm at `127.0.0.1:9` via env var) and reload the plugin. The "Downloading…" Notice transitions to a "network" error Notice. Open Settings → Copilot Agent → CliBinarySection reports the failure with a redacted reason and a Retry button. Restore the network and click Retry; the download succeeds and the rest of the plugin (chat, MCP) becomes available without a second reload (or, if simpler to implement, after a manual reload — decision: re-running `ensureCliBinaryReady()` from Retry succeeds in fetch but full runtime construction may still require a reload, which is acceptable and documented in the Notice copy).
 - Disabling the network mid-download leaves no partial file at the final path; the Settings status updates to a "network" error message; clicking Retry while the network is still down does not loop or crash; restoring the network and clicking Retry succeeds.
+- **Write-blocked plugin folder (resolves planning-docs-review #5)**: making the plugin folder read-only (Windows: deny `Write` ACL on the folder for the current user, or POSIX: `chmod a-w`) and reloading the plugin causes the fetcher to fail with the `filesystem` error kind. The Settings status displays a redacted reason and the Retry button is enabled; restoring write permission and clicking Retry succeeds. The plugin does not loop, crash, or freeze the UI (per SC-009).
 
 ---
 
@@ -506,7 +530,7 @@ Phase 6 then expands this file into the comprehensive maintainer doc. The minimu
 
 Documented in the Phase 5 minimum `RELEASING.md` and re-stated in the Phase 6 expanded version. The procedure:
 
-1. Spin up a clean Obsidian vault on each SC-003 target platform (Windows, macOS arm64, Linux x64).
+1. Spin up a clean Obsidian vault on Windows (per relaxed SC-003 — manual smoke testing is Windows-only for v0.6.0; macOS/Linux platform paths are validated via unit tests on platform detection logic only and shipped as "alpha — please report issues" in README per R7).
 2. Install BRAT from Community Plugins.
 3. `Add Beta Plugin → ChrisKrawczyk/obsidian-copilot-agent`.
 4. Wait for BRAT to fetch assets; verify the vault plugin folder contains exactly `main.js`, `manifest.json`, `styles.css` (no extra files).
@@ -549,13 +573,13 @@ To honor FR-018's "executes this procedure before tagging v0.6.0" literally — 
 
 1. Ensure `main` contains all merged Phase 1–4 work (this implementation plan's PR is merged).
 2. Invoke the release agent: "release v0.6.0-rc.1". The agent walks preflight → bump (to `0.6.0-rc.1`) → CHANGELOG draft → tag/push. The Phase 3 GitHub Actions workflow publishes `v0.6.0-rc.1` as a GitHub pre-release (the `softprops/action-gh-release@v2` step sets `prerelease: true` when the tag contains a hyphen, per Phase 3 spec).
-3. **Execute the eight-step smoke test against the published `v0.6.0-rc.1`** on Windows (required) and on macOS arm64 + Linux x64 environments (required by SC-003 — see "SC-003 cross-platform note" below).
-4. If smoke tests pass on all targeted platforms, invoke the release agent: "release v0.6.0". The agent bumps `0.6.0-rc.1` → `0.6.0` (which is still strictly greater per pre-release semver ordering), tags `v0.6.0`, pushes, CI publishes the stable release, and the agent verifies.
+3. **Execute the eight-step smoke test against the published `v0.6.0-rc.1`** on Windows. Per relaxed SC-003 (see "Cross-platform validation note" below), v0.6.0 manual smoke testing is Windows-only; macOS/Linux are validated via unit tests on platform detection logic only.
+4. If the Windows smoke test passes, invoke the release agent: "release v0.6.0". The agent bumps `0.6.0-rc.1` → `0.6.0` (which is still strictly greater per pre-release semver ordering), tags `v0.6.0`, pushes, CI publishes the stable release, and the agent verifies.
 5. If a smoke test fails on any platform, fix the issue, cut `v0.6.0-rc.2`, and repeat. RC tags are deleted from the GitHub Releases page after the stable release is cut (cosmetic cleanup, not required).
 
 This ordering satisfies FR-018 strictly: smoke testing happens **before** tagging the final `v0.6.0`. The RC flow also exercises Phase 3's GitHub Actions workflow end-to-end on a throwaway tag before the public release.
 
-**SC-003 cross-platform note (resolves plan-review-iter-2 issue)**: SC-003 requires the BRAT install flow to succeed on macOS arm64 and Linux x64 in addition to Windows. Per Spec R7, the maintainer's primary hardware is Windows. The plan commits to satisfying SC-003 by arranging access to (a) a macOS arm64 environment — borrowed Mac, cloud-hosted macOS instance (e.g., AWS EC2 mac, MacStadium, or a free macOS GitHub Actions runner reserved for manual triggers), or a colleague's machine; (b) a Linux x64 environment — any cloud VM, WSL2 with a real graphical Obsidian build is **not** acceptable since `isDesktopOnly: true` and BRAT's fetch path require a real desktop session, so a cloud VM with a desktop environment or local Linux dual-boot is needed. If access to either environment cannot be arranged at Phase 5 execution time, the maintainer must (1) raise it as a milestone-level decision before cutting v0.6.0 and (2) either delay the cut, or formally relax SC-003 to "Windows-required, macOS/Linux best-effort" and update the spec — not silently weaken it inside the plan. R7's "alpha / report issues" framing applies to *post-release* user reports, not to pre-release validation.
+**Cross-platform validation note**: Per the relaxed SC-003 (see Spec.md), v0.6.0 ships with Windows manual smoke testing as the only platform-coverage gate. macOS (arm64/x64) and Linux (glibc/musl, x64/arm64) are covered by unit tests on `BinaryFetcher.detectPlatformTuple` (Phase 2) — exercising all eight tuples plus unsupported-platform error path — but no manual end-to-end smoke test is performed on those platforms before v0.6.0 ships. README labels them "alpha — please report issues" per R7, and a follow-up release will cover real cross-platform smoke (potentially via the deferred CI matrix candidate). Maintainer's hardware is Windows-only and arranging macOS/Linux access is explicitly out of scope for v0.6.0.
 
 **No additional code changes** in this phase beyond the README edits and the in-Phase-5 minimum `RELEASING.md`. This phase's "deliverables" are operational: three GitHub Releases (v0.5.0, v0.6.0-rc.1, v0.6.0) and a passing smoke test signed off in `RELEASING.md`.
 
@@ -571,8 +595,7 @@ This ordering satisfies FR-018 strictly: smoke testing happens **before** taggin
 
 - Browsing the repo's GitHub Releases page shows entries for `v0.5.0`, `v0.6.0-rc.1` (marked pre-release), and `v0.6.0`. v0.6.0 has exactly three assets at the release root: `main.js`, `manifest.json`, `styles.css`. v0.6.0's body matches the CHANGELOG v0.6.0 section.
 - Smoke test passes end-to-end on **Windows** against the published `v0.6.0-rc.1`: clean vault → BRAT install → fetcher downloads binary → OAuth → chat exchange completes.
-- Smoke test passes end-to-end on **macOS arm64** against the published `v0.6.0-rc.1` (per SC-003).
-- Smoke test passes end-to-end on **Linux x64 (glibc)** against the published `v0.6.0-rc.1` (per SC-003).
+- Unit tests for `BinaryFetcher.detectPlatformTuple` (Phase 2) cover all eight platform tuples (`darwin-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`, `linuxmusl-x64`, `linuxmusl-arm64`, `win32-x64`, `win32-arm64`) plus the unsupported-platform error path — this is the SC-003 validation gate for non-Windows platforms in v0.6.0 (manual smoke deferred per relaxed SC-003).
 - Smoke test results are recorded in `RELEASING.md` for traceability.
 
 ---
@@ -592,7 +615,7 @@ The Phase 5 minimum runbook is expanded in this phase into the comprehensive mai
 - **CHANGELOG format**: documents the Keep-a-Changelog-loose convention currently in use (`## [version] - date` headings, `### Added/Changed/Fixed/Security/Migration/Dependencies/Bundle Size/Tests` sub-sections). (FR-028)
 - **Recovery procedures**: dirty tree, failed CI, accidentally tagged from non-`main`, partial state mid-bump. Each maps to a documented manual cleanup. (FR-010, R8)
 - **Trust chain note**: the fetcher pins to `PINNED_BINARY_VERSION` (baked at build time from `@github/copilot`'s installed version), verifies sha512 from npm registry metadata, and writes only inside the plugin folder. Upgrading the binary version requires bumping `@github/copilot-sdk` (or its transitive `@github/copilot` pin) and re-releasing. (R1)
-- **Smoke test procedure**: the eight-step BRAT install verification from Phase 5, executed on each SC-003 target platform (Windows, macOS arm64, Linux x64) before tagging the stable release.
+- **Smoke test procedure**: the eight-step BRAT install verification from Phase 5, executed on Windows before tagging the stable release. Per relaxed SC-003, macOS/Linux manual smoke is deferred; unit-test coverage of platform detection logic is the v0.6.0 cross-platform gate.
 - **Two-`gh`-account note**: the maintainer's release agent uses whichever `gh` account is currently selected; verify with `gh auth status` before invoking. (Spec assumption.)
 - **Dry-run mode**: how to invoke the agent with `--dry-run` (or "dry-run release …") to exercise the full flow on a feature branch without mutating remote state — useful for testing changes to the agent or skills.
 - **v0.5.0 reproducibility note**: v0.5.0 is published from a non-reproducible-from-source manifest (per Phase 5 bootstrap); this is documented for transparency. (Resolves Opus N1.)
