@@ -28,3 +28,26 @@ Phase 3 is broadly implemented and automated checks pass, but review found secur
 ### Notes for Reviewer
 - Deliverable completeness is otherwise strong: release validators, assembly/extraction scripts, npm aliases, `.gitignore`, SHA-pinned release workflow, job-level `contents: write`, and release-assets tests are present.
 - No runtime plugin behavior changes were introduced by Phase 3; the only `src/` addition is release validation tooling/tests.
+
+## Re-review (post-fix commit 83f9f63)
+
+### Verdict: PASS with notes
+
+### Summary
+The three prior blockers are resolved and Phase 3 is ready to proceed.
+
+### Fix Verification
+1. **GitHub Actions shell interpolation:** resolved. `.github/workflows/release.yml` now passes `${{ steps.tagver.outputs.version }}` through `env.RELEASE_VERSION`, and both shell commands quote `"$RELEASE_VERSION"`. The remaining expression uses are YAML/action inputs, not shell interpolation.
+2. **`--bootstrap` manifest-shape masking:** resolved. `scripts/release/assemble-assets.mjs` now gates bootstrap synthesis with `isWellFormedSourceManifest(manifest)` before overwriting the staged manifest, and exits non-zero with the documented error for malformed source manifests.
+3. **Missing-version CLI regression test:** resolved. `src/release/extractReleaseNotes.cli.test.ts` covers success for `0.5.0`, non-zero missing-version behavior for `99.99.99`, and no-args usage failure.
+
+### Tests / Sanity Checks
+- `npm test`: PASS — 70 files, 1093 tests.
+- `npm run typecheck`: PASS.
+- `npm run build`: PASS.
+- Spot check: `npx tsx scripts\release\extract-release-notes.mjs 99.99.99` exits 1 with the expected "No section found" message.
+- Spot check: temporary malformed `manifest.json` under `release:assemble -- 0.5.0 --bootstrap` exits 1 with the documented bootstrap manifest-shape error; `manifest.json` was restored and no source changes remain.
+
+### Notes
+- YAML parser packages (`js-yaml`, `yaml`) are not installed locally, matching the prior review's parser-availability note; no new blocker.
+- No source code was modified during this re-review.
