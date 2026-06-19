@@ -151,13 +151,28 @@ function main() {
   const releaseBody = buildBootstrapReleaseBody(changelogSection);
   if (!dryRun) writeFileSync(notesPath, releaseBody, "utf8");
 
-  // 2. Create the worktree at the historical sha.
+  // 2. Create the worktree at the historical sha. Resolve to the full 40-char
+  //    SHA up front because `gh release create --target` rejects short SHAs
+  //    with HTTP 422 "Release.target_commitish is invalid".
   console.log("[bootstrap-v0.5.0] creating worktree");
   if (!dryRun && existsSync(worktree)) {
     console.error(`[bootstrap-v0.5.0] worktree path already exists: ${worktree}`);
     process.exit(1);
   }
-  run("git", ["worktree", "add", worktree, sha], { dryRun });
+  let fullSha = sha;
+  if (!dryRun) {
+    try {
+      fullSha = execFileSync("git", ["rev-parse", sha], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        shell: process.platform === "win32",
+      }).trim();
+    } catch {
+      console.error(`[bootstrap-v0.5.0] cannot resolve full sha for ${sha}`);
+      process.exit(1);
+    }
+  }
+  run("git", ["worktree", "add", worktree, fullSha], { dryRun });
 
   // 3. Build the historical commit.
   console.log("[bootstrap-v0.5.0] installing + building historical commit");
@@ -216,7 +231,7 @@ function main() {
 
   // 5. Tag the historical commit (annotated) using the release notes file.
   console.log("[bootstrap-v0.5.0] tagging historical commit");
-  run("git", ["tag", "--annotate", `v${TARGET_VERSION}`, sha, "--file", notesPath], { dryRun });
+  run("git", ["tag", "--annotate", `v${TARGET_VERSION}`, fullSha, "--file", notesPath], { dryRun });
 
   // 6. Push the tag.
   console.log("[bootstrap-v0.5.0] pushing tag");
@@ -231,7 +246,7 @@ function main() {
       "release",
       "create",
       `v${TARGET_VERSION}`,
-      "--target", sha,
+      "--target", fullSha,
       "--title", `v${TARGET_VERSION}`,
       "--notes-file", notesPath,
       ...assetPaths,
