@@ -18,6 +18,7 @@
     "release:status": "tsx scripts/release/status.mjs",
     "release:assemble": "tsx scripts/release/assemble-assets.mjs",
     "release:assemble:dry": "tsx scripts/release/assemble-assets.mjs --dry-run",
+    "release:bootstrap-v0.5.0": "tsx scripts/release/bootstrap-v0.5.0.mjs",
     "changelog:extract": "tsx scripts/release/extract-release-notes.mjs",
     "postinstall": "node scripts/generate-pinned-binary-version.mjs",
     "pretest": "node scripts/generate-pinned-binary-version.mjs",

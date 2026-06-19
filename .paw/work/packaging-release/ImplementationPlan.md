@@ -171,7 +171,7 @@ The following items are explicitly **out of scope** for this work (synthesized f
 - [x] Phase 2: First-launch in-plugin binary fetcher + Settings UI integration
 - [x] Phase 3: GitHub Actions release workflow
 - [x] Phase 4: Copilot CLI release agent and skills
-- [ ] Phase 5: BRAT bootstrap — retroactive v0.5.0 release, README install docs, smoke test, cut v0.6.0
+- [x] Phase 5: BRAT bootstrap — retroactive v0.5.0 release, README install docs, smoke test, cut v0.6.0
 - [ ] Phase 6: Documentation — RELEASING.md, Docs.md, README finalization
 
 ### Phase Ordering Rationale
