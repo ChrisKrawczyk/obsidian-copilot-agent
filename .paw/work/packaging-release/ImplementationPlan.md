@@ -191,7 +191,7 @@ The five surfaces called out in the workflow context map to Phases 1–5; Phase 
 
 - [x] [partially-promoted] **Settings UI reachable when binary missing**: the minimum reordering to register `addSettingTab` before the binary fetch await is **adopted in Phase 2** (resolves B1 from plan-review). The deeper "split into plugin shell + runtime-ready layers" refactor (full audit of every component to declare its binary-readiness needs) remains deferred — Band C in Phase 2's onload still does runtime construction monolithically.
 - [x] [deferred] **CI-driven cross-platform smoke matrix**: GitHub Actions matrix job that, on a release tag, runs the binary fetcher's platform detection unit tests on `windows-latest`, `macos-latest`, `macos-14` (arm64), `ubuntu-latest` to give us cross-platform CI signal beyond Linux. Deferred — explicit out-of-scope per Spec.md.
-- [x] [deferred] **Auto-detect CHANGELOG body from PR description**: the changelog-draft skill could ingest the merged PR description (via `gh pr view`) for richer context than `git log --no-merges`. Deferred — current `git log` content is sufficient.
+- [x] [promoted] **Auto-detect CHANGELOG body from PR description**: the changelog-draft skill could ingest the merged PR description (via `gh pr view`) for richer context than `git log --no-merges`. **Promoted post-v0.6.0** — the original deferral rationale ("current `git log` content is sufficient") was disproven when v0.6.0-rc.1 and v0.6.0 both shipped with a single squash-merge commit in range, requiring hand-written CHANGELOGs from the PR body each time.
 - [x] [deferred] **Workflow status badge in README**: a GitHub Actions status badge for the release workflow on the README. Trivial follow-up.
 
 ---
