@@ -20,3 +20,27 @@ Phase 4 is largely complete and tests pass, but two release-agent command/re-ent
 - Plan completeness otherwise looks good: the release agent is under `.copilot/agents/release/`, all six skill files exist, dry-run handling is documented across the sequence, CI failure menu matches the three required recovery options, and Phase 4 added no `src/` changes beyond `src/release/versionBumpCheck.cli.test.ts`.
 - The new CLI test covers greater/equal/downgrade/invalid `--check` behavior through the `tsx` loader.
 - Minor polish: `.copilot/agents/release/skills/verify.md:20` says compare with `assets.body`; the fetched JSON field is `body`.
+
+## Re-review (post-fix commit 95e21b8)
+
+### Verdict: PASS
+
+### Summary
+The three prior findings are resolved. Phase 4 is ready to proceed.
+
+### Verification
+- `.copilot/agents/release/skills/preflight.md:18` now performs symmetric behind/ahead checks after `git fetch origin main --quiet`; both `main..origin/main` and `origin/main..main` must be zero, and local-ahead is documented as a hard block to prevent publishing unreviewed commits.
+- `.copilot/agents/release/skills/tag-and-push.md:16-22` now checks for an existing release commit before enforcing the four-dirty-files contract, and steps 2-3 are explicitly conditional on no existing release commit.
+- `.copilot/agents/release/skills/tag-and-push.md:30-50` is internally consistent after the renumbering: dry-run references match the current mutating steps, step 4 is skipped in dry-run, and the re-entrancy section accurately covers commit+tag, commit-only, and neither-exists states.
+- `.copilot/agents/release/skills/verify.md:20` now correctly compares the expected release notes with the top-level `body` field from `gh release view` JSON.
+
+### Tests
+- Status: PASS
+- `npm test -- --run` passed: 71 files, 1097 tests.
+- `npm run typecheck` passed.
+
+### Commits Made
+- None.
+
+### Notes
+- No source code or skill markdown was modified during re-review; only this review artifact was appended.
