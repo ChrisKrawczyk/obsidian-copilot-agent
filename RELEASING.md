@@ -136,10 +136,10 @@ If the agent is interrupted between version-bump and tag-and-push, the four file
 
 ## Trust chain
 
-The plugin embeds platform-specific Copilot CLI binaries via a runtime fetcher (`src/binary/BinaryFetcher.ts`) rather than vendoring them in the repo or the Release artifacts. The trust chain:
+The plugin embeds platform-specific Copilot CLI binaries via a runtime fetcher (`src/sdk/BinaryFetcher.ts`) rather than vendoring them in the repo or the Release artifacts. The trust chain:
 
 1. **Build-time pin.** `scripts/generate-pinned-binary-version.mjs` (run on every `postinstall`, `prebuild`, `pretest`, `pretypecheck`) writes the installed `@github/copilot` version into `src/sdk/pinnedBinaryVersion.ts`. The fetcher uses this constant — there is no `latest` tag resolution at runtime.
-2. **Source of truth.** `@github/copilot` is a transitive dependency of `@github/copilot-sdk@1.0.0` (exact-pinned in `package.json`). Upgrading the binary version requires bumping `@github/copilot-sdk` (or its transitive `@github/copilot` pin), running `npm install`, verifying the regenerated `generated-pinned-version.ts`, and re-releasing.
+2. **Source of truth.** `@github/copilot` is a transitive dependency of `@github/copilot-sdk@1.0.0` (exact-pinned in `package.json`). Upgrading the binary version requires bumping `@github/copilot-sdk` (or its transitive `@github/copilot` pin), running `npm install`, verifying the regenerated `src/sdk/pinnedBinaryVersion.ts`, and re-releasing.
 3. **Fetch.** First-launch fetch hits `https://registry.npmjs.org/@github/copilot/-/copilot-<version>.tgz`. HTTPS-only; the URL is constructed without user input.
 4. **Integrity.** The fetcher requests the package manifest from the registry, extracts the published sha512 from `dist.integrity` (or `dist.shasum` fallback), and verifies the downloaded tarball matches before extracting.
 5. **Extraction.** Only the platform-specific binary file is extracted (e.g. `copilot-win32-x64.exe`); no JavaScript from the npm package is executed. The binary is renamed atomically to `copilot.exe`/`copilot` inside the plugin folder.
