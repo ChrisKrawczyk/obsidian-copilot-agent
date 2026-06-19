@@ -39,6 +39,17 @@ Multi-model plan-review (gpt-5.4, gemini-3.1-pro-preview, claude-opus-4.7) produ
 - **N1 (v0.5.0 non-reproducible-from-source — Opus)**: explicitly noted in finalized `RELEASING.md`.
 - **Polish (CI not triggered on v0.5.0 bootstrap — Gemini)**: explicitly called out in Phase 5 bootstrap section.
 
+### Plan Review Iteration 2 (post-iter-2 revisions)
+
+Iteration-2 review: Gemini and Opus PASS; GPT-5.4 FAIL with 4 follow-on blocking items. This revision addresses all four:
+
+- **iter2-B1 (version-mismatched binary wrongly accepted — GPT)**: `isInstalled` step (3) now narrowly covers only the marker-missing-but-binary-present case. A version-mismatched marker triggers re-fetch (FR-020 / Spec P4 update semantics).
+- **iter2-B2 (`node` vs `tsx` invocation contract — GPT)**: Phase 4 preflight and success criteria use `npm run version-bump -- --check <version>`, routing through the Phase 1 `tsx` loader. The plan no longer mixes bare `node scripts/version-bump.mjs` with the `tsx`-loader invocation.
+- **iter2-B3 (smoke test before tagging v0.6.0 — GPT)**: Phase 5 adopts a release-candidate flow — cut `v0.6.0-rc.1`, smoke test against the published RC on all SC-003 platforms, then cut `v0.6.0` only if RCs pass. This honors FR-018 literally.
+- **iter2-B4 (SC-003 weakened to "best-effort" — GPT)**: Phase 5 commits to satisfying SC-003 (Windows + macOS arm64 + Linux x64). The "best-effort" framing is removed; if access to macOS or Linux cannot be arranged, the spec must be formally relaxed rather than silently weakened in the plan. R7's "alpha / report issues" framing applies to post-release user reports, not pre-release validation.
+
+Opus iter-2 also flagged a non-blocking NOTE on the v0.5.0 bootstrap manifest substitution — already mitigated via the v0.5.0 release-body edge note (line ~519); transparency is preserved.
+
 ---
 
 ## Overview
@@ -247,8 +258,9 @@ A pure-ish class encapsulating fetch lifecycle. Public surface (small, testable)
 - `isInstalled(plugin, pinnedVersion): boolean` — checks for the binary at the expected path. Behavior:
   1. Binary missing → `false`.
   2. Binary present and sibling marker file `<plugin-dir>/.copilot-binary-version` exists with contents equal to `pinnedVersion` → `true`.
-  3. Binary present but marker missing or version-mismatched → **trust-and-record fallback**: treat as installed (return `true`) and write/refresh the marker to `pinnedVersion`. This preserves the dev-deploy fast path (FR-026) for the existing `scripts/deploy.mjs` flow which copies `copilot.exe` from `node_modules` without writing a marker, and keeps an upgrade scenario from re-downloading on every reload until a real version-bump happens. Trade-off: a stale binary (older `@github/copilot` than the pinned version) will be silently accepted on dev machines; this is acceptable because `npm run deploy` re-copies from `node_modules` on every dev cycle.
-  4. To complement (3), `scripts/deploy.mjs` is edited (small additive change, **in scope** — see "What We're NOT Doing" carve-out) to write the marker after copying the binary, so dev-deploy flows after this PR have an explicit marker and never trip the fallback.
+  3. Binary present and marker is **missing entirely** → **trust-and-record fallback**: treat as installed (return `true`) and write the marker to `pinnedVersion`. This covers the dev-deploy fast path (FR-026) where `scripts/deploy.mjs` historically copied `copilot.exe` from `node_modules` without writing a marker. Trade-off: a stale binary on a pre-marker dev machine is silently accepted on first run; this is acceptable because `npm run deploy` re-copies from `node_modules` on every dev cycle and post-Phase-2 deploys always write the marker.
+  4. Binary present and marker is **present but version-mismatched** → `false` (re-fetch). This honors FR-020 ("when the binary is absent or does not match the pinned version") and the upgrade semantics in Spec P4: a real version disagreement always triggers re-acquisition; only the marker-missing case is forgiving.
+  5. To complement (3), `scripts/deploy.mjs` is edited (small additive change, **in scope** — see "What We're NOT Doing" carve-out) to write the marker after copying the binary, so dev-deploy flows after this PR have an explicit marker and never trip the fallback.
 - `ensureInstalled(plugin, pinnedVersion, onProgress): Promise<string>` — main entry point. Returns the binary path. If `isInstalled` is true, resolves immediately. Otherwise: detect platform tuple → resolve npm tarball URL + sha512 from registry metadata → stream-download to a temp file under `<plugin-dir>/.copilot-binary-download-<rand>` → verify sha512 → extract the single `copilot{.exe}` entry from the tar.gz → atomically rename into final path → write version marker → chmod 0755 on POSIX.
 - `detectPlatformTuple(): PlatformTuple` — exported pure helper covering all eight tuples (`{darwin,linux,linuxmusl,win32}-{x64,arm64}`) per FR-021. Linux libc detection uses `process.report.getReport().header.glibcVersionRuntime` (present on glibc, absent on musl) with `ldd --version` fallback (graceful: if neither works, assume glibc).
 - `FetcherError` — typed error class with `kind: "unsupported-platform" | "network" | "integrity" | "extract" | "filesystem" | "registry"` so the UI can route messages without parsing strings.
@@ -421,7 +433,7 @@ Defines the release agent's identity, goal, the skill files it consults, and the
 
 **New skill files** (one per discrete capability, per FR-006):
 
-- `.copilot/agents/release/skills/preflight.md` — verifies (a) clean working tree (`git status --porcelain` empty), (b) on `main`, (c) `main` up to date with `origin/main` (`git fetch && git rev-list --count main..origin/main` = 0), (d) `npm run typecheck` succeeds, (e) `npm test` succeeds, (f) target version is strictly greater than current `package.json` version (delegates to `node scripts/version-bump.mjs --check <version>`). Any failure halts the release with a clear actionable message. (FR-007)
+- `.copilot/agents/release/skills/preflight.md` — verifies (a) clean working tree (`git status --porcelain` empty), (b) on `main`, (c) `main` up to date with `origin/main` (`git fetch && git rev-list --count main..origin/main` = 0), (d) `npm run typecheck` succeeds, (e) `npm test` succeeds, (f) target version is strictly greater than current `package.json` version (delegates to `npm run version-bump -- --check <version>`, which routes through the `tsx` loader configured in Phase 1). Any failure halts the release with a clear actionable message. (FR-007)
 
   **Dry-run mode** (resolves B3 from plan-review): the agent and every skill accept a `--dry-run` flag (or equivalent natural-language trigger like "dry-run release v0.6.0-rc.1"). In dry-run, preflight relaxes (a) and (b) — non-`main` branches and uncommitted changes do not block — and downstream skills replace mutating operations (`git push`, `git push --tags`, `gh release create`) with **printed-plan** output describing what would be executed. The dry-run path is what enables the Phase 4 manual validation (below) to exercise the agent end-to-end on a feature branch without violating the strict preflight that protects real releases. The `--dry-run` flag also disables the prerequisite that the version not already exist on the remote (so `rc.x` tags can be replayed iteratively).
 
@@ -444,7 +456,7 @@ Defines the release agent's identity, goal, the skill files it consults, and the
 **Automated:**
 
 - `npm test` passes including new check-mode test on the version-bump lib.
-- `node scripts/version-bump.mjs --check 0.6.0` exits 0; `node scripts/version-bump.mjs --check 0.0.1` exits non-zero.
+- `npm run version-bump -- --check 0.6.0` exits 0; `npm run version-bump -- --check 0.0.1` exits non-zero. (Both invocations route through the Phase 1 `tsx` loader; do not invoke the `.mjs` directly with bare `node`.)
 - A linter or doc-check pass confirms every skill file referenced by `agent.md` exists at the named path (a tiny script `scripts/validate-agent-skills.mjs` added as a defensive measure, optional — decision: skip; rely on Phase 5 end-to-end exercise).
 
 **Manual:**
@@ -524,27 +536,37 @@ Edge note in the release body: "v0.5.0 is published for historical completeness 
 
 Unit tests for the pure helpers used by the bootstrap script: historical-ref selection, asset list enforcement (calls back into `releaseAssets.ts`), and dry-run plan generation. The orchestration script itself (worktree + gh) is exercised manually by running it once.
 
-**Cut v0.6.0** (the real release)
+**Cut v0.6.0** (the real release, with mandatory pre-release smoke test per FR-018)
+
+To honor FR-018's "executes this procedure before tagging v0.6.0" literally — BRAT only installs from published releases, so a smoke test requires a published artifact — Phase 5 uses a release-candidate flow:
 
 1. Ensure `main` contains all merged Phase 1–4 work (this implementation plan's PR is merged).
-2. Invoke the release agent: "release v0.6.0".
-3. Agent walks preflight → bump → CHANGELOG draft (maintainer reviews/edits) → tag/push → CI monitor → verify.
-4. Execute the smoke test against the published v0.6.0.
+2. Invoke the release agent: "release v0.6.0-rc.1". The agent walks preflight → bump (to `0.6.0-rc.1`) → CHANGELOG draft → tag/push. The Phase 3 GitHub Actions workflow publishes `v0.6.0-rc.1` as a GitHub pre-release (the `softprops/action-gh-release@v2` step sets `prerelease: true` when the tag contains a hyphen, per Phase 3 spec).
+3. **Execute the eight-step smoke test against the published `v0.6.0-rc.1`** on Windows (required) and on macOS arm64 + Linux x64 environments (required by SC-003 — see "SC-003 cross-platform note" below).
+4. If smoke tests pass on all targeted platforms, invoke the release agent: "release v0.6.0". The agent bumps `0.6.0-rc.1` → `0.6.0` (which is still strictly greater per pre-release semver ordering), tags `v0.6.0`, pushes, CI publishes the stable release, and the agent verifies.
+5. If a smoke test fails on any platform, fix the issue, cut `v0.6.0-rc.2`, and repeat. RC tags are deleted from the GitHub Releases page after the stable release is cut (cosmetic cleanup, not required).
 
-**No additional code changes** in this phase beyond the README edits. This phase's "deliverables" are operational: two GitHub Releases (v0.5.0 + v0.6.0) and a passing smoke test signed off in `RELEASING.md`.
+This ordering satisfies FR-018 strictly: smoke testing happens **before** tagging the final `v0.6.0`. The RC flow also exercises Phase 3's GitHub Actions workflow end-to-end on a throwaway tag before the public release.
+
+**SC-003 cross-platform note (resolves plan-review-iter-2 issue)**: SC-003 requires the BRAT install flow to succeed on macOS arm64 and Linux x64 in addition to Windows. Per Spec R7, the maintainer's primary hardware is Windows. The plan commits to satisfying SC-003 by arranging access to (a) a macOS arm64 environment — borrowed Mac, cloud-hosted macOS instance (e.g., AWS EC2 mac, MacStadium, or a free macOS GitHub Actions runner reserved for manual triggers), or a colleague's machine; (b) a Linux x64 environment — any cloud VM, WSL2 with a real graphical Obsidian build is **not** acceptable since `isDesktopOnly: true` and BRAT's fetch path require a real desktop session, so a cloud VM with a desktop environment or local Linux dual-boot is needed. If access to either environment cannot be arranged at Phase 5 execution time, the maintainer must (1) raise it as a milestone-level decision before cutting v0.6.0 and (2) either delay the cut, or formally relax SC-003 to "Windows-required, macOS/Linux best-effort" and update the spec — not silently weaken it inside the plan. R7's "alpha / report issues" framing applies to *post-release* user reports, not to pre-release validation.
+
+**No additional code changes** in this phase beyond the README edits and the in-Phase-5 minimum `RELEASING.md`. This phase's "deliverables" are operational: three GitHub Releases (v0.5.0, v0.6.0-rc.1, v0.6.0) and a passing smoke test signed off in `RELEASING.md`.
 
 ### Success Criteria
 
 **Automated:**
 
 - `npm test` continues to pass (no regressions from README edits — there are none expected).
+- GitHub Actions release workflow run for `v0.6.0-rc.1` completes green.
 - GitHub Actions release workflow run for `v0.6.0` completes green.
 
 **Manual:**
 
-- Browsing the repo's GitHub Releases page shows two entries: `v0.5.0` and `v0.6.0`. Each has exactly three assets at the release root: `main.js`, `manifest.json`, `styles.css`. v0.6.0's body matches the CHANGELOG v0.6.0 section.
-- Smoke test passes end-to-end on Windows: clean vault → BRAT install → fetcher downloads binary → OAuth → chat exchange completes.
-- Smoke test executed best-effort on macOS arm64 and/or Linux x64 (per SC-003); results recorded in `RELEASING.md`. Failures on those platforms are filed as follow-up issues, not blockers for v0.6.0 per R7.
+- Browsing the repo's GitHub Releases page shows entries for `v0.5.0`, `v0.6.0-rc.1` (marked pre-release), and `v0.6.0`. v0.6.0 has exactly three assets at the release root: `main.js`, `manifest.json`, `styles.css`. v0.6.0's body matches the CHANGELOG v0.6.0 section.
+- Smoke test passes end-to-end on **Windows** against the published `v0.6.0-rc.1`: clean vault → BRAT install → fetcher downloads binary → OAuth → chat exchange completes.
+- Smoke test passes end-to-end on **macOS arm64** against the published `v0.6.0-rc.1` (per SC-003).
+- Smoke test passes end-to-end on **Linux x64 (glibc)** against the published `v0.6.0-rc.1` (per SC-003).
+- Smoke test results are recorded in `RELEASING.md` for traceability.
 
 ---
 
