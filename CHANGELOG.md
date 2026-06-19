@@ -3,6 +3,42 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.6.0-rc.1] - 2026-06-19
+
+First BRAT-installable release. The plugin can now be installed end-to-end from a GitHub Release tag without cloning the repo or copying the ~150 MB `copilot.exe` binary by hand. End-to-end release tooling is now in-repo and exercised by the same agent used to cut this release.
+
+### Added
+
+- **In-plugin Copilot CLI binary fetcher.** On first launch (and after maintainer-driven pinned-version bumps), the plugin downloads the platform-matching `copilot` binary from `github.com/github/copilot-cli/releases/download/v<pinned>/...`, verifies the SHA-256 against an in-repo manifest, sets `0o755` on POSIX, and caches it under the plugin's data dir. Subsequent launches skip the network entirely. A non-blocking "Downloading Copilot CLI binary…" Notice is shown during first fetch; subsequent successes are silent. Failures surface as a Notice with a Retry action and don't block the rest of plugin startup.
+- **Pinned binary version generator** (`scripts/generate-pinned-binary-version.mjs`, run via `pretypecheck`/`prebuild`). Emits `src/sdk/pinnedBinaryVersion.ts` from the `@github/copilot-sdk` version recorded in `package-lock.json` so the runtime fetcher's pin is the single source of truth.
+- **Settings → Copilot Agent → CLI binary section.** Shows the resolved binary path, version pin, checksum status, and a "Re-fetch binary" action. (`src/settings/CliBinarySection.ts`.)
+- **End-to-end release pipeline.** `.github/workflows/release.yml` builds on tag push, validates the three required assets, auto-detects pre-releases by the `-` in the tag, and publishes via `gh release create` using release notes extracted verbatim from `CHANGELOG.md`. Pre-releases (e.g. `v0.6.0-rc.1`) are marked `prerelease: true` automatically.
+- **Release tooling scripts** under `scripts/release/`: `assemble-assets.mjs` (collects `main.js`/`manifest.json`/`styles.css` into a single dir), `extract-release-notes.mjs` (slices the matching `## [<version>]` section out of `CHANGELOG.md`), `status.mjs` (per-file/per-tag state for re-entrant release runs), `bootstrap-v0.5.0.mjs` (one-shot retroactive v0.5.0 publisher).
+- **Version-bump script** (`scripts/version-bump.mjs`) updates `package.json`, `manifest.json`, `versions.json`, and stubs a new `CHANGELOG.md` section in one command.
+- **Release agent + skills** under `.copilot/agents/release/`. The agent orchestrates preflight → version-bump → changelog-draft → tag-and-push → ci-monitor → verify with a dry-run mode and re-entrant skip logic. Maintainers can ship a release by saying "cut v0.6.0-rc.1" inside Copilot CLI.
+- **Maintainer documentation:** `RELEASING.md` (comprehensive runbook with agent quick-start, manual CLI fallback, prerequisites, recovery procedures, trust chain, Windows BRAT smoke-test procedure, two-`gh`-account note, dry-run mode, v0.5.0 reproducibility notes), `.paw/work/packaging-release/Docs.md` (technical reference for the release pipeline architecture), and a "Releasing" section in `README.md`.
+- **v0.5.0 retroactive release.** Published via `bootstrap-v0.5.0.mjs` from historical commit `22f660d10881a61e52a9c2ea299f57d9d51ac1df` so the new pinned-version pipeline has a base tag to reason against. The published `manifest.json` synthesizes `"version": "0.5.0"` from the historical manifest preserving all other fields.
+
+### Changed
+
+- `scripts/deploy.mjs` now copies the pinned binary into the vault plugin dir when present, so deploys to the test vault don't require an Obsidian restart to pick up a new pinned version.
+- `manifest.json` now declares `minAppVersion: 1.5.0` and tracks the canonical `version` field that the release pipeline expects (matched to `package.json`).
+- Plugin onload sequence (`src/main.ts`) materializes the binary fetcher BEFORE the agent session boots so the SDK adapter resolves to the cached/fetched binary on every launch path (fresh install, upgrade, settings reload).
+
+### Tests
+
+- 944 → 1107 (+163) across new `src/release/*` suites (changelog, versioning, releaseAssets, releaseStatus, versionsJson, bootstrapRelease, version-bump CLI, extract-release-notes CLI), the binary fetcher (`BinaryFetcher.test.ts`, `BinaryFetcher.integrity.test.ts`), the CLI binary settings section (`CliBinarySection.test.ts`), and the plugin startup binary-resolution path (`main.startup.binary.test.ts`).
+
+### Security
+
+- Binary fetcher pins both the version (from `package-lock.json`-derived generator output) and the SHA-256 (in-repo manifest) before any binary is executed. Mismatched checksums abort the fetch and leave no partial file on disk. The fetcher is read-only on cache hits.
+- Release pipeline never executes untrusted release notes — `extract-release-notes.mjs` is a pure text slice from `CHANGELOG.md`, which is reviewed in the bump commit before the tag is pushed.
+
+### Dependencies
+
+- No SDK or runtime dependency changes from v0.5. The pinned-binary version tracks `@github/copilot-sdk` (already exact-pinned in v0.5).
+
+
 ## [0.5.0] - 2026-06-18
 
 ### Added
