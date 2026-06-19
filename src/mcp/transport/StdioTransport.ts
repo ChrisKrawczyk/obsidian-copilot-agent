@@ -219,9 +219,9 @@ export function resolveCommandForSpawn(
 function findOnPath(command: string, env: Record<string, string>): string | null {
   const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH");
   const pathValue = pathKey ? env[pathKey] : "";
-  for (const entry of pathValue.split(path.delimiter)) {
+  for (const entry of pathValue.split(path.win32.delimiter)) {
     if (!entry) continue;
-    const candidate = path.join(entry, command);
+    const candidate = path.win32.join(entry, command);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
