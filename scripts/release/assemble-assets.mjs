@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   REQUIRED_ASSET_FILES,
+  isWellFormedSourceManifest,
   validateReleaseAssets,
 } from "../../src/release/releaseAssets.ts";
 
@@ -133,14 +134,31 @@ function main() {
   // In bootstrap mode, if the source manifest's version doesn't match
   // the target, synthesize a manifest with the target version. Other
   // fields are preserved from the source. (Phase 3 spec line 434.)
+  // We only synthesize when the source manifest is itself well-formed
+  // (object with a non-empty string `version` field) — otherwise we
+  // would hide an invalid source manifest behind synthesis. The
+  // post-stage validator catches that case for non-bootstrap, but for
+  // bootstrap we must check the *source* manifest's shape here before
+  // overwriting, or downstream validation would only ever see the
+  // synthesized object.
   let stagedManifest = manifest;
-  if (bootstrap && manifest && manifest.version !== version) {
-    stagedManifest = { ...manifest, version };
-    writeFileSync(
-      join(stagedDir, "manifest.json"),
-      JSON.stringify(stagedManifest, null, 2) + "\n",
-      "utf8",
-    );
+  if (bootstrap) {
+    if (!isWellFormedSourceManifest(manifest)) {
+      console.error(
+        "[release:assemble] --bootstrap requires a well-formed source manifest.json with a non-empty `version` field (found: " +
+          JSON.stringify(manifest?.version ?? null) +
+          ")",
+      );
+      process.exit(1);
+    }
+    if (manifest.version !== version) {
+      stagedManifest = { ...manifest, version };
+      writeFileSync(
+        join(stagedDir, "manifest.json"),
+        JSON.stringify(stagedManifest, null, 2) + "\n",
+        "utf8",
+      );
+    }
   }
 
   const stagedFiles = readdirSync(stagedDir);

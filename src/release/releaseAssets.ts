@@ -99,6 +99,19 @@ export function validateVersionsJsonEntry(
 }
 
 /**
+ * Bootstrap pre-synthesis check: confirms the source `manifest.json`
+ * is itself well-formed (object with a non-empty string `version`)
+ * before the orchestrator overwrites it with a synthesized version.
+ * Without this guard, `--bootstrap` could silently hide a malformed
+ * source manifest behind the synthesis step.
+ */
+export function isWellFormedSourceManifest(manifest: unknown): boolean {
+  if (manifest === null || typeof manifest !== "object") return false;
+  const version = (manifest as { version?: unknown }).version;
+  return typeof version === "string" && version.length > 0;
+}
+
+/**
  * Compose the three primary validations into one bundle.
  *
  * `presentFiles` is the list of basenames staged in the release directory;

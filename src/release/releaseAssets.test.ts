@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   REQUIRED_ASSET_FILES,
+  isWellFormedSourceManifest,
   validateManifestVersion,
   validateReleaseAssets,
   validateRequiredAssetSet,
@@ -103,6 +104,32 @@ describe("validateVersionsJsonEntry", () => {
   it("fails when versions.json itself is missing/null", () => {
     const r = validateVersionsJsonEntry(null, "0.6.0");
     expect(r.ok).toBe(false);
+  });
+});
+
+describe("isWellFormedSourceManifest (bootstrap pre-synthesis guard)", () => {
+  it("accepts a manifest object with a non-empty string version", () => {
+    expect(isWellFormedSourceManifest({ version: "0.1.0" })).toBe(true);
+    expect(isWellFormedSourceManifest({ version: "0.6.0", name: "x" })).toBe(true);
+  });
+
+  it("rejects null", () => {
+    expect(isWellFormedSourceManifest(null)).toBe(false);
+  });
+
+  it("rejects non-object", () => {
+    expect(isWellFormedSourceManifest("0.1.0")).toBe(false);
+    expect(isWellFormedSourceManifest(123)).toBe(false);
+  });
+
+  it("rejects missing version field", () => {
+    expect(isWellFormedSourceManifest({ name: "x" })).toBe(false);
+  });
+
+  it("rejects empty-string or non-string version", () => {
+    expect(isWellFormedSourceManifest({ version: "" })).toBe(false);
+    expect(isWellFormedSourceManifest({ version: 123 })).toBe(false);
+    expect(isWellFormedSourceManifest({ version: null })).toBe(false);
   });
 });
 

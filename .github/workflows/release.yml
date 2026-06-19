@@ -60,10 +60,14 @@ jobs:
         run: npm run build
 
       - name: Assemble release assets
-        run: npm run release:assemble -- ${{ steps.tagver.outputs.version }}
+        env:
+          RELEASE_VERSION: ${{ steps.tagver.outputs.version }}
+        run: npm run release:assemble -- "$RELEASE_VERSION"
 
       - name: Extract release notes
-        run: npm run changelog:extract -- ${{ steps.tagver.outputs.version }} release-notes.md
+        env:
+          RELEASE_VERSION: ${{ steps.tagver.outputs.version }}
+        run: npm run changelog:extract -- "$RELEASE_VERSION" release-notes.md
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
