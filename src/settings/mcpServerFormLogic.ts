@@ -160,7 +160,9 @@ export function validateMcpServerForm(
             trustEpoch: "" as McpServerConfig["trustEpoch"],
             transport: "http",
             url: validation.url.href,
-            ...(authorization ? { authorization } : {}),
+            ...(authorization
+              ? { credentials: { kind: "static-bearer" as const, token: authorization } }
+              : {}),
             callTimeoutMs: callTimeoutSeconds * 1000,
           } as McpServerConfig;
         } catch (err) {

@@ -1,3 +1,14 @@
+import type { ServerCredentials } from "./credentials/CredentialTypes";
+
+export type {
+  ServerCredentials,
+  ServerCredentialKind,
+  NoneCredentials,
+  StaticBearerCredentials,
+  CommandBasedCredentials,
+  OAuthPkceCredentials,
+} from "./credentials/CredentialTypes";
+
 export type McpServerId = string & { readonly __brand: "McpServerId" };
 export type McpTrustEpoch = string & { readonly __brand: "McpTrustEpoch" };
 
@@ -32,7 +43,14 @@ export interface McpStdioServerConfig extends McpServerConfigBase {
 export interface McpHttpServerConfig extends McpServerConfigBase {
   transport: "http";
   url: string;
+  /**
+   * Legacy field retained for one release of read-only backward compatibility.
+   * New saves emit a canonical `credentials: { kind: "static-bearer", token }`
+   * instead. The settings store migrates legacy `authorization` to
+   * `credentials` on load (FR-001, FR-002, Phase 1 plan).
+   */
   authorization?: string;
+  credentials?: ServerCredentials;
 }
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;

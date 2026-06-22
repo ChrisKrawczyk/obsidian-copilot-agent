@@ -467,7 +467,14 @@ function shouldShowAuthorizationNotice(
   existing: McpServerConfig | undefined,
   next: McpServerConfig,
 ): boolean {
-  if (next.transport !== "http" || !next.authorization) return false;
+  if (next.transport !== "http") return false;
+  const nextHasAuth =
+    !!next.authorization || next.credentials?.kind === "static-bearer";
+  if (!nextHasAuth) return false;
   if (!existing) return true;
-  return existing.transport !== "http" || !existing.authorization;
+  if (existing.transport !== "http") return true;
+  const existingHasAuth =
+    !!existing.authorization ||
+    existing.credentials?.kind === "static-bearer";
+  return !existingHasAuth;
 }

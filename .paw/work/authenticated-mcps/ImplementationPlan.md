@@ -48,7 +48,7 @@ Add a `credentials` field to HTTP MCP server configs supporting three behavioral
 
 ## Phase Status
 
-- [ ] **Phase 1: Credential schema, types, and persistence round-trip** — Discriminated union; `oauth-pkce` reserved fields preserved.
+- [x] **Phase 1: Credential schema, types, and persistence round-trip** — Discriminated union; `oauth-pkce` reserved fields preserved.
 - [ ] **Phase 2: Pure credential resolver utility** — JSON path, expiry math, in-memory cache, rate limit; no I/O.
 - [ ] **Phase 3: Command runner backend with timeout** — Direct spawn, 15s cap, shared `findOnPath` extracted.
 - [ ] **Phase 4: HTTP transport integration + 401 retry + trust-epoch invariance** — Header stamped per request via resolver callback; exactly-one retry; grants survive rotation.

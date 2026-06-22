@@ -1,5 +1,12 @@
 import { Notice } from "obsidian";
 import type { PluginDataIO } from "../auth/TokenStore";
+import {
+  type CommandBasedCredentials,
+  type NoneCredentials,
+  type OAuthPkceCredentials,
+  type ServerCredentials,
+  type StaticBearerCredentials,
+} from "../mcp/credentials/CredentialTypes";
 import { computeTrustEpoch, normalizeServerId } from "../mcp/McpIdentity";
 import type {
   McpServerConfig,
@@ -79,7 +86,12 @@ export class McpSettingsStore {
     this.cached = valid;
     this.authorizationNoticeShown =
       raw?.mcpAuthorizationNoticeShown === true ||
-      valid.some((server) => server.transport === "http" && !!server.authorization);
+      valid.some(
+        (server) =>
+          server.transport === "http" &&
+          (!!server.authorization ||
+            server.credentials?.kind === "static-bearer"),
+      );
     this.notifyDroppedOnce(dropped);
     return this.snapshot();
   }
@@ -306,6 +318,18 @@ function parseServerConfig(
     ) {
       return { ok: false, label: id };
     }
+    const credentialsParse = parseCredentials(raw.credentials);
+    if (credentialsParse === "invalid") return { ok: false, label: id };
+    // Legacy migration: if no `credentials` block but `authorization` is set,
+    // synthesize `static-bearer` credentials in-memory. The legacy field stays
+    // on the parsed config so first-load reads do not rewrite the file; the
+    // canonical-form rewrite happens at persist time (see
+    // toPersistedServerConfig). Phase 1 plan, FR-002.
+    const credentials: ServerCredentials | undefined =
+      credentialsParse ??
+      (typeof raw.authorization === "string" && raw.authorization.length > 0
+        ? { kind: "static-bearer", token: raw.authorization }
+        : undefined);
     const config = {
       ...base,
       ...(callTimeoutMs ? { callTimeoutMs } : {}),
@@ -315,6 +339,7 @@ function parseServerConfig(
       transport: "http" as const,
       url: raw.url,
       ...(raw.authorization ? { authorization: raw.authorization } : {}),
+      ...(credentials ? { credentials } : {}),
     };
     return { ok: true, config: withTrustEpoch(config) };
   }
@@ -368,7 +393,23 @@ function normalizeCallTimeoutMs(raw: Record<string, unknown>): number | undefine
 
 function toPersistedServerConfig(server: McpServerConfig): McpServerConfig {
   const parsed = parseServerConfig(server);
-  return cloneServerConfig(parsed.ok ? parsed.config : server);
+  const canonical = parsed.ok ? parsed.config : server;
+  // Phase 1 plan: when a canonical `credentials: { kind: "static-bearer", ...}`
+  // block exists alongside the legacy `authorization` string, persist the
+  // canonical form only. This is the one-time migration that happens whenever
+  // the user touches the entry — load-time reads do not rewrite the file.
+  if (
+    canonical.transport === "http" &&
+    canonical.credentials &&
+    canonical.credentials.kind === "static-bearer" &&
+    typeof (canonical as { authorization?: unknown }).authorization === "string"
+  ) {
+    const { authorization: _drop, ...rest } = canonical as McpServerConfig & {
+      authorization?: string;
+    };
+    return cloneServerConfig(rest as McpServerConfig);
+  }
+  return cloneServerConfig(canonical);
 }
 
 function cloneServerConfig(server: McpServerConfig): McpServerConfig {
@@ -382,4 +423,95 @@ function discernLabel(entry: unknown): string {
     if (typeof raw.name === "string" && raw.name.length > 0) return raw.name;
   }
   return "(unknown)";
+}
+
+/**
+ * Parse the `credentials` block of a persisted HTTP MCP server entry.
+ *
+ * Returns `undefined` when the field is absent (caller may then synthesize
+ * from legacy `authorization`). Returns `"invalid"` when the field is
+ * present but malformed — caller must treat the whole entry as malformed
+ * so it lands in the dropped-entries notice (mirrors existing behavior for
+ * other invalid fields).
+ *
+ * For `oauth-pkce` the parser preserves the full input object verbatim
+ * (including unknown future keys) to satisfy SC-008's byte-equivalence
+ * obligation: the variant is reserved-but-inert in this release and any
+ * stored data must round-trip losslessly to a future plugin version that
+ * implements OAuth + PKCE.
+ */
+function parseCredentials(
+  value: unknown,
+): ServerCredentials | undefined | "invalid" {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "invalid";
+  const obj = value as Record<string, unknown>;
+  const kind = obj.kind;
+  if (kind === "none") {
+    const result: NoneCredentials = { kind: "none" };
+    return result;
+  }
+  if (kind === "static-bearer") {
+    if (typeof obj.token !== "string" || obj.token.length === 0) return "invalid";
+    const result: StaticBearerCredentials = {
+      kind: "static-bearer",
+      token: obj.token,
+    };
+    return result;
+  }
+  if (kind === "command-based") {
+    if (typeof obj.command !== "string" || obj.command.length === 0) return "invalid";
+    if (
+      obj.args !== undefined &&
+      (!Array.isArray(obj.args) || obj.args.some((arg) => typeof arg !== "string"))
+    ) {
+      return "invalid";
+    }
+    if (obj.tokenPath !== undefined && typeof obj.tokenPath !== "string") return "invalid";
+    if (obj.expiryPath !== undefined && typeof obj.expiryPath !== "string") return "invalid";
+    if (
+      obj.refreshBufferSeconds !== undefined &&
+      (typeof obj.refreshBufferSeconds !== "number" ||
+        !Number.isFinite(obj.refreshBufferSeconds) ||
+        obj.refreshBufferSeconds < 0)
+    ) {
+      return "invalid";
+    }
+    const result: CommandBasedCredentials = {
+      kind: "command-based",
+      command: obj.command,
+      ...(Array.isArray(obj.args) ? { args: [...(obj.args as string[])] } : {}),
+      ...(typeof obj.tokenPath === "string" ? { tokenPath: obj.tokenPath } : {}),
+      ...(typeof obj.expiryPath === "string" ? { expiryPath: obj.expiryPath } : {}),
+      ...(typeof obj.refreshBufferSeconds === "number"
+        ? { refreshBufferSeconds: obj.refreshBufferSeconds }
+        : {}),
+    };
+    return result;
+  }
+  if (kind === "oauth-pkce") {
+    // Required fields per FR-012; types validated, but the entire object is
+    // preserved (including any unknown future keys) so the persisted shape
+    // round-trips byte-equivalent to disk (SC-008).
+    if (typeof obj.authorizationEndpoint !== "string") return "invalid";
+    if (typeof obj.tokenEndpoint !== "string") return "invalid";
+    if (typeof obj.clientId !== "string") return "invalid";
+    if (
+      !Array.isArray(obj.scopes) ||
+      obj.scopes.some((scope) => typeof scope !== "string")
+    ) {
+      return "invalid";
+    }
+    if (obj.tenantId !== undefined && typeof obj.tenantId !== "string") return "invalid";
+    if (obj.redirectUri !== undefined && typeof obj.redirectUri !== "string") return "invalid";
+    if (obj.refreshTokenRef !== undefined && typeof obj.refreshTokenRef !== "string") return "invalid";
+    if (obj.pkceMethod !== undefined && typeof obj.pkceMethod !== "string") return "invalid";
+    // Preserve full object (including unknown future keys) verbatim.
+    const result: OAuthPkceCredentials = {
+      ...(obj as OAuthPkceCredentials),
+      kind: "oauth-pkce",
+    };
+    return result;
+  }
+  return "invalid";
 }
