@@ -1,11 +1,11 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
-import fs from "node:fs";
 import path from "node:path";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { buildStdioEnv } from "../stdioEnv";
 import { redactSensitive } from "../redactSensitive";
+import { findOnPath } from "./findOnPath";
 
 export const MCP_STDIO_FRAME_LIMIT_BYTES = 16 * 1024 * 1024;
 export const MCP_STDERR_RING_LIMIT_BYTES = 64 * 1024;
@@ -214,17 +214,6 @@ export function resolveCommandForSpawn(
     command: "cmd.exe",
     args: ["/d", "/s", "/c", resolved, ...args],
   };
-}
-
-function findOnPath(command: string, env: Record<string, string>): string | null {
-  const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH");
-  const pathValue = pathKey ? env[pathKey] : "";
-  for (const entry of pathValue.split(path.win32.delimiter)) {
-    if (!entry) continue;
-    const candidate = path.win32.join(entry, command);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return null;
 }
 
 function sanitizeError(err: unknown): Error {

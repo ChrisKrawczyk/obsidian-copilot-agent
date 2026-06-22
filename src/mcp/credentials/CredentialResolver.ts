@@ -9,6 +9,7 @@ import type { CommandRunner } from "./CommandRunner";
 import { extractAtPath } from "./jsonPath";
 import { parseExpiry } from "./expiry";
 import { redactSensitive } from "../redactSensitive";
+import { parseCommandLine } from "./argv";
 
 /** Hard timeout for credential-command execution per FR-015. */
 export const COMMAND_TIMEOUT_MS = 15_000;
@@ -248,20 +249,6 @@ function buildArgv(credentials: CommandBasedCredentials): string[] {
     return [credentials.command, ...credentials.args];
   }
   return parseCommandLine(credentials.command);
-}
-
-/**
- * Tokenize a command-line string into argv. Supports double / single
- * quoted segments. Matches the parser used by the settings form (FR-003).
- */
-function parseCommandLine(raw: string): string[] {
-  const argv: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(raw)) !== null) {
-    argv.push(match[1] ?? match[2] ?? match[3]);
-  }
-  return argv;
 }
 
 function prefixBearerIfMissing(token: string): string {
