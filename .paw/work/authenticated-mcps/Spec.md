@@ -85,7 +85,7 @@ Acceptance Scenarios:
 ### Functional Requirements
 
 - FR-001: The plugin SHALL support attaching one credential variant to each HTTP MCP server. Variants supported in this release: none, static-bearer, command-based. (Stories: P1, P2, P3)
-- FR-002: The plugin SHALL persist credential configuration per server in the same encrypted-at-rest settings store currently used for sensitive plugin configuration. (Stories: P1, P2, P3)
+- FR-002: The plugin SHALL persist credential configuration per server in the existing plugin settings store. Code research confirmed there is no encryption / OS-keychain helper today; settings are stored as plaintext JSON inside the vault's plugin data file. Static-bearer token values therefore land on disk in plaintext — the documentation for this feature SHALL state this explicitly and recommend the command-based variant (which never persists token material) for long-lived secrets. (Stories: P1, P2, P3)
 - FR-003: For `command-based` credentials, the plugin SHALL execute the configured command using a direct process spawn (no shell interpolation) and parse the resulting stdout as JSON. (Stories: P1, P2)
 - FR-004: For `command-based` credentials, the plugin SHALL extract the bearer token and expiry timestamp from the parsed JSON, using configurable JSON paths whose defaults match the Azure CLI output (`accessToken`, `expiresOn`). (Stories: P1, P2)
 - FR-005: The plugin SHALL cache resolved credentials in memory keyed by server id and re-resolve them when the cached token is within the configured refresh buffer of expiry. (Stories: P1, P2)
@@ -191,6 +191,7 @@ Out of Scope:
 - **Risk**: 401-retry loops against a server that always returns 401 saturate the chat with errors. **Mitigation**: FR-007 caps the retry at exactly one re-resolve attempt per failed request; subsequent failures within a short window for the same server surface a single rolled-up error, not one per tool call.
 - **Risk**: Microsoft changes the M365 MCP server endpoint, app id, or scope semantics, breaking the preset. **Mitigation**: The preset is a default users can edit. Settings UI shows the resolved fields; users can pivot to a custom command-based config without a plugin update.
 - **Risk**: A user's tenant has different `MCP.*` scope availability and the preset silently issues a token that gets 403'd. **Mitigation**: FR-014 + the 403 edge case ensure the user sees a clear "scopes not consented" message with a docs link, distinguishing it from generic auth failure.
+- **Risk**: Static-bearer tokens persist to disk in plaintext (the plugin has no OS-keychain or encryption helper today). **Mitigation**: FR-002 makes this explicit and the user-facing docs (per FR-008 supporting material) recommend the command-based variant for long-lived secrets. Static-bearer is positioned as a quick-experiment / short-lived-token path. Adding an OS-keychain helper is tracked as future work but explicitly out of scope for this release; the discriminated-union credential model can adopt encryption later without breaking persisted configs.
 
 ## References
 
