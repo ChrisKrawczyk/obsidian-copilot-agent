@@ -187,6 +187,7 @@ Add a `credentials` field to HTTP MCP server configs supporting three behavioral
     - Second 401 throws to chat with rolled-up error format.
     - 403 does NOT trigger retry and surfaces consent message.
     - 200 after invalidation is the happy path.
+    - **Credential-command failure → chat**: when the resolver throws a `command-failed` or `timeout` structured error during `callTool`, the manager surfaces a single chat error composed via the injected `RemediationFormatter` (using `DefaultRemediationFormatter` in this test) — value/format assertions cover both error kinds.
     - **Trust-epoch invariance**: changing only the `credentials` field on an HTTP config produces an identical trust epoch and runtime identity key as before (FR-011).
     - **Grant-survival**: `resolver.invalidate(serverId)` on 401 does not touch SafetyPolicy session grants.
   - `src/mcp/McpIdentity.test.ts`: assertion that the trust-epoch input set excludes the `credentials` field.
