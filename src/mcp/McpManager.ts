@@ -3,6 +3,7 @@ import type {
   McpServerId,
   McpServerRuntimeSnapshot,
   McpToolInventoryEntry,
+  ServerCredentials,
 } from "./McpTypes";
 import {
   MCP_CALL_TIMEOUT_MS,
@@ -13,6 +14,18 @@ import {
 import { McpNotificationQueue } from "./McpNotificationQueue";
 import { McpReconnectPolicy } from "./McpReconnectPolicy";
 import { redactSensitive } from "./redactSensitive";
+import {
+  CredentialResolutionFailed,
+  type CredentialResolver,
+  type CredentialResolutionError,
+  type ResolvedCredential,
+} from "./credentials/CredentialResolver";
+import {
+  DefaultRemediationFormatter,
+  type RemediationContext,
+  type RemediationFormatter,
+} from "./credentials/RemediationFormatter";
+import { McpHttpError } from "./McpHttpError";
 
 export interface McpManagerOptions extends McpServerRuntimeOptions {
   serversProvider: () => McpServerConfig[];
@@ -21,6 +34,10 @@ export interface McpManagerOptions extends McpServerRuntimeOptions {
   runtimeFactory?: (config: McpServerConfig, options: McpServerRuntimeOptions) => McpServerRuntime;
   settleTrackedCalls?: (serverId: McpServerId) => void | Promise<void>;
   builtinToolNames?: readonly string[];
+  /** Optional credential resolver (Phase 4). When absent, HTTP servers fall back to `config.authorization`. */
+  credentialResolver?: CredentialResolver;
+  /** Optional remediation formatter (Phase 4). Defaults to `DefaultRemediationFormatter`. */
+  remediationFormatter?: RemediationFormatter;
 }
 
 export class McpManager {
@@ -33,8 +50,13 @@ export class McpManager {
   private reconnectPolicies = new Map<McpServerId, McpReconnectPolicy>();
   private notificationQueue = new McpNotificationQueue({ refresh: (serverId) => this.refreshInventory(serverId) });
   private unloading = false;
+  private readonly remediationFormatter: RemediationFormatter;
+  /** Tracks whether the most recent HTTP call already retried after a 401 (prevents re-entrant retry storms). */
+  private retryGuard = new Set<McpServerId>();
 
-  constructor(private readonly options: McpManagerOptions) {}
+  constructor(private readonly options: McpManagerOptions) {
+    this.remediationFormatter = options.remediationFormatter ?? new DefaultRemediationFormatter();
+  }
 
   async enable(serverId: McpServerId): Promise<void> {
     const config = this.find(serverId);
@@ -228,16 +250,77 @@ export class McpManager {
     this.notificationQueue.beginCall(serverId);
     try {
       const signal = options.signal;
-      const call = typeof (runtime as McpServerRuntime & { callToolCancellable?: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable === "function"
-        ? (runtime as McpServerRuntime & { callToolCancellable: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable(toolName, args, config.callTimeoutMs, signal)
-        : runtime.callTool(toolName, args, config.callTimeoutMs);
-      const result = await withTimeout(
-        call,
-        config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS,
-        "MCP tool call timed out.",
-        this.options.setTimeout,
-        this.options.clearTimeout,
-      );
+      const invoke = (): Promise<unknown> => {
+        const call = typeof (runtime as McpServerRuntime & { callToolCancellable?: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable === "function"
+          ? (runtime as McpServerRuntime & { callToolCancellable: (name: string, args: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown> }).callToolCancellable(toolName, args, config.callTimeoutMs, signal)
+          : runtime.callTool(toolName, args, config.callTimeoutMs);
+        return withTimeout(
+          call,
+          config.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS,
+          "MCP tool call timed out.",
+          this.options.setTimeout,
+          this.options.clearTimeout,
+        );
+      };
+      let result: unknown;
+      try {
+        result = await invoke();
+      } catch (firstErr) {
+        // FR-014 + SC-004: credential resolution failures propagate up from
+        // the dynamic getAuthorization callback. Surface them via the
+        // formatter so the user sees a command-failed / timeout hint
+        // instead of a downstream HTTP error.
+        if (firstErr instanceof CredentialResolutionFailed) {
+          throw this.formatResolutionError(config, firstErr);
+        }
+        const httpErr = extractMcpHttpError(firstErr);
+        // FR-005, FR-007: on a 401 we invalidate the credential cache and
+        // retry exactly once. A second 401 is surfaced through the
+        // remediation formatter rather than retried again.
+        if (
+          httpErr?.status === 401 &&
+          config.transport === "http" &&
+          this.options.credentialResolver &&
+          !this.retryGuard.has(serverId)
+        ) {
+          this.retryGuard.add(serverId);
+          try {
+            this.options.credentialResolver.invalidate(serverId);
+            result = await invoke();
+          } catch (retryErr) {
+            const retryHttp = extractMcpHttpError(retryErr);
+            if (retryHttp?.status === 401) {
+              // SM-6 + FR-009: a second 401 means the freshly-resolved
+              // credentials were also rejected. Update the runtime snapshot
+              // so the settings row reflects the rejection (the previous
+              // implementation only updated the chat error).
+              this.recordServerCredentialRejection(
+                serverId,
+                config,
+                retryHttp.wwwAuthenticate ?? undefined,
+              );
+              throw this.formatRemediationError(config, "unauthorized", retryHttp.wwwAuthenticate ?? undefined);
+            }
+            // PA-3: if the retry path itself failed during credential
+            // resolution (e.g. `az` now exits non-zero), reformat through
+            // the same path used on the first try so the user-facing
+            // error retains the `az login` hint instead of being
+            // stringified as a raw `CredentialResolutionFailed`.
+            if (retryErr instanceof CredentialResolutionFailed) {
+              throw this.formatResolutionError(config, retryErr);
+            }
+            throw retryErr;
+          } finally {
+            this.retryGuard.delete(serverId);
+          }
+        } else if (httpErr?.status === 403) {
+          // FR-005: 403 is a consent / authorization failure, not a stale
+          // token — surface remediation without retrying.
+          throw this.formatRemediationError(config, "denied", httpErr.wwwAuthenticate ?? undefined);
+        } else {
+          throw firstErr;
+        }
+      }
       if ((this.generations.get(serverId) ?? 0) !== generation || !this.find(serverId).enabled) {
         throw cancelledError("MCP tool call was cancelled.");
       }
@@ -261,6 +344,45 @@ export class McpManager {
     }
   }
 
+  private formatRemediationError(
+    config: McpServerConfig,
+    kind: "unauthorized" | "denied",
+    detail: string | undefined,
+  ): Error {
+    const credentials: ServerCredentials | undefined =
+      config.transport === "http" ? config.credentials : undefined;
+    const variant: ServerCredentials["kind"] = credentials?.kind ?? "none";
+    const command =
+      credentials && credentials.kind === "command-based" ? credentials.command : null;
+    const ctx: RemediationContext = {
+      variant,
+      command,
+      lastTenantId:
+        this.options.credentialResolver?.getLastKnownTenantId?.(config.id) ?? null,
+      error: { kind, detail },
+    };
+    const remediation = this.remediationFormatter.format(ctx);
+    return new Error(redactSensitive(formatMessageWithCopyable(remediation.text, remediation.copyable)));
+  }
+
+  private formatResolutionError(config: McpServerConfig, err: CredentialResolutionFailed): Error {
+    const credentials: ServerCredentials | undefined =
+      config.transport === "http" ? config.credentials : undefined;
+    const variant: ServerCredentials["kind"] = credentials?.kind ?? "none";
+    const command =
+      credentials && credentials.kind === "command-based" ? credentials.command : null;
+    const kind: "timeout" | "command-failed" =
+      err.error.kind === "timeout" ? "timeout" : "command-failed";
+    const remediation = this.remediationFormatter.format({
+      variant,
+      command,
+      lastTenantId:
+        this.options.credentialResolver?.getLastKnownTenantId?.(config.id) ?? null,
+      error: { kind, detail: err.error.detail },
+    });
+    return new Error(redactSensitive(formatMessageWithCopyable(remediation.text, remediation.copyable)));
+  }
+
   getRuntimeForTest(serverId: McpServerId): McpServerRuntime | undefined {
     return this.runtimes.get(serverId);
   }
@@ -273,12 +395,185 @@ export class McpManager {
   private getOrCreate(config: McpServerConfig): McpServerRuntime {
     const existing = this.runtimes.get(config.id);
     if (existing) return existing;
+    const runtimeOptions: McpServerRuntimeOptions = {
+      ...this.options,
+      onListChanged: (id) => this.handleListChanged(id),
+      // Bind a dynamic Authorization provider per server so HTTP runtimes
+      // pick up credential rotations without rebinding the transport.
+      getAuthorization: config.transport === "http"
+        ? () => this.resolveAuthorizationForServer(config.id)
+        : undefined,
+    };
     const runtime = this.options.runtimeFactory
-      ? this.options.runtimeFactory(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) })
-      : new McpServerRuntime(config, { ...this.options, onListChanged: (id) => this.handleListChanged(id) });
+      ? this.options.runtimeFactory(config, runtimeOptions)
+      : new McpServerRuntime(config, runtimeOptions);
     this.runtimes.set(config.id, runtime);
     this.runtimeIdentityKeys.set(config.id, runtimeIdentityKey(config));
     return runtime;
+  }
+
+  /**
+   * Phase 4: resolve the dynamic Authorization header for an HTTP server.
+   *
+   * Returns the authorization string (Bearer-prefixed), or `null` when the
+   * server has no credentials configured. When the resolver throws and no
+   * legacy `config.authorization` fallback exists, the error is re-thrown
+   * so it propagates through `getAuthorization()` → fetch wrapper → SDK →
+   * `callTool` catch block, which renders a remediation hint via the
+   * formatter. This is the FR-014 / SC-004 contract: a failed credential
+   * command surfaces a `command-failed` chat error, not a generic 401.
+   */
+  private async resolveAuthorizationForServer(serverId: McpServerId): Promise<string | null> {
+    const config = this.options.serversProvider().find((s) => s.id === serverId);
+    if (!config || config.transport !== "http") return null;
+    const credentials: ServerCredentials | undefined = config.credentials;
+    const resolver = this.options.credentialResolver;
+    if (!credentials || !resolver) {
+      return config.authorization ?? null;
+    }
+    try {
+      const resolved: ResolvedCredential | null = await resolver.resolve(serverId, credentials);
+      this.recordCredentialSuccess(serverId, credentials.kind, resolved);
+      return resolved?.authorization ?? config.authorization ?? null;
+    } catch (err) {
+      this.recordCredentialFailure(serverId, credentials, err);
+      // FR-014 + SC-004: if no static fallback exists, propagate so the chat
+      // error reports the underlying credential failure (command-failed /
+      // timeout) rather than a downstream 401 with no token to retry with.
+      if (!config.authorization) throw err;
+      return config.authorization;
+    }
+  }
+
+  private recordCredentialSuccess(
+    serverId: McpServerId,
+    variant: ServerCredentials["kind"],
+    resolved: ResolvedCredential | null,
+  ): void {
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime?.setCredentialSnapshot) return;
+    if (!resolved) {
+      runtime.setCredentialSnapshot({ state: "not-applicable", variant });
+      return;
+    }
+    // SM-3 / Phase 5 minimum: when expiry is known, also compute the next
+    // refresh point (expiry minus refresh buffer) so the settings row can
+    // render a "Next refresh in N min" hint.
+    const config = this.options.serversProvider().find((s) => s.id === serverId);
+    const credentials: ServerCredentials | undefined =
+      config && config.transport === "http" ? config.credentials : undefined;
+    const refreshBufferMs =
+      credentials && credentials.kind === "command-based"
+        ? (credentials.refreshBufferSeconds ?? 300) * 1000
+        : 0;
+    const nextRefreshAt =
+      resolved.expiresAt != null
+        ? Math.max(0, resolved.expiresAt - refreshBufferMs)
+        : null;
+    runtime.setCredentialSnapshot({
+      state: "ok",
+      variant,
+      ...(resolved.expiresAt != null ? { expiresAt: resolved.expiresAt } : {}),
+      ...(nextRefreshAt != null ? { nextRefreshAt } : {}),
+    });
+  }
+
+  /**
+   * SM-6 / FR-009: called when the server returns 401 even after the
+   * 401-retry path re-resolved credentials. Updates the runtime snapshot so
+   * the settings row shows the rejection (the previous implementation only
+   * surfaced the rejection through the chat error).
+   */
+  private recordServerCredentialRejection(
+    serverId: McpServerId,
+    config: McpServerConfig,
+    wwwAuthenticate: string | undefined,
+  ): void {
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime?.setCredentialSnapshot) return;
+    const credentials: ServerCredentials | undefined =
+      config.transport === "http" ? config.credentials : undefined;
+    if (!credentials) return;
+    const remediation = this.remediationFormatter.format({
+      variant: credentials.kind,
+      command: credentials.kind === "command-based" ? credentials.command : null,
+      lastTenantId: this.options.credentialResolver?.getLastKnownTenantId?.(serverId) ?? null,
+      error: { kind: "unauthorized", detail: wwwAuthenticate },
+    });
+    runtime.setCredentialSnapshot({
+      state: "failed",
+      variant: credentials.kind,
+      lastError: redactSensitive("Credentials rejected by server."),
+      remediation: redactSensitive(remediation.text),
+      ...(remediation.copyable ? { copyable: redactSensitive(remediation.copyable) } : {}),
+    });
+  }
+
+  private recordCredentialFailure(
+    serverId: McpServerId,
+    credentials: ServerCredentials,
+    err: unknown,
+  ): void {
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime?.setCredentialSnapshot) return;
+    const errorKind = mapResolutionErrorKind(err);
+    const remediation = this.remediationFormatter.format({
+      variant: credentials.kind,
+      command: credentials.kind === "command-based" ? credentials.command : null,
+      lastTenantId: this.options.credentialResolver?.getLastKnownTenantId?.(serverId) ?? null,
+      error: { kind: errorKind, detail: extractResolutionDetail(err) },
+    });
+    runtime.setCredentialSnapshot({
+      state: "failed",
+      variant: credentials.kind,
+      lastError: redactSensitive(extractResolutionDetail(err) ?? "Credential resolution failed."),
+      remediation: redactSensitive(remediation.text),
+      ...(remediation.copyable ? { copyable: redactSensitive(remediation.copyable) } : {}),
+    });
+    this.options.notify?.(redactSensitive(`[Copilot Agent] ${formatMessageWithCopyable(remediation.text, remediation.copyable)}`));
+  }
+
+  /**
+   * Phase 4 hook: settings UI calls this when the credentials block (and only
+   * the credentials block) of a server changes. Invalidates the resolver's
+   * cache so the next request triggers a fresh resolution. MUST NOT revoke
+   * SafetyPolicy grants (FR-011: credential edits leave trust-epoch invariant).
+   */
+  onCredentialConfigChanged(serverId: McpServerId): void {
+    this.options.credentialResolver?.invalidate(serverId);
+  }
+
+  /**
+   * Phase 4 surface (full impl in Phase 5 settings UI): spin up a transient
+   * runtime, attempt initialize, then tear down — without touching the live
+   * runtime / inventory / grants. Returns a structured result the UI can
+   * render. This skeleton wires through the same credential resolver so
+   * test-time credential failures surface identical messaging to live use.
+   */
+  async testConnection(serverId: McpServerId): Promise<{ ok: true } | { ok: false; error: string }> {
+    const config = this.find(serverId);
+    if (config.transport !== "http") {
+      return { ok: false, error: "testConnection currently supports HTTP servers only." };
+    }
+    const runtimeOptions: McpServerRuntimeOptions = {
+      ...this.options,
+      getAuthorization: () => this.resolveAuthorizationForServer(serverId),
+    };
+    const transient = this.options.runtimeFactory
+      ? this.options.runtimeFactory(config, runtimeOptions)
+      : new McpServerRuntime(config, runtimeOptions);
+    try {
+      await transient.connect({ manual: true });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: redactSensitive(err instanceof Error ? err.message : String(err)) };
+    } finally {
+      try {
+        await transient.unload();
+      } catch {
+        // ignore teardown errors — transient resource only
+      }
+    }
   }
 
   private async rebindIfRuntimeIdentityChanged(config: McpServerConfig): Promise<void> {
@@ -452,4 +747,45 @@ function runtimeIdentityKey(config: McpServerConfig): string {
           url: config.url,
         },
   );
+}
+
+function extractMcpHttpError(err: unknown): McpHttpError | null {
+  if (err instanceof McpHttpError) return err;
+  // SDK transports may wrap errors thrown from the fetch layer. Walk the
+  // common nesting points so a wrapped 401 is still detected.
+  const candidates: unknown[] = [];
+  if (err && typeof err === "object") {
+    const e = err as { cause?: unknown; originalError?: unknown; error?: unknown };
+    candidates.push(e.cause, e.originalError, e.error);
+  }
+  for (const candidate of candidates) {
+    if (candidate instanceof McpHttpError) return candidate;
+  }
+  return null;
+}
+
+function mapResolutionErrorKind(err: unknown): "command-failed" | "timeout" | "unauthorized" {
+  if (err instanceof CredentialResolutionFailed) {
+    const e: CredentialResolutionError = err.error;
+    if (e.kind === "timeout") return "timeout";
+    return "command-failed";
+  }
+  return "command-failed";
+}
+
+function extractResolutionDetail(err: unknown): string | undefined {
+  if (err instanceof CredentialResolutionFailed) return err.error.detail;
+  if (err instanceof Error) return err.message;
+  return undefined;
+}
+
+/**
+ * PA-1 / FR-014: append `Run: <copyable>` to the user-facing error message
+ * when the formatter produced a copyable remediation command (e.g.
+ * `az login --tenant <id>`). Single source of truth so chat error and
+ * settings row stay in sync.
+ */
+function formatMessageWithCopyable(text: string, copyable: string | undefined): string {
+  if (!copyable) return text;
+  return `${text}\nRun: ${copyable}`;
 }

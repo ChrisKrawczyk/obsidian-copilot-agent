@@ -74,6 +74,58 @@ describe("mcpServerFormLogic", () => {
     expect(buildHeaderDisplay({ authorization: "Bearer secret" }, true)[0]).toMatchObject({ value: "Bearer secret", redacted: false });
   });
 
+  test("emits canonical static-bearer credentials for HTTP forms with an Authorization value (Phase 1 plan)", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "http_auth",
+        transport: "http",
+        url: "https://example.com/mcp",
+        authorization: "Bearer secret",
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.config).toMatchObject({
+      transport: "http",
+      url: "https://example.com/mcp",
+      credentials: { kind: "static-bearer", token: "Bearer secret" },
+    });
+    // Canonical-only: the legacy `authorization` field is no longer emitted
+    // by the form. Persisted entries that still carry it are migrated by
+    // the settings store on load and dropped on first save.
+    expect(result.config).not.toHaveProperty("authorization");
+  });
+
+  test("omits the credentials field entirely for unauthenticated HTTP forms (preserves variant=none behavior)", () => {
+    const result = validateMcpServerForm(
+      { id: "http_noauth", transport: "http", url: "https://example.com/mcp" },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.config).toMatchObject({
+      transport: "http",
+      url: "https://example.com/mcp",
+    });
+    expect(result.config).not.toHaveProperty("credentials");
+    expect(result.config).not.toHaveProperty("authorization");
+  });
+
+  test("reads Authorization from the headers map and emits canonical static-bearer credentials", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "http_hdr",
+        transport: "http",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer from-headers" },
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.config).toMatchObject({
+      credentials: { kind: "static-bearer", token: "Bearer from-headers" },
+    });
+  });
+
   test("classifies loopback and https public URLs without warning", () => {
     const loopback = validateMcpServerForm({ id: "local", transport: "http", url: "http://127.0.0.1:3000/mcp" }, ctx);
     const https = validateMcpServerForm({ id: "pub", transport: "http", url: "https://example.com/mcp" }, ctx);

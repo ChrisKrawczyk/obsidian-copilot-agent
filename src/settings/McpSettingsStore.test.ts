@@ -80,7 +80,7 @@ describe("McpSettingsStore", () => {
     expect(persisted.conversations).toEqual([{ id: "c1" }]);
   });
 
-  it("round-trips stdio, HTTP, unknown future keys, and static Authorization", async () => {
+  it("round-trips stdio + HTTP entries, preserves unknown future keys, and migrates legacy Authorization to canonical credentials", async () => {
     const io = memoryIo({ mcpServers: [stdio(), { ...http(), futureHttp: "yes" }] });
     const store = new McpSettingsStore(io);
     const loaded = await store.load();
@@ -92,11 +92,15 @@ describe("McpSettingsStore", () => {
       args: ["server.js"],
       future: { keep: true },
     });
+    // Phase 1: legacy `authorization` string is migrated to canonical
+    // `credentials: { kind: "static-bearer", token }` on first save and the
+    // legacy field is dropped from disk. Unknown future keys still survive.
     expect(saved[1]).toMatchObject({
       transport: "http",
-      authorization: "Bearer static",
+      credentials: { kind: "static-bearer", token: "Bearer static" },
       futureHttp: "yes",
     });
+    expect((saved[1] as Record<string, unknown>).authorization).toBeUndefined();
   });
 
   it("migrates legacy callTimeoutSeconds to canonical callTimeoutMs", async () => {
@@ -155,5 +159,186 @@ describe("McpSettingsStore", () => {
     await store.setEnabled(normalizeServerId("alpha"), false);
     await store.remove(normalizeServerId("alpha"));
     expect(seen).toEqual([1, 1, 0]);
+  });
+
+  describe("credentials variants (FR-001, FR-002, FR-012)", () => {
+    function httpWithCreds(credentials: unknown): Record<string, unknown> {
+      return {
+        id: "http_server",
+        name: "HTTP",
+        enabled: true,
+        transport: "http",
+        url: "https://example.com/mcp",
+        credentials,
+      };
+    }
+
+    it("parses `none` credentials and persists them losslessly", async () => {
+      const io = memoryIo({ mcpServers: [httpWithCreds({ kind: "none" })] });
+      const store = new McpSettingsStore(io);
+      const loaded = await store.load();
+      expect((loaded[0] as { credentials?: unknown }).credentials).toEqual({
+        kind: "none",
+      });
+      await store.save();
+      const saved = (io.peek() as { mcpServers: Record<string, unknown>[] })
+        .mcpServers[0];
+      expect(saved.credentials).toEqual({ kind: "none" });
+    });
+
+    it("parses `static-bearer` credentials and shows the authorization notice", async () => {
+      const io = memoryIo({
+        mcpServers: [
+          httpWithCreds({ kind: "static-bearer", token: "Bearer abc" }),
+        ],
+      });
+      const store = new McpSettingsStore(io);
+      await store.load();
+      expect(store.hasAuthorizationNoticeShown()).toBe(true);
+    });
+
+    it("parses `command-based` credentials with optional fields and persists them losslessly", async () => {
+      const credentials = {
+        kind: "command-based",
+        command: "az account get-access-token --scope foo --output json",
+        args: ["foo", "bar"],
+        tokenPath: "accessToken",
+        expiryPath: "expiresOn",
+        refreshBufferSeconds: 600,
+      };
+      const io = memoryIo({ mcpServers: [httpWithCreds(credentials)] });
+      const store = new McpSettingsStore(io);
+      const loaded = await store.load();
+      expect((loaded[0] as { credentials?: unknown }).credentials).toEqual(
+        credentials,
+      );
+      await store.save();
+      const saved = (io.peek() as { mcpServers: Record<string, unknown>[] })
+        .mcpServers[0];
+      expect(saved.credentials).toEqual(credentials);
+    });
+
+    it("rejects malformed `command-based` credentials (missing required command)", async () => {
+      const notify = vi.fn();
+      const io = memoryIo({
+        mcpServers: [httpWithCreds({ kind: "command-based" })],
+      });
+      const store = new McpSettingsStore(io, notify);
+      expect(await store.load()).toHaveLength(0);
+      expect(notify).toHaveBeenCalled();
+    });
+
+    it("rejects unknown credential kinds", async () => {
+      const notify = vi.fn();
+      const io = memoryIo({
+        mcpServers: [httpWithCreds({ kind: "bogus", anything: "yes" })],
+      });
+      const store = new McpSettingsStore(io, notify);
+      expect(await store.load()).toHaveLength(0);
+      expect(notify).toHaveBeenCalled();
+    });
+
+    it("round-trips the full `oauth-pkce` reserved field set with byte equivalence (SC-008, FR-012)", async () => {
+      // FR-012 enumerates 9 fields. The persisted shape must round-trip
+      // byte-equivalent through save -> load -> save so a future plugin
+      // version implementing OAuth + PKCE can read configs written today
+      // without migration loss.
+      const credentials = {
+        kind: "oauth-pkce",
+        authorizationEndpoint: "https://login.example.com/oauth/authorize",
+        tokenEndpoint: "https://login.example.com/oauth/token",
+        clientId: "client-abc-123",
+        tenantId: "tenant-xyz-789",
+        scopes: ["openid", "profile", "https://api.example.com/.default"],
+        redirectUri: "obsidian://copilot-agent/oauth/callback",
+        refreshTokenRef: "ref:keychain:server-id:refresh",
+        pkceMethod: "S256",
+        // Unknown future keys must round-trip too — the index signature on
+        // OAuthPkceCredentials preserves them so a future plugin version
+        // can read them after introducing the field.
+        deviceCodeEndpoint: "https://login.example.com/oauth/devicecode",
+        customExtension: { audit: true, count: 7 },
+      };
+      const io = memoryIo({ mcpServers: [httpWithCreds(credentials)] });
+      const store = new McpSettingsStore(io);
+      await store.load();
+      await store.save();
+      const firstSave = (io.peek() as { mcpServers: Record<string, unknown>[] })
+        .mcpServers[0];
+      const firstSaveJson = JSON.stringify(firstSave.credentials);
+      // Save -> load -> save second round must be byte-equivalent on the
+      // credentials block.
+      const store2 = new McpSettingsStore(io);
+      await store2.load();
+      await store2.save();
+      const secondSave = (
+        io.peek() as { mcpServers: Record<string, unknown>[] }
+      ).mcpServers[0];
+      expect(JSON.stringify(secondSave.credentials)).toBe(firstSaveJson);
+      // Every enumerated FR-012 field survives by value
+      expect(secondSave.credentials).toMatchObject(credentials);
+    });
+
+    it("migrates legacy `authorization` to `credentials` on load and drops the legacy field on first save", async () => {
+      const io = memoryIo({
+        mcpServers: [
+          {
+            id: "legacy",
+            name: "Legacy",
+            enabled: true,
+            transport: "http",
+            url: "https://example.com/mcp",
+            authorization: "Bearer legacy",
+          },
+        ],
+      });
+      const store = new McpSettingsStore(io);
+      const loaded = await store.load();
+      // In-memory migration: synthesize static-bearer credentials. The
+      // legacy `authorization` field stays on the in-memory shape so that
+      // a load-without-save does not rewrite the file on disk.
+      expect((loaded[0] as { credentials?: unknown }).credentials).toEqual({
+        kind: "static-bearer",
+        token: "Bearer legacy",
+      });
+      expect(
+        (loaded[0] as { authorization?: unknown }).authorization,
+      ).toBe("Bearer legacy");
+      await store.save();
+      // After save, the legacy field is gone from disk; only canonical
+      // `credentials` remains.
+      const saved = (io.peek() as { mcpServers: Record<string, unknown>[] })
+        .mcpServers[0];
+      expect(saved.authorization).toBeUndefined();
+      expect(saved.credentials).toEqual({
+        kind: "static-bearer",
+        token: "Bearer legacy",
+      });
+    });
+
+    it("never serializes runtime credential status fields (FR-002 plaintext scope)", async () => {
+      // Confirms that adding `credentials` does not inadvertently widen the
+      // runtime-field strip path. A future runtime snapshot field like
+      // `credentialStatus` injected onto a server entry must still be
+      // dropped by stripRuntimeFields on save.
+      const io = memoryIo({
+        mcpServers: [
+          {
+            ...httpWithCreds({ kind: "static-bearer", token: "Bearer x" }),
+            status: "connected",
+          },
+        ],
+      });
+      const store = new McpSettingsStore(io);
+      await store.load();
+      await store.save();
+      const saved = (io.peek() as { mcpServers: Record<string, unknown>[] })
+        .mcpServers[0];
+      expect(saved.status).toBeUndefined();
+      expect(saved.credentials).toEqual({
+        kind: "static-bearer",
+        token: "Bearer x",
+      });
+    });
   });
 });

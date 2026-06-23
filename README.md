@@ -2,7 +2,21 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.6 — First release distributed via [BRAT](https://github.com/TfTHacker/obsidian42-brat). Adds an in-plugin Copilot CLI binary fetcher (no manual binary copy required) and the in-repo release tooling (version-bump, GitHub Actions release workflow, release agent under `.copilot/agents/release/`). Builds on v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+> **Status:** v0.7 — Adds authenticated MCP server support and the first built-in preset (Microsoft 365 Graph via Azure CLI). Builds on v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+
+## What's new in v0.7
+
+- **Authenticated MCP servers.** HTTP MCP servers can now carry credentials that the plugin resolves and refreshes per request. Three credential variants are supported: `none`, `static-bearer` (token stored in plaintext, like v0.5/v0.6), and `command-based` (token resolved by spawning a command, never persisted). A fourth `oauth-pkce` shape is reserved in the schema and round-trips losslessly for forward compatibility.
+- **Microsoft 365 Graph preset (via Azure CLI).** Settings → MCP Servers → Add → preset dropdown ships **Microsoft 365 Graph (via Azure CLI)**. Selecting it pre-fills the entire form; with `az login` complete, **Test connection** succeeds and identity-level Graph tools become available in chat. Full walkthrough in [`docs/m365-graph-mcp.md`](docs/m365-graph-mcp.md).
+- **One-shot 401 retry with cache invalidation.** A 401 from a credential-bearing request invalidates the in-memory token cache for that server and retries the call exactly once. No chat-visible reconnect for normal expiry boundaries.
+- **Inline preflight install hint.** Selecting a preset whose command is not on PATH surfaces an inline install hint in the form, before Save. Hints are non-blocking — Save always proceeds.
+- **No new persistence risk for command-based credentials.** Resolved tokens live in memory only; never written to `data.json`, never logged, never appear in Notices or error messages.
+
+### Scope reality for the M365 Graph preset
+
+The shipped M365 Graph preset uses the Azure CLI token path. The MCP service performs OBO to Microsoft Graph using its own app registration's delegated permissions — which in practice unlocks identity / profile queries reliably but typically returns **403 Forbidden** for calendar, mail, files, and Teams. See [`docs/m365-graph-mcp.md`](docs/m365-graph-mcp.md) § "Permission scopes and 403 errors" for the architectural explanation. The forward path is tracked in [`proposals/0006`](proposals/0006-tool-picker-and-scope-aware-credentials.md) (scope-aware tool picker via `oauth-pkce`) and [`proposals/0007`](proposals/0007-importable-preset-packs.md) (importable preset packs for per-product Graph MCPs like `agency mcp mail` / `agency mcp calendar`).
+
+For the technical reference, see [`.paw/work/authenticated-mcps/Docs.md`](.paw/work/authenticated-mcps/Docs.md). For the smoke checklist, see [`.paw/work/authenticated-mcps/SmokeChecklist.md`](.paw/work/authenticated-mcps/SmokeChecklist.md).
 
 ## What's new in v0.5
 

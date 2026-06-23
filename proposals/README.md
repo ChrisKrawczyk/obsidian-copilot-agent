@@ -34,3 +34,5 @@ Short design docs for future work items. One file per proposal.
 | 0003 | Mid-session MCP tool registry refresh              | Draft  |
 | 0004 | Vault embeddings and semantic search               | Draft  |
 | 0005 | Track upstream MCP filesystem `slice(7)` fix       | Draft  |
+| 0006 | Tool picker & scope-aware credential resolution    | Draft  |
+| 0007 | Importable / exportable MCP server preset packs    | Draft  |

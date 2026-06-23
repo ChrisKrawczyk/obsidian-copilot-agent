@@ -83,6 +83,33 @@ describe("McpIdentity", () => {
     );
   });
 
+  it("does not rotate trust epoch on credential edits (FR-011)", () => {
+    const http = {
+      id: normalizeServerId("server_one"),
+      name: "Server One",
+      enabled: true,
+      transport: "http" as const,
+      url: "https://example.com/mcp",
+      trustEpoch: "epoch_test",
+    } as unknown as McpServerConfig;
+    const base = computeTrustEpoch(http);
+    expect(
+      computeTrustEpoch({ ...http, authorization: "Bearer abc" } as McpServerConfig),
+    ).toBe(base);
+    expect(
+      computeTrustEpoch({
+        ...http,
+        credentials: { kind: "static-bearer", token: "xyz" },
+      } as McpServerConfig),
+    ).toBe(base);
+    expect(
+      computeTrustEpoch({
+        ...http,
+        credentials: { kind: "command-based", command: "az account get-access-token" },
+      } as McpServerConfig),
+    ).toBe(base);
+  });
+
   it("formats canonical MCP approval keys", () => {
     expect(
       formatMcpApprovalKey(

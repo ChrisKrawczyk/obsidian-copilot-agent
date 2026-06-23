@@ -97,6 +97,100 @@ describe("MCP HTTP fetch wrapper", () => {
     )("https://example.com/mcp");
     await expect(response.text()).rejects.toThrow(/SSE event exceeds 8 bytes/);
   });
+
+  test("getAuthorization injects dynamic header before initial request", async () => {
+    const seen: string[] = [];
+    const baseFetch = vi.fn(async (_url: URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get("Authorization") ?? "");
+      return new Response("ok");
+    });
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { getAuthorization: async () => "Bearer dynamic-1" },
+    );
+    await wrapper("https://example.com/mcp", { headers: { Authorization: "Bearer stale" } });
+    expect(seen[0]).toBe("Bearer dynamic-1");
+  });
+
+  test("getAuthorization returning null deletes Authorization", async () => {
+    const baseFetch = vi.fn(async (_url: URL, init?: RequestInit) => {
+      return new Response(
+        JSON.stringify({ auth: new Headers(init?.headers).get("Authorization") }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { getAuthorization: async () => null },
+    );
+    const response = await wrapper("https://example.com/mcp", {
+      headers: { Authorization: "Bearer stale" },
+    });
+    const body = (await response.json()) as { auth: string | null };
+    expect(body.auth).toBeNull();
+  });
+
+  test("cross-origin redirect does NOT re-inject Authorization (FR-017)", async () => {
+    const seen: string[] = [];
+    let calls = 0;
+    const baseFetch = vi.fn(async (url: URL, init?: RequestInit) => {
+      seen.push(`${url.host}:${new Headers(init?.headers).get("Authorization")}`);
+      calls += 1;
+      if (calls === 1) return redirect("https://other.example/next");
+      return new Response("ok");
+    });
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { getAuthorization: async () => "Bearer dynamic-2" },
+    );
+    await wrapper("https://example.com/mcp");
+    expect(seen[0]).toBe("example.com:Bearer dynamic-2");
+    expect(seen[1]).toBe("other.example:null");
+  });
+
+  test("throwOnHttpError throws McpHttpError for non-OK responses with status + wwwAuthenticate", async () => {
+    const baseFetch = vi.fn(
+      async () =>
+        new Response("denied", {
+          status: 401,
+          headers: { "www-authenticate": 'Bearer realm="graph"' },
+        }),
+    );
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { throwOnHttpError: true },
+    );
+    await expect(wrapper("https://example.com/mcp")).rejects.toMatchObject({
+      name: "McpHttpError",
+      status: 401,
+    });
+  });
+
+  test("throwOnHttpError leaves 2xx responses untouched", async () => {
+    const baseFetch = vi.fn(async () => new Response("ok"));
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { throwOnHttpError: true },
+    );
+    const response = await wrapper("https://example.com/mcp");
+    expect(response.status).toBe(200);
+  });
+
+  test("throwOnHttpError passes 405 through as a Response (SDK treats 405 as non-fatal on SSE GET / DELETE)", async () => {
+    const baseFetch = vi.fn(async () => new Response(null, { status: 405 }));
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { throwOnHttpError: true },
+    );
+    const response = await wrapper("https://example.com/mcp", { method: "GET" });
+    expect(response.status).toBe(405);
+  });
 });
 
 function redirect(location: string): Response {

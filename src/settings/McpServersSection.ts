@@ -8,10 +8,13 @@ import {
   AUTHORIZATION_STORAGE_NOTICE,
   MCP_CALL_TIMEOUT_DEFAULT_SECONDS,
   PRIVATE_NETWORK_CONFIRMATION_COPY,
+  buildCredentialStatusText,
   displaySensitiveValue,
   validateMcpServerForm,
+  type McpCredentialKindUiSelection,
   type McpServerFormInput,
 } from "./mcpServerFormLogic";
+import { BUILT_IN_PRESETS, getPresetById } from "./presets/McpServerPresets";
 
 export interface McpServersSectionOptions {
   store: McpSettingsStore;
@@ -19,6 +22,12 @@ export interface McpServersSectionOptions {
   safetyStore: Pick<SafetySettingsStore, "revokeGrantsForServer">;
   vaultRoot: string;
   pathExists?: (path: string) => boolean;
+  /**
+   * Phase 5 (FR-018): production wiring supplies a PATH-based executable
+   * probe (handles Windows PATHEXT). When omitted, falls back to
+   * `pathExists` for test harness compatibility.
+   */
+  executableExists?: (command: string) => boolean;
   notify?: (message: string) => void;
 }
 
@@ -39,6 +48,12 @@ export class McpServersSection {
   private lastGrantNoticeEpochByServer = new Map<string, string>();
   private formOpen = false;
   private renderQueuedWhileFormOpen = false;
+  /**
+   * SM-3 / Phase 5 minimum: per-server last Test-connection result, so the
+   * row can render the outcome inline alongside the credential snapshot
+   * (previously only emitted as a transient `Notice`).
+   */
+  private lastTestResultByServer = new Map<string, { ok: boolean; at: number; error?: string }>();
 
   constructor(private readonly options: McpServersSectionOptions) {}
 
@@ -135,6 +150,28 @@ export class McpServersSection {
       });
     }
 
+    const credSnapshot = runtime?.credential;
+    if (server.transport === "http" && server.credentials) {
+      const variant = server.credentials.kind;
+      const statusText = buildCredentialStatusText({
+        state: credSnapshot?.state,
+        variant,
+        expiresAt: credSnapshot?.expiresAt ?? undefined,
+        nextRefreshAt: credSnapshot?.nextRefreshAt ?? undefined,
+        remediation: credSnapshot?.remediation ?? undefined,
+        copyable: credSnapshot?.copyable ?? undefined,
+        lastTestResult: this.lastTestResultByServer.get(server.id),
+      });
+      child(row, "div", {
+        cls: "copilot-agent-mcp-credential-status",
+        attr: {
+          role: "status",
+          "aria-label": `Credential status for ${server.name}`,
+        },
+        text: statusText,
+      });
+    }
+
     const edit = child(row, "button", { text: "Edit", attr: { "aria-label": `Edit ${server.name}` } });
     on(edit, "click", () => this.openForm(server));
     const toggle = child(row, "button", {
@@ -147,6 +184,39 @@ export class McpServersSection {
     on(reconnect, "click", () => void this.options.manager.manualReconnect(server.id).catch((err: unknown) => this.noticeError(err)));
     const remove = child(row, "button", { text: "Remove", attr: { "aria-label": `Remove ${server.name}` } });
     on(remove, "click", () => void this.remove(server));
+
+    if (server.transport === "http") {
+      const test = child(row, "button", {
+        text: "Test connection",
+        attr: { "aria-label": `Test connection for ${server.name}` },
+      });
+      on(test, "click", () => void this.testConnection(server));
+    }
+  }
+
+  private async testConnection(server: McpServerConfig): Promise<void> {
+    try {
+      const result = await this.options.manager.testConnection(server.id);
+      // SM-3 / Phase 5 minimum: persist the outcome so the row renders it
+      // inline next to the credential snapshot, not just as a transient
+      // `Notice`.
+      this.lastTestResultByServer.set(server.id, {
+        ok: result.ok,
+        at: Date.now(),
+        ...(result.ok ? {} : { error: result.error }),
+      });
+      if (result.ok) this.notify(`MCP server "${server.name}": connection OK.`);
+      else this.notify(`MCP server "${server.name}": ${result.error}`);
+      this.render();
+    } catch (err) {
+      this.lastTestResultByServer.set(server.id, {
+        ok: false,
+        at: Date.now(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.noticeError(err);
+      this.render();
+    }
   }
 
   private openForm(existing?: McpServerConfig): void {
@@ -188,20 +258,175 @@ export class McpServersSection {
       placeholder: "https://mcp.example.com/",
       hint: "http only. Must be https unless the host is a loopback address.",
     });
-    const authorization = input(modal, "Authorization", existing?.transport === "http" ? displaySensitiveValue(existing.authorization, false) : "", {
+    // SM-2 / FR-001: after Phase 1 canonicalization, the static-bearer
+    // token lives at `existing.credentials.token`, not `existing.authorization`.
+    // Prefer the canonical location; fall back to the legacy field so
+    // unmigrated rows still populate the form.
+    const existingTokenSource = (() => {
+      if (existing?.transport !== "http") return undefined;
+      if (existing.credentials?.kind === "static-bearer") return existing.credentials.token;
+      return existing.authorization;
+    })();
+    const authorization = input(modal, "Authorization", existingTokenSource ? displaySensitiveValue(existingTokenSource, false) : "", {
       placeholder: "Bearer <token>",
       hint: "Optional. Sent as the Authorization header. Stored in plaintext in data.json — Obsidian has no secure secret store.",
     });
     authorization.type = "password";
-    authorization.dataset.redacted = existing?.transport === "http" && existing.authorization ? "true" : "false";
+    authorization.dataset.redacted = existingTokenSource ? "true" : "false";
     const reveal = checkbox(modal, "Reveal sensitive fields", false);
     on(reveal, "change", () => {
-      if (existing?.transport === "http" && existing.authorization) {
-        authorization.value = displaySensitiveValue(existing.authorization, reveal.checked);
+      if (existingTokenSource) {
+        authorization.value = displaySensitiveValue(existingTokenSource, reveal.checked);
         authorization.type = reveal.checked ? "text" : "password";
         authorization.dataset.redacted = reveal.checked ? "false" : "true";
       }
     });
+
+    // Phase 5: credential editor block (HTTP only). The dropdown drives
+    // visibility of the per-kind sub-fields. `static-bearer` reuses the
+    // existing Authorization input (declared above) to keep tokens in one
+    // place; `command-based` exposes command + token/expiry paths + refresh
+    // buffer. `none` hides both blocks. `oauth-pkce` is configured via raw
+    // data.json only (reserved for a future release).
+    const existingHttpCreds = existing?.transport === "http" ? existing.credentials : undefined;
+    const initialKind: McpCredentialKindUiSelection = existingHttpCreds?.kind === "command-based"
+      ? "command-based"
+      : existingHttpCreds?.kind === "static-bearer"
+      ? "static-bearer"
+      : existingHttpCreds?.kind === "oauth-pkce"
+      ? "none"
+      : existingTokenSource
+      ? "static-bearer"
+      : "none";
+    const credentialKind = select(
+      modal,
+      "Credential kind",
+      ["none", "static-bearer", "command-based"],
+      initialKind,
+      { hint: "How the plugin obtains an Authorization header for this server." },
+    );
+    const credentialBearerWarning = child(modal, "div", {
+      cls: "copilot-agent-mcp-credential-warning",
+      attr: { role: "alert", "aria-label": "Credential storage warning" },
+    });
+    const credentialCommand = input(
+      modal,
+      "Credential command",
+      existingHttpCreds?.kind === "command-based" ? existingHttpCreds.command : "",
+      {
+        placeholder: "az account get-access-token --scope ... --output json",
+        hint: "Command emitting JSON containing the token. The command runs locally and its stdout is parsed.",
+      },
+    );
+    const credentialTokenPath = input(
+      modal,
+      "Token JSON path",
+      existingHttpCreds?.kind === "command-based" ? existingHttpCreds.tokenPath ?? "" : "",
+      { placeholder: "accessToken", hint: "Defaults to `accessToken` when blank." },
+    );
+    const credentialExpiryPath = input(
+      modal,
+      "Expiry JSON path",
+      existingHttpCreds?.kind === "command-based" ? existingHttpCreds.expiryPath ?? "" : "",
+      { placeholder: "expiresOn", hint: "Defaults to `expiresOn` when blank." },
+    );
+    const credentialRefreshBuffer = input(
+      modal,
+      "Refresh buffer (seconds)",
+      existingHttpCreds?.kind === "command-based"
+        ? String(existingHttpCreds.refreshBufferSeconds ?? "")
+        : "",
+      {
+        placeholder: "300",
+        hint: "Seconds before expiry to refresh proactively. Range 0-86400. Defaults to 300.",
+      },
+    );
+    credentialRefreshBuffer.type = "number";
+    const oauthNote = child(modal, "div", {
+      cls: "copilot-agent-mcp-oauth-note",
+      attr: { role: "status" },
+      text: "oauth-pkce: configured via raw data.json; reserved for a future release.",
+    });
+
+    const updateCredentialVisibility = (): void => {
+      const kind = credentialKind.value as McpCredentialKindUiSelection;
+      const showStatic = kind === "static-bearer";
+      const showCommand = kind === "command-based";
+      const showOauthNote = existingHttpCreds?.kind === "oauth-pkce";
+      setHidden(authorization.parentElement as DomEl | null, !showStatic);
+      setHidden(reveal.parentElement as DomEl | null, !showStatic);
+      setText(
+        credentialBearerWarning,
+        showStatic
+          ? "Static bearer tokens are stored in plaintext in data.json."
+          : "",
+      );
+      setHidden(credentialCommand.parentElement as DomEl | null, !showCommand);
+      setHidden(credentialTokenPath.parentElement as DomEl | null, !showCommand);
+      setHidden(credentialExpiryPath.parentElement as DomEl | null, !showCommand);
+      setHidden(credentialRefreshBuffer.parentElement as DomEl | null, !showCommand);
+      setHidden(oauthNote, !showOauthNote);
+    };
+    on(credentialKind, "change", updateCredentialVisibility);
+    updateCredentialVisibility();
+
+    // Phase 5: preset dropdown (add-only). Populates fields when selected and
+    // optionally shows a non-blocking preflight hint when the required CLI
+    // (e.g. `az`) is missing from PATH. FR-018: preflight never blocks save.
+    if (!existing) {
+      const presetIds = BUILT_IN_PRESETS.map((p) => p.id);
+      const presetSelect = select(modal, "Preset", ["", ...presetIds], "", {
+        hint: "Optional. Pre-fills the form for a known MCP service.",
+      });
+      // Rewrite option text where supported (real DOM only; FakeElement test
+      // harness has no `.options` API so this is best-effort).
+      const opts = (presetSelect as unknown as { options?: ArrayLike<HTMLOptionElement> }).options;
+      if (opts && opts.length > 0) {
+        const blank = opts[0];
+        if (blank) blank.textContent = "— none —";
+        for (let i = 0; i < opts.length; i++) {
+          const opt = opts[i];
+          const preset = getPresetById(opt.value);
+          if (preset) opt.textContent = preset.label;
+        }
+      }
+      const presetHint = child(modal, "div", {
+        cls: "copilot-agent-mcp-preset-hint",
+        attr: { role: "status", "aria-label": "Preset preflight hint" },
+      });
+      on(presetSelect, "change", () => {
+        const preset = getPresetById(presetSelect.value);
+        setText(presetHint, "");
+        if (!preset) return;
+        const built = preset.build();
+        if (!id.value) id.value = preset.id;
+        name.value = built.server.name;
+        transport.value = built.server.transport;
+        url.value = built.server.url;
+        if (built.credentials.kind === "command-based") {
+          credentialKind.value = "command-based";
+          credentialCommand.value = built.credentials.command;
+          credentialTokenPath.value = built.credentials.tokenPath ?? "";
+          credentialExpiryPath.value = built.credentials.expiryPath ?? "";
+          credentialRefreshBuffer.value = String(
+            built.credentials.refreshBufferSeconds ?? "",
+          );
+          updateCredentialVisibility();
+        }
+        const preflight = built.preflight;
+        if (preflight?.type === "findOnPath") {
+          const check = this.options.executableExists ?? this.options.pathExists;
+          if (check && !check(preflight.command)) {
+            setText(
+              presetHint,
+              `Heads up: \`${preflight.command}\` was not found on PATH. ` +
+                (preflight.installHint ? `Install with: ${preflight.installHint}` : "") +
+                " You can still save; the server will fail until the CLI is available.",
+            );
+          }
+        }
+      });
+    }
     const cwd = input(modal, "Working directory", existing?.transport === "stdio" ? existing.cwd ?? this.options.vaultRoot : this.options.vaultRoot, {
       hint: "stdio only. Defaults to the vault root.",
     });
@@ -219,8 +444,8 @@ export class McpServersSection {
     const cancel = child(modal, "button", { text: "Cancel", attr: { "aria-label": "Cancel MCP server edit" } });
     on(cancel, "click", () => closeForm(modal));
     on(save, "click", () => {
-      const authValue = authorization.dataset.redacted === "true" && existing?.transport === "http"
-        ? existing.authorization
+      const authValue = authorization.dataset.redacted === "true" && existingTokenSource
+        ? existingTokenSource
         : authorization.value;
       const form: McpServerFormInput = {
         id: id.value,
@@ -235,6 +460,13 @@ export class McpServersSection {
         env: parseEnv(env.value),
         callTimeoutSeconds: Number(timeout.value),
         privateNetworkConfirmed: privateConfirm.checked,
+        credentialKind: credentialKind.value as McpCredentialKindUiSelection,
+        credentialCommand: credentialCommand.value,
+        credentialTokenPath: credentialTokenPath.value,
+        credentialExpiryPath: credentialExpiryPath.value,
+        credentialRefreshBufferSeconds: credentialRefreshBuffer.value === ""
+          ? undefined
+          : Number(credentialRefreshBuffer.value),
       };
       const result = validateMcpServerForm(form, {
         existingIds: this.options.store.snapshot().map((server) => server.id),
@@ -246,7 +478,20 @@ export class McpServersSection {
         setText(message, [...result.errors, ...result.warnings].join("\n"));
         return;
       }
-      void this.saveForm(result.config, existing, result.denylistEnvWarnings.map((w) => w.key)).then(() => {
+      // Phase 5 (FR-012): oauth-pkce is reserved + read-only in the UI.
+      // The kind dropdown maps it to "none", which would otherwise wipe
+      // the credentials block on save. Restore the original oauth-pkce
+      // block here so an existing server's reserved config round-trips.
+      let finalConfig = result.config;
+      if (
+        existing?.transport === "http" &&
+        existing.credentials?.kind === "oauth-pkce" &&
+        finalConfig.transport === "http" &&
+        !finalConfig.credentials
+      ) {
+        finalConfig = { ...finalConfig, credentials: existing.credentials };
+      }
+      void this.saveForm(finalConfig, existing, result.denylistEnvWarnings.map((w) => w.key)).then(() => {
         closeForm(modal);
       }).catch((err: unknown) => setText(message, err instanceof Error ? err.message : String(err)));
     });
@@ -264,6 +509,18 @@ export class McpServersSection {
       await this.options.store.markAuthorizationNoticeShown();
     }
     await this.handleTrustEpochChange(meta, config.name, config.trustEpoch);
+    // Phase 4 (FR-011): credential-only edits MUST NOT revoke grants. The
+    // trust-epoch helper above is the only path that calls
+    // `revokeGrantsForServer`, and `computeTrustEpoch` excludes credentials,
+    // so a credential edit reaches here without touching grants. Notify the
+    // manager so the cached credential is invalidated on the next request.
+    if (existing && credentialsChanged(existing, config)) {
+      this.options.manager.onCredentialConfigChanged?.(config.id);
+    } else if (!existing && config.transport === "http" && config.credentials) {
+      // Phase 5: new HTTP servers with a credentials block also trigger an
+      // idempotent invalidation so the manager primes its credential cache.
+      this.options.manager.onCredentialConfigChanged?.(config.id);
+    }
     if (config.enabled) {
       void this.options.manager.enable(config.id).catch((err: unknown) => this.noticeError(err));
     }
@@ -418,6 +675,12 @@ function setText(el: DomEl, text: string): void {
   else el.textContent = text;
 }
 
+function setHidden(el: DomEl | null, hidden: boolean): void {
+  if (!el) return;
+  if (hidden) el.setAttribute("hidden", "");
+  else el.removeAttribute("hidden");
+}
+
 function confirmRemove(name: string): boolean {
   const prompt = `Remove MCP server "${name}"?`;
   if (typeof window !== "undefined" && typeof window.confirm === "function") return window.confirm(prompt);
@@ -467,7 +730,21 @@ function shouldShowAuthorizationNotice(
   existing: McpServerConfig | undefined,
   next: McpServerConfig,
 ): boolean {
-  if (next.transport !== "http" || !next.authorization) return false;
+  if (next.transport !== "http") return false;
+  const nextHasAuth =
+    !!next.authorization || next.credentials?.kind === "static-bearer";
+  if (!nextHasAuth) return false;
   if (!existing) return true;
-  return existing.transport !== "http" || !existing.authorization;
+  if (existing.transport !== "http") return true;
+  const existingHasAuth =
+    !!existing.authorization ||
+    existing.credentials?.kind === "static-bearer";
+  return !existingHasAuth;
+}
+
+export function credentialsChanged(prev: McpServerConfig, next: McpServerConfig): boolean {
+  if (prev.transport !== "http" || next.transport !== "http") return false;
+  const prevKey = JSON.stringify({ a: prev.authorization ?? null, c: prev.credentials ?? null });
+  const nextKey = JSON.stringify({ a: next.authorization ?? null, c: next.credentials ?? null });
+  return prevKey !== nextKey;
 }
