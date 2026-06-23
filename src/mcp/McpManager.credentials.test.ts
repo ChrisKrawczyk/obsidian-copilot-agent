@@ -224,4 +224,160 @@ describe("McpManager Phase 4 credential integration", () => {
     await manager.enable(server.id);
     await expect(manager.callTool(server.id, "t", {})).rejects.toThrow(/timed out/);
   });
+
+  test("PA-1: copyable `az login --tenant <id>` is appended to chat error for M365 unauthorized", async () => {
+    // Use the real M365RemediationFormatter so the copyable wires through.
+    const { M365RemediationFormatter } = await import("./credentials/M365RemediationFormatter");
+    const creds: ServerCredentials = { kind: "command-based", command: "az account get-access-token" };
+    const server = httpServer("m365", creds);
+    let callCount = 0;
+    const runtime = fakeRuntime(server, {
+      callImpl: async () => {
+        callCount += 1;
+        throw new McpHttpError(401, "Bearer");
+      },
+      tools: [{ serverId: server.id, serverName: server.name, toolName: "t", syntheticId: `mcp__${server.id}__t` }],
+    });
+    const resolver = stubResolver({
+      getLastKnownTenantId: vi.fn(() => "72f988bf-86f1-41af-91ab-2d7cd011db47"),
+    } as Partial<CredentialResolver>);
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: () => runtime,
+      credentialResolver: resolver,
+      remediationFormatter: new M365RemediationFormatter(),
+    });
+    await manager.enable(server.id);
+    const err = await manager.callTool(server.id, "t", {}).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/Azure CLI credentials/);
+    expect((err as Error).message).toMatch(/Run: az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47/);
+    expect(callCount).toBe(2);
+  });
+
+  test("PA-1: copyable round-trips into runtime.setCredentialSnapshot on resolution failure", async () => {
+    const { M365RemediationFormatter } = await import("./credentials/M365RemediationFormatter");
+    const { CredentialResolutionFailed } = await import("./credentials/CredentialResolver");
+    const creds: ServerCredentials = { kind: "command-based", command: "az account get-access-token" };
+    const server = httpServer("m365", creds);
+    const setCredentialSnapshot = vi.fn();
+    // Wire up a runtime whose callImpl actually invokes the
+    // getAuthorization callback the manager supplies, so the resolver
+    // failure path runs through recordCredentialFailure.
+    let getAuth: (() => Promise<string | null>) | undefined;
+    const runtime = {
+      connect: async () => ({ serverId: server.id, tools: [{ serverId: server.id, serverName: server.name, toolName: "t", syntheticId: `mcp__${server.id}__t` }] }),
+      reconnect: async () => ({ serverId: server.id, tools: [] }),
+      snapshot: () => ({ id: server.id, status: "connected", toolCount: 1 }),
+      disable: async () => undefined,
+      unload: async () => undefined,
+      clearVolatileSession: () => undefined,
+      setCredentialSnapshot,
+      callTool: async () => {
+        // Drive the dynamic-auth callback exactly like the real HTTP
+        // transport would inside fetch.
+        if (getAuth) await getAuth();
+        return { ok: true };
+      },
+    } as never;
+    const resolver = stubResolver({
+      resolve: vi.fn(async () => {
+        throw new CredentialResolutionFailed({
+          kind: "command-failed",
+          detail: "az exited with code 1",
+          exitCode: 1,
+        });
+      }),
+      getLastKnownTenantId: vi.fn(() => "72f988bf-86f1-41af-91ab-2d7cd011db47"),
+    } as Partial<CredentialResolver>);
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: (_cfg, opts) => {
+        getAuth = opts.getAuthorization as (() => Promise<string | null>) | undefined;
+        return runtime;
+      },
+      credentialResolver: resolver,
+      remediationFormatter: new M365RemediationFormatter(),
+    });
+    await manager.enable(server.id);
+    await expect(manager.callTool(server.id, "t", {})).rejects.toThrow(/Azure CLI/);
+    const failureCall = setCredentialSnapshot.mock.calls.find((c) => c[0]?.state === "failed");
+    expect(failureCall).toBeDefined();
+    expect(failureCall![0].copyable).toBe("az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47");
+    expect(failureCall![0].remediation).toMatch(/Azure CLI/);
+  });
+
+  test("PA-3: 401 retry path that fails with CredentialResolutionFailed surfaces formatted hint, not raw error", async () => {
+    const { M365RemediationFormatter } = await import("./credentials/M365RemediationFormatter");
+    const { CredentialResolutionFailed } = await import("./credentials/CredentialResolver");
+    const creds: ServerCredentials = { kind: "command-based", command: "az account get-access-token" };
+    const server = httpServer("m365", creds);
+    let callCount = 0;
+    const runtime = fakeRuntime(server, {
+      callImpl: async () => {
+        callCount += 1;
+        if (callCount === 1) throw new McpHttpError(401, "Bearer");
+        // On retry, the credential resolver itself fails (e.g. `az` exits
+        // non-zero during the re-resolve). Without PA-3, this would be
+        // rethrown verbatim and the user-facing error would lose the
+        // `az login` hint.
+        throw new CredentialResolutionFailed({
+          kind: "command-failed",
+          detail: "az exited with code 1",
+          exitCode: 1,
+        });
+      },
+      tools: [{ serverId: server.id, serverName: server.name, toolName: "t", syntheticId: `mcp__${server.id}__t` }],
+    });
+    const resolver = stubResolver({
+      getLastKnownTenantId: vi.fn(() => "tenant-abc"),
+    } as Partial<CredentialResolver>);
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: () => runtime,
+      credentialResolver: resolver,
+      remediationFormatter: new M365RemediationFormatter(),
+    });
+    await manager.enable(server.id);
+    const err = await manager.callTool(server.id, "t", {}).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/Azure CLI/);
+    expect((err as Error).message).toMatch(/Run: az login --tenant tenant-abc/);
+    expect(callCount).toBe(2);
+  });
+
+  test("SM-6 / FR-009: two 401s update runtime.setCredentialSnapshot to state=failed", async () => {
+    const { M365RemediationFormatter } = await import("./credentials/M365RemediationFormatter");
+    const creds: ServerCredentials = { kind: "command-based", command: "az account get-access-token" };
+    const server = httpServer("m365", creds);
+    const setCredentialSnapshot = vi.fn();
+    const runtime = {
+      ...fakeRuntime(server, {
+        callImpl: async () => {
+          throw new McpHttpError(401, "Bearer");
+        },
+        tools: [{ serverId: server.id, serverName: server.name, toolName: "t", syntheticId: `mcp__${server.id}__t` }],
+      }),
+      setCredentialSnapshot,
+    } as never;
+    const resolver = stubResolver({
+      getLastKnownTenantId: vi.fn(() => "tenant-xyz"),
+    } as Partial<CredentialResolver>);
+    const manager = new McpManager({
+      vaultRoot: "C:\\vault",
+      serversProvider: () => [server],
+      runtimeFactory: () => runtime,
+      credentialResolver: resolver,
+      remediationFormatter: new M365RemediationFormatter(),
+    });
+    await manager.enable(server.id);
+    await expect(manager.callTool(server.id, "t", {})).rejects.toThrow(/Azure CLI/);
+    const failureCall = setCredentialSnapshot.mock.calls.find((c) => c[0]?.state === "failed");
+    expect(failureCall).toBeDefined();
+    expect(failureCall![0].lastError).toMatch(/Credentials rejected by server/);
+    expect(failureCall![0].copyable).toBe("az login --tenant tenant-xyz");
+  });
 });

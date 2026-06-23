@@ -93,6 +93,17 @@ export class CredentialResolver {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly lastResolveAtMs = new Map<string, number>();
   private readonly lastKnownTenantId = new Map<string, string>();
+  /**
+   * SM-5 / FR-007 risk mitigation: when a `resolve()` fails, record both
+   * the failure timestamp and the structured error so subsequent calls
+   * within `MIN_RERESOLVE_INTERVAL_MS` short-circuit and rethrow the cached
+   * error rather than re-spawning the child. Cleared on a successful
+   * resolution or explicit `invalidate(serverId)` / `clear(serverId)`.
+   */
+  private readonly lastFailure = new Map<
+    string,
+    { atMs: number; error: CredentialResolutionFailed }
+  >();
 
   constructor(deps: CredentialResolverDeps) {
     this.clock = deps.clock;
@@ -130,12 +141,14 @@ export class CredentialResolver {
   invalidate(serverId: string): void {
     this.cache.delete(serverId);
     this.lastResolveAtMs.delete(serverId);
+    this.lastFailure.delete(serverId);
     // Intentionally does NOT clear lastKnownTenantId — see class docstring.
   }
 
   clear(serverId: string): void {
     this.cache.delete(serverId);
     this.lastResolveAtMs.delete(serverId);
+    this.lastFailure.delete(serverId);
     this.lastKnownTenantId.delete(serverId);
   }
 
@@ -169,6 +182,39 @@ export class CredentialResolver {
       }
     }
 
+    // SM-5 / FR-007: when a previous resolve failed within the rate-limit
+    // window, short-circuit and rethrow the cached error so a broken `az`
+    // setup cannot spawn the child on every outbound tool call. The cache
+    // is cleared on the next successful resolution (below) or via
+    // `invalidate(serverId)` / `clear(serverId)`.
+    const lastFailure = this.lastFailure.get(serverId);
+    if (lastFailure && now - lastFailure.atMs < MIN_RERESOLVE_INTERVAL_MS) {
+      throw lastFailure.error;
+    }
+
+    try {
+      return await this.runAndCacheCommandBased(
+        serverId,
+        credentials,
+        tokenPath,
+        expiryPath,
+        now,
+      );
+    } catch (err) {
+      if (err instanceof CredentialResolutionFailed) {
+        this.lastFailure.set(serverId, { atMs: this.clock(), error: err });
+      }
+      throw err;
+    }
+  }
+
+  private async runAndCacheCommandBased(
+    serverId: string,
+    credentials: CommandBasedCredentials,
+    tokenPath: string,
+    expiryPath: string,
+    now: number,
+  ): Promise<ResolvedCredential> {
     const argv = buildArgv(credentials);
     const result = await this.runner.run(argv, this.commandTimeoutMs);
 
@@ -232,6 +278,9 @@ export class CredentialResolver {
     };
     this.cache.set(serverId, entry);
     this.lastResolveAtMs.set(serverId, now);
+    // SM-5: a successful resolution invalidates any prior failure cache so
+    // the next failure starts a fresh rate-limit window.
+    this.lastFailure.delete(serverId);
     return toResolved(entry);
   }
 }

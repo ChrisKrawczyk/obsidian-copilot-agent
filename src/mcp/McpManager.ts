@@ -290,7 +290,24 @@ export class McpManager {
           } catch (retryErr) {
             const retryHttp = extractMcpHttpError(retryErr);
             if (retryHttp?.status === 401) {
+              // SM-6 + FR-009: a second 401 means the freshly-resolved
+              // credentials were also rejected. Update the runtime snapshot
+              // so the settings row reflects the rejection (the previous
+              // implementation only updated the chat error).
+              this.recordServerCredentialRejection(
+                serverId,
+                config,
+                retryHttp.wwwAuthenticate ?? undefined,
+              );
               throw this.formatRemediationError(config, "unauthorized", retryHttp.wwwAuthenticate ?? undefined);
+            }
+            // PA-3: if the retry path itself failed during credential
+            // resolution (e.g. `az` now exits non-zero), reformat through
+            // the same path used on the first try so the user-facing
+            // error retains the `az login` hint instead of being
+            // stringified as a raw `CredentialResolutionFailed`.
+            if (retryErr instanceof CredentialResolutionFailed) {
+              throw this.formatResolutionError(config, retryErr);
             }
             throw retryErr;
           } finally {
@@ -345,7 +362,7 @@ export class McpManager {
       error: { kind, detail },
     };
     const remediation = this.remediationFormatter.format(ctx);
-    return new Error(redactSensitive(remediation.text));
+    return new Error(redactSensitive(formatMessageWithCopyable(remediation.text, remediation.copyable)));
   }
 
   private formatResolutionError(config: McpServerConfig, err: CredentialResolutionFailed): Error {
@@ -363,7 +380,7 @@ export class McpManager {
         this.options.credentialResolver?.getLastKnownTenantId?.(config.id) ?? null,
       error: { kind, detail: err.error.detail },
     });
-    return new Error(redactSensitive(remediation.text));
+    return new Error(redactSensitive(formatMessageWithCopyable(remediation.text, remediation.copyable)));
   }
 
   getRuntimeForTest(serverId: McpServerId): McpServerRuntime | undefined {
@@ -439,10 +456,56 @@ export class McpManager {
       runtime.setCredentialSnapshot({ state: "not-applicable", variant });
       return;
     }
+    // SM-3 / Phase 5 minimum: when expiry is known, also compute the next
+    // refresh point (expiry minus refresh buffer) so the settings row can
+    // render a "Next refresh in N min" hint.
+    const config = this.options.serversProvider().find((s) => s.id === serverId);
+    const credentials: ServerCredentials | undefined =
+      config && config.transport === "http" ? config.credentials : undefined;
+    const refreshBufferMs =
+      credentials && credentials.kind === "command-based"
+        ? (credentials.refreshBufferSeconds ?? 300) * 1000
+        : 0;
+    const nextRefreshAt =
+      resolved.expiresAt != null
+        ? Math.max(0, resolved.expiresAt - refreshBufferMs)
+        : null;
     runtime.setCredentialSnapshot({
       state: "ok",
       variant,
       ...(resolved.expiresAt != null ? { expiresAt: resolved.expiresAt } : {}),
+      ...(nextRefreshAt != null ? { nextRefreshAt } : {}),
+    });
+  }
+
+  /**
+   * SM-6 / FR-009: called when the server returns 401 even after the
+   * 401-retry path re-resolved credentials. Updates the runtime snapshot so
+   * the settings row shows the rejection (the previous implementation only
+   * surfaced the rejection through the chat error).
+   */
+  private recordServerCredentialRejection(
+    serverId: McpServerId,
+    config: McpServerConfig,
+    wwwAuthenticate: string | undefined,
+  ): void {
+    const runtime = this.runtimes.get(serverId);
+    if (!runtime?.setCredentialSnapshot) return;
+    const credentials: ServerCredentials | undefined =
+      config.transport === "http" ? config.credentials : undefined;
+    if (!credentials) return;
+    const remediation = this.remediationFormatter.format({
+      variant: credentials.kind,
+      command: credentials.kind === "command-based" ? credentials.command : null,
+      lastTenantId: this.options.credentialResolver?.getLastKnownTenantId?.(serverId) ?? null,
+      error: { kind: "unauthorized", detail: wwwAuthenticate },
+    });
+    runtime.setCredentialSnapshot({
+      state: "failed",
+      variant: credentials.kind,
+      lastError: redactSensitive("Credentials rejected by server."),
+      remediation: redactSensitive(remediation.text),
+      ...(remediation.copyable ? { copyable: redactSensitive(remediation.copyable) } : {}),
     });
   }
 
@@ -465,8 +528,9 @@ export class McpManager {
       variant: credentials.kind,
       lastError: redactSensitive(extractResolutionDetail(err) ?? "Credential resolution failed."),
       remediation: redactSensitive(remediation.text),
+      ...(remediation.copyable ? { copyable: redactSensitive(remediation.copyable) } : {}),
     });
-    this.options.notify?.(redactSensitive(`[Copilot Agent] ${remediation.text}`));
+    this.options.notify?.(redactSensitive(`[Copilot Agent] ${formatMessageWithCopyable(remediation.text, remediation.copyable)}`));
   }
 
   /**
@@ -713,4 +777,15 @@ function extractResolutionDetail(err: unknown): string | undefined {
   if (err instanceof CredentialResolutionFailed) return err.error.detail;
   if (err instanceof Error) return err.message;
   return undefined;
+}
+
+/**
+ * PA-1 / FR-014: append `Run: <copyable>` to the user-facing error message
+ * when the formatter produced a copyable remediation command (e.g.
+ * `az login --tenant <id>`). Single source of truth so chat error and
+ * settings row stay in sync.
+ */
+function formatMessageWithCopyable(text: string, copyable: string | undefined): string {
+  if (!copyable) return text;
+  return `${text}\nRun: ${copyable}`;
 }

@@ -586,4 +586,78 @@ describe("CredentialResolver", () => {
       }
     });
   });
+
+  describe("SM-5 / FR-007: rate-limit failed credential commands", () => {
+    const creds: ServerCredentials = {
+      kind: "command-based",
+      command: "azfail",
+    };
+
+    it("two rapid failures within MIN_RERESOLVE_INTERVAL_MS only spawn the child once", async () => {
+      const { clock, runner, resolver } = buildResolver();
+      runner.enqueue(fail(1, "az not signed in"));
+      // The second call must hit the failure cache; do NOT enqueue.
+      const first = await resolver
+        .resolve("srv", creds)
+        .catch((e) => e as CredentialResolutionFailed);
+      clock.advance(100);
+      const second = await resolver
+        .resolve("srv", creds)
+        .catch((e) => e as CredentialResolutionFailed);
+      expect(runner.calls).toHaveLength(1);
+      expect(first).toBeInstanceOf(CredentialResolutionFailed);
+      expect(second).toBeInstanceOf(CredentialResolutionFailed);
+      expect(second).toBe(first);
+    });
+
+    it("failure cache expires after MIN_RERESOLVE_INTERVAL_MS so retry can occur", async () => {
+      const { clock, runner, resolver } = buildResolver();
+      runner.enqueue(fail(1, "az not signed in"));
+      await resolver.resolve("srv", creds).catch(() => {});
+      // Advance past the rate-limit window.
+      clock.advance(MIN_RERESOLVE_INTERVAL_MS + 1);
+      runner.enqueue(fail(1, "still broken"));
+      await resolver.resolve("srv", creds).catch(() => {});
+      expect(runner.calls).toHaveLength(2);
+    });
+
+    it("invalidate() clears failure cache so the next call re-runs the command", async () => {
+      const { runner, resolver } = buildResolver();
+      runner.enqueue(fail(1, "az not signed in"));
+      await resolver.resolve("srv", creds).catch(() => {});
+      resolver.invalidate("srv");
+      runner.enqueue(fail(1, "still broken"));
+      await resolver.resolve("srv", creds).catch(() => {});
+      expect(runner.calls).toHaveLength(2);
+    });
+
+    it("a successful resolution after a failure resets the cache", async () => {
+      const { clock, runner, resolver } = buildResolver();
+      runner.enqueue(fail(1, "az not signed in"));
+      await resolver.resolve("srv", creds).catch(() => {});
+      // Advance past the rate-limit and succeed.
+      clock.advance(MIN_RERESOLVE_INTERVAL_MS + 1);
+      runner.enqueue(
+        ok(
+          JSON.stringify({
+            accessToken: "t1",
+            expiresOn: new Date(clock.now + 3600_000).toISOString(),
+          }),
+        ),
+      );
+      const success = await resolver.resolve("srv", creds);
+      expect(success?.authorization).toBe("Bearer t1");
+      // A subsequent failure within the rate-limit window should be a
+      // fresh failure (cache was reset), not a cached one. Force a new
+      // call by invalidating the success cache.
+      resolver.invalidate("srv");
+      runner.enqueue(fail(2, "broken again"));
+      const fresh = await resolver
+        .resolve("srv", creds)
+        .catch((e) => e as CredentialResolutionFailed);
+      // The runner saw 3 calls total: initial fail, success, fresh fail.
+      expect(runner.calls).toHaveLength(3);
+      expect(fresh.error.kind).toBe("command-failed");
+    });
+  });
 });

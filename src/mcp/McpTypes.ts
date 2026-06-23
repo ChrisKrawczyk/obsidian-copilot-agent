@@ -70,6 +70,11 @@ export interface McpCredentialSnapshot {
   lastError?: string;
   /** Human-readable remediation hint (already redacted). */
   remediation?: string;
+  /**
+   * Optional verbatim command the user can copy + run to remediate
+   * (e.g. `az login --tenant <tenantId>`). Already redacted.
+   */
+  copyable?: string;
 }
 
 export interface McpServerRuntimeSnapshot {

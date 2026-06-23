@@ -295,4 +295,79 @@ describe("McpServersSection Phase 5 — preset + credential editor + test connec
     fn({ target: preset } as unknown as Event);
     expect(calls).toContain("az");
   });
+
+  test("SM-2: static-bearer edit form populates token from canonical credentials.token (not legacy authorization)", async () => {
+    // After Phase 1 canonicalization, the token lives at
+    // `credentials.token`. The edit form previously read
+    // `existing.authorization` only — re-opening the form showed an empty
+    // token and re-saving silently dropped it.
+    const base = {
+      id: normalizeServerId("canon"),
+      name: "Canonical",
+      enabled: true,
+      transport: "http" as const,
+      url: "https://example.com/mcp",
+      credentials: { kind: "static-bearer" as const, token: "Bearer canonical-token-xyz" },
+    };
+    const server: McpServerConfig = { ...base, trustEpoch: computeTrustEpoch(base) };
+    const ctx = await mount([server]);
+    ctx.root.byAria("Edit Canonical").click();
+    // After save, the token must round-trip unchanged.
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    const saved = ctx.store.snapshot().find((s) => s.id === server.id);
+    expect(saved?.transport === "http" && saved.credentials).toEqual({
+      kind: "static-bearer",
+      token: "Bearer canonical-token-xyz",
+    });
+  });
+
+  test("SM-3: Test connection result is rendered inline on the row", async () => {
+    const base = {
+      id: normalizeServerId("m365"),
+      name: "M365",
+      enabled: true,
+      transport: "http" as const,
+      url: "https://example.com/mcp",
+      credentials: { kind: "command-based" as const, command: "az foo" },
+    };
+    const server: McpServerConfig = { ...base, trustEpoch: computeTrustEpoch(base) };
+    const ctx = await mount([server], [
+      { id: server.id, status: "connected", credential: { state: "ok", variant: "command-based" } },
+    ]);
+    ctx.root.byAria("Test connection for M365").click();
+    await flush();
+    await flush();
+    // After Test connection, the credential row should now include the
+    // last-test result string.
+    const status = ctx.root.byAria("Credential status for M365");
+    expect(status.textContent).toMatch(/Last test: OK/);
+  });
+
+  test("SM-3: nextRefreshAt is rendered inline as relative-time hint", async () => {
+    const now = Date.now();
+    const base = {
+      id: normalizeServerId("m365"),
+      name: "M365",
+      enabled: true,
+      transport: "http" as const,
+      url: "https://example.com/mcp",
+      credentials: { kind: "command-based" as const, command: "az foo" },
+    };
+    const server: McpServerConfig = { ...base, trustEpoch: computeTrustEpoch(base) };
+    const ctx = await mount([server], [
+      {
+        id: server.id,
+        status: "connected",
+        credential: {
+          state: "ok",
+          variant: "command-based",
+          expiresAt: now + 60 * 60_000,
+          nextRefreshAt: now + 15 * 60_000,
+        },
+      },
+    ]);
+    const status = ctx.root.byAria("Credential status for M365");
+    expect(status.textContent).toMatch(/Next refresh in \d+ min/);
+  });
 });

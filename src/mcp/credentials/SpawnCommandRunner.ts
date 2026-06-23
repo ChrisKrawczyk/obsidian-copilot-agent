@@ -233,7 +233,11 @@ export function resolveCommandForSpawn(
   // the existing `.cmd` / `.bat` wrapper branch below.
   let resolvedCommand = command;
   if (platform === "win32" && !path.extname(command)) {
-    const pathext = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";");
+    // SM-4: Windows env vars preserve casing on Node `env` objects; look
+    // up PATHEXT case-insensitively (mirroring the PATH handling in
+    // `findOnPath`) so `PathExt`, `Pathext`, etc. all match.
+    const pathExtKey = Object.keys(env).find((key) => key.toUpperCase() === "PATHEXT");
+    const pathext = ((pathExtKey ? env[pathExtKey] : undefined) ?? ".COM;.EXE;.BAT;.CMD").split(";");
     for (const ext of pathext) {
       const candidate = command + ext.toLowerCase();
       const found = findOnPath(candidate, env);

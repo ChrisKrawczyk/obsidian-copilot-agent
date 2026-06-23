@@ -156,4 +156,42 @@ describe("buildCredentialStatusText", () => {
   test("not-applicable", () => {
     expect(buildCredentialStatusText({ state: "not-applicable" })).toMatch(/not applicable/);
   });
+  test("PA-1: failed with copyable appends `Run: <copyable>`", () => {
+    const out = buildCredentialStatusText({
+      state: "failed",
+      remediation: "Azure CLI credentials are not signed in or have expired.",
+      copyable: "az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47",
+    });
+    expect(out).toMatch(/Azure CLI/);
+    expect(out).toMatch(/Run: az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47/);
+  });
+  test("SM-3: ok with nextRefreshAt renders relative refresh hint", () => {
+    const now = 1_000_000_000_000;
+    const out = buildCredentialStatusText({
+      state: "ok",
+      expiresAt: now + 60 * 60_000,
+      nextRefreshAt: now + 15 * 60_000,
+      now,
+    });
+    expect(out).toMatch(/ok \(expires in 60 min\)/);
+    expect(out).toMatch(/Next refresh in 15 min/);
+  });
+  test("SM-3: lastTestResult ok renders inline", () => {
+    const now = 1_000_000_000_000;
+    const out = buildCredentialStatusText({
+      state: "ok",
+      lastTestResult: { ok: true, at: now - 30_000 },
+      now,
+    });
+    expect(out).toMatch(/Last test: OK \(30s ago\)/);
+  });
+  test("SM-3: lastTestResult failure renders inline with detail", () => {
+    const now = 1_000_000_000_000;
+    const out = buildCredentialStatusText({
+      state: "ok",
+      lastTestResult: { ok: false, at: now - 120_000, error: "Server returned HTTP 401." },
+      now,
+    });
+    expect(out).toMatch(/Last test: failed \(2m ago\) — Server returned HTTP 401/);
+  });
 });

@@ -204,6 +204,23 @@ describe("resolveCommandForSpawn", () => {
     const out = resolveCommandForSpawn("C:\\Tools\\az.cmd", ["plain"], {}, "win32");
     expect(out.args[3]).not.toContain("^%");
   });
+
+  it("SM-4: resolves bare command via PATHEXT case-insensitively (Windows env preserves `PathExt` casing)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resolveBareCmdCi-"));
+    try {
+      const cmdPath = path.join(tmpDir, "az.cmd");
+      fs.writeFileSync(cmdPath, "@echo off\n");
+      // Note the casing: `PathExt`, not `PATHEXT`. Node preserves env key
+      // casing on Windows, so the lookup must be case-insensitive.
+      const env = { PATH: tmpDir, PathExt: ".COM;.EXE;.BAT;.CMD" };
+      const out = resolveCommandForSpawn("az", ["account", "get-access-token"], env, "win32");
+      expect(out.command).toBe("cmd.exe");
+      expect(out.usedCmdWrapper).toBe(true);
+      expect(out.args[3]).toContain("az.cmd");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("SpawnCommandRunner Windows .cmd wrapper integration", () => {

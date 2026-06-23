@@ -48,6 +48,12 @@ export class McpServersSection {
   private lastGrantNoticeEpochByServer = new Map<string, string>();
   private formOpen = false;
   private renderQueuedWhileFormOpen = false;
+  /**
+   * SM-3 / Phase 5 minimum: per-server last Test-connection result, so the
+   * row can render the outcome inline alongside the credential snapshot
+   * (previously only emitted as a transient `Notice`).
+   */
+  private lastTestResultByServer = new Map<string, { ok: boolean; at: number; error?: string }>();
 
   constructor(private readonly options: McpServersSectionOptions) {}
 
@@ -153,6 +159,8 @@ export class McpServersSection {
         expiresAt: credSnapshot?.expiresAt ?? undefined,
         nextRefreshAt: credSnapshot?.nextRefreshAt ?? undefined,
         remediation: credSnapshot?.remediation ?? undefined,
+        copyable: credSnapshot?.copyable ?? undefined,
+        lastTestResult: this.lastTestResultByServer.get(server.id),
       });
       child(row, "div", {
         cls: "copilot-agent-mcp-credential-status",
@@ -189,10 +197,25 @@ export class McpServersSection {
   private async testConnection(server: McpServerConfig): Promise<void> {
     try {
       const result = await this.options.manager.testConnection(server.id);
+      // SM-3 / Phase 5 minimum: persist the outcome so the row renders it
+      // inline next to the credential snapshot, not just as a transient
+      // `Notice`.
+      this.lastTestResultByServer.set(server.id, {
+        ok: result.ok,
+        at: Date.now(),
+        ...(result.ok ? {} : { error: result.error }),
+      });
       if (result.ok) this.notify(`MCP server "${server.name}": connection OK.`);
       else this.notify(`MCP server "${server.name}": ${result.error}`);
+      this.render();
     } catch (err) {
+      this.lastTestResultByServer.set(server.id, {
+        ok: false,
+        at: Date.now(),
+        error: err instanceof Error ? err.message : String(err),
+      });
       this.noticeError(err);
+      this.render();
     }
   }
 
@@ -235,16 +258,25 @@ export class McpServersSection {
       placeholder: "https://mcp.example.com/",
       hint: "http only. Must be https unless the host is a loopback address.",
     });
-    const authorization = input(modal, "Authorization", existing?.transport === "http" ? displaySensitiveValue(existing.authorization, false) : "", {
+    // SM-2 / FR-001: after Phase 1 canonicalization, the static-bearer
+    // token lives at `existing.credentials.token`, not `existing.authorization`.
+    // Prefer the canonical location; fall back to the legacy field so
+    // unmigrated rows still populate the form.
+    const existingTokenSource = (() => {
+      if (existing?.transport !== "http") return undefined;
+      if (existing.credentials?.kind === "static-bearer") return existing.credentials.token;
+      return existing.authorization;
+    })();
+    const authorization = input(modal, "Authorization", existingTokenSource ? displaySensitiveValue(existingTokenSource, false) : "", {
       placeholder: "Bearer <token>",
       hint: "Optional. Sent as the Authorization header. Stored in plaintext in data.json — Obsidian has no secure secret store.",
     });
     authorization.type = "password";
-    authorization.dataset.redacted = existing?.transport === "http" && existing.authorization ? "true" : "false";
+    authorization.dataset.redacted = existingTokenSource ? "true" : "false";
     const reveal = checkbox(modal, "Reveal sensitive fields", false);
     on(reveal, "change", () => {
-      if (existing?.transport === "http" && existing.authorization) {
-        authorization.value = displaySensitiveValue(existing.authorization, reveal.checked);
+      if (existingTokenSource) {
+        authorization.value = displaySensitiveValue(existingTokenSource, reveal.checked);
         authorization.type = reveal.checked ? "text" : "password";
         authorization.dataset.redacted = reveal.checked ? "false" : "true";
       }
@@ -263,7 +295,7 @@ export class McpServersSection {
       ? "static-bearer"
       : existingHttpCreds?.kind === "oauth-pkce"
       ? "none"
-      : existing?.transport === "http" && existing.authorization
+      : existingTokenSource
       ? "static-bearer"
       : "none";
     const credentialKind = select(
@@ -412,8 +444,8 @@ export class McpServersSection {
     const cancel = child(modal, "button", { text: "Cancel", attr: { "aria-label": "Cancel MCP server edit" } });
     on(cancel, "click", () => closeForm(modal));
     on(save, "click", () => {
-      const authValue = authorization.dataset.redacted === "true" && existing?.transport === "http"
-        ? existing.authorization
+      const authValue = authorization.dataset.redacted === "true" && existingTokenSource
+        ? existingTokenSource
         : authorization.value;
       const form: McpServerFormInput = {
         id: id.value,

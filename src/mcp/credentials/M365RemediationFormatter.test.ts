@@ -60,15 +60,40 @@ describe("M365RemediationFormatter", () => {
     expect(out.text).toMatch(/denied access/);
   });
 
-  test("timeout error falls through", () => {
+  test("timeout error with az command → specialized (FR-014)", () => {
     const fmt = new M365RemediationFormatter();
-    const out = fmt.format(ctx({ error: { kind: "timeout" } }));
-    expect(out.copyable).toBe("");
+    const out = fmt.format(
+      ctx({
+        error: { kind: "timeout" },
+        lastTenantId: "72f988bf-86f1-41af-91ab-2d7cd011db47",
+      }),
+    );
+    expect(out.copyable).toBe("az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47");
+    expect(out.text).toMatch(/Azure CLI/);
+    expect(out.text).toMatch(/timed out/i);
   });
 
-  test("command-failed error falls through", () => {
+  test("command-failed error with az command → specialized (FR-014)", () => {
     const fmt = new M365RemediationFormatter();
-    const out = fmt.format(ctx({ error: { kind: "command-failed", detail: "exit 1" } }));
+    const out = fmt.format(
+      ctx({
+        error: { kind: "command-failed", detail: "exit 1" },
+        lastTenantId: null,
+      }),
+    );
+    expect(out.copyable).toBe("az login");
+    expect(out.text).toMatch(/Azure CLI/);
+    expect(out.text).toMatch(/Sign in and retry/);
+  });
+
+  test("command-failed for non-az command still falls through to default", () => {
+    const fmt = new M365RemediationFormatter();
+    const out = fmt.format(
+      ctx({
+        command: "/usr/local/bin/my-helper.sh",
+        error: { kind: "command-failed", detail: "exit 1" },
+      }),
+    );
     expect(out.copyable).toBe("");
   });
 
