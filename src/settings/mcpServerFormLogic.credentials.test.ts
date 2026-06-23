@@ -160,10 +160,10 @@ describe("buildCredentialStatusText", () => {
     const out = buildCredentialStatusText({
       state: "failed",
       remediation: "Azure CLI credentials are not signed in or have expired.",
-      copyable: "az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47",
+      copyable: "az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     });
     expect(out).toMatch(/Azure CLI/);
-    expect(out).toMatch(/Run: az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47/);
+    expect(out).toMatch(/Run: az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/);
   });
   test("SM-3: ok with nextRefreshAt renders relative refresh hint", () => {
     const now = 1_000_000_000_000;

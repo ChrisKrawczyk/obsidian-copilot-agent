@@ -64,7 +64,7 @@ Independent Test: When the credential command cannot produce a valid token, the 
 
 Acceptance Scenarios:
 1. Given `az` is not on PATH, When the resolver runs, Then the settings row for the server shows an error state with the message "command not found: az" and a hint linking to the M365 doc.
-2. Given `az` is on PATH but the user is not signed in, When a tool call attempts to use the server, Then the chat shows a one-line error with a copyable remediation hint such as `az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47`.
+2. Given `az` is on PATH but the user is not signed in, When a tool call attempts to use the server, Then the chat shows a one-line error with a copyable remediation hint such as `az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`.
 3. Given the user runs the remediation command and retries, When they invoke a tool, Then the server reconnects automatically without requiring a settings revisit.
 
 ### Edge Cases

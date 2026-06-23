@@ -18,7 +18,7 @@ Adds authenticated MCP server support and the first built-in preset (Microsoft 3
 - **Obsidian-renderer fetch adapter.** `src/mcp/transport/obsidianFetch.ts` wraps Obsidian's `requestUrl()` API as a `fetch`-compatible function so MCP HTTP traffic bypasses Electron-renderer CORS. Required for the M365 Graph MCP and any other enterprise MCP server that doesn't emit `Access-Control-Allow-Origin` for the Obsidian origin.
 - **User guide** at [`docs/m365-graph-mcp.md`](docs/m365-graph-mcp.md): quick start, credential model, troubleshooting matrix, custom commands, security posture, scope limits.
 - **PAW technical reference** at [`.paw/work/authenticated-mcps/Docs.md`](.paw/work/authenticated-mcps/Docs.md). Manual smoke checklist at [`.paw/work/authenticated-mcps/SmokeChecklist.md`](.paw/work/authenticated-mcps/SmokeChecklist.md).
-- **Forward-looking proposals.** [`proposals/0006`](proposals/0006-tool-picker-and-scope-aware-credentials.md) — tool picker driving scope selection via `oauth-pkce`. [`proposals/0007`](proposals/0007-importable-preset-packs.md) — importable preset packs for distributing per-product Graph MCPs (e.g. `agency mcp mail`, `agency mcp calendar`) outside the public plugin.
+- **Forward-looking proposals.** [`proposals/0006`](proposals/0006-tool-picker-and-scope-aware-credentials.md) — tool picker driving scope selection via `oauth-pkce`. [`proposals/0007`](proposals/0007-importable-preset-packs.md) — importable preset packs for distributing per-product Graph MCPs outside the public plugin.
 
 ### Changed
 

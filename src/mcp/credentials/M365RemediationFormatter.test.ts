@@ -15,8 +15,8 @@ function ctx(overrides: Partial<RemediationContext> = {}): RemediationContext {
 describe("M365RemediationFormatter", () => {
   test("az + unauthorized + tenant → emits `az login --tenant <id>` copyable", () => {
     const fmt = new M365RemediationFormatter();
-    const out = fmt.format(ctx({ lastTenantId: "72f988bf-86f1-41af-91ab-2d7cd011db47" }));
-    expect(out.copyable).toBe("az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47");
+    const out = fmt.format(ctx({ lastTenantId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }));
+    expect(out.copyable).toBe("az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     expect(out.text).toMatch(/Azure CLI/);
   });
 
@@ -65,10 +65,10 @@ describe("M365RemediationFormatter", () => {
     const out = fmt.format(
       ctx({
         error: { kind: "timeout" },
-        lastTenantId: "72f988bf-86f1-41af-91ab-2d7cd011db47",
+        lastTenantId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
       }),
     );
-    expect(out.copyable).toBe("az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47");
+    expect(out.copyable).toBe("az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     expect(out.text).toMatch(/Azure CLI/);
     expect(out.text).toMatch(/timed out/i);
   });

@@ -110,10 +110,10 @@ bug. The forward path is tracked in:
   calendar, teams, etc.) can be added as separate stdio servers via
   curated packs distributed outside this repo.
 
-If you are an internal Microsoft user, the per-product Graph MCPs
-exposed by the `agency` CLI (`agency mcp mail`, `agency mcp calendar`,
-…) are the easiest workaround today. Add each as a stdio server
-manually until preset packs land.
+If your organization ships an internal CLI that proxies per-product
+Graph endpoints as stdio MCP servers (mail, calendar, etc.), you can
+configure each as a stdio MCP server manually today; the importable
+preset packs proposal above tracks a less-manual path.
 
 ## Troubleshooting
 
@@ -180,22 +180,12 @@ The preset registry is currently code-only and ships exactly one entry
 (M365 Graph). Importable preset packs are tracked in
 [`proposals/0007`](../proposals/0007-importable-preset-packs.md).
 
-### Microsoft WorkIQ (future direction)
+### Future direction: single-scope Entra-protected MCP gateways
 
-Microsoft's internal [WorkIQ](https://eng.ms/docs/experiences-devices/m365-core-substrate/copilot-extensibility/work-iq/work-iq)
-surface at `workiq.svc.cloud.microsoft` is an identity-scoped,
-Entra-protected gateway over agent-style M365 capabilities (file search,
-mail, calendar, Teams, etc.). It is currently exposed as an
-**A2A (agent-to-agent)** protocol, not MCP, but its catalog spec
-explicitly reserves space for MCP media types. Its OAuth Protected
-Resource Metadata advertises two scopes, `WorkIQ.Ask` (broad) and
-`WorkIQ.Selected` (constrained), against a multi-tenant authority —
-exactly the shape `oauth-pkce` is designed to handle.
-
-When WorkIQ adds MCP entries, the same credential schema in this plugin
-will reach it without an architectural change: a single `WorkIQ.Ask`
-token covers the broader M365 surface that an `az`-fronted Graph token
-cannot. In the meantime, internal Microsoft users can reach WorkIQ
-today through `agency mcp workiq` (a stdio MCP bridge that handles its
-own Entra sign-in) configured as a `command` server — exactly the
-pattern proposal 0007 generalises.
+The `oauth-pkce` credential variant reserved by the schema is designed
+to work with future Entra-protected MCP gateways that consolidate the
+broader M365 surface (file search, mail, calendar, etc.) behind one
+or two unified scopes against a multi-tenant authority. When such a
+gateway publishes an MCP endpoint, this plugin's credential schema
+will reach it without an architectural change — a single broad-scope
+token covers what an `az`-fronted Graph token cannot today.

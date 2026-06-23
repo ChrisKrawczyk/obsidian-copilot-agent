@@ -7,9 +7,12 @@ import path from "node:path";
  * existing match. Returns `null` when no match is found.
  *
  * Lookup is case-insensitive on the PATH variable name (Windows tooling
- * sometimes preserves `Path` rather than `PATH`); directory separators
- * use `path.win32.delimiter` since this resolver is only invoked from
- * Windows-specific code paths (cmd/bat wrapper resolution).
+ * sometimes preserves `Path` rather than `PATH`); the PATH value is
+ * split on `path.win32.delimiter` (`;`) so Windows-style PATH strings
+ * round-trip correctly regardless of host platform (e.g. when this code
+ * is exercised from Linux CI). Each candidate is joined with the
+ * platform-default `path.join` so the resulting absolute path uses the
+ * correct directory separator for the host filesystem.
  *
  * Extracted from `StdioTransport.ts` so the same resolution logic can be
  * reused by `SpawnCommandRunner` without coupling credential-command
@@ -23,7 +26,7 @@ export function findOnPath(
   const pathValue = pathKey ? env[pathKey] : "";
   for (const entry of pathValue.split(path.win32.delimiter)) {
     if (!entry) continue;
-    const candidate = path.win32.join(entry, command);
+    const candidate = path.join(entry, command);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;

@@ -239,7 +239,7 @@ describe("McpManager Phase 4 credential integration", () => {
       tools: [{ serverId: server.id, serverName: server.name, toolName: "t", syntheticId: `mcp__${server.id}__t` }],
     });
     const resolver = stubResolver({
-      getLastKnownTenantId: vi.fn(() => "72f988bf-86f1-41af-91ab-2d7cd011db47"),
+      getLastKnownTenantId: vi.fn(() => "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
     } as Partial<CredentialResolver>);
     const manager = new McpManager({
       vaultRoot: "C:\\vault",
@@ -252,7 +252,7 @@ describe("McpManager Phase 4 credential integration", () => {
     const err = await manager.callTool(server.id, "t", {}).catch((e: Error) => e);
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/Azure CLI credentials/);
-    expect((err as Error).message).toMatch(/Run: az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47/);
+    expect((err as Error).message).toMatch(/Run: az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/);
     expect(callCount).toBe(2);
   });
 
@@ -289,7 +289,7 @@ describe("McpManager Phase 4 credential integration", () => {
           exitCode: 1,
         });
       }),
-      getLastKnownTenantId: vi.fn(() => "72f988bf-86f1-41af-91ab-2d7cd011db47"),
+      getLastKnownTenantId: vi.fn(() => "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
     } as Partial<CredentialResolver>);
     const manager = new McpManager({
       vaultRoot: "C:\\vault",
@@ -305,7 +305,7 @@ describe("McpManager Phase 4 credential integration", () => {
     await expect(manager.callTool(server.id, "t", {})).rejects.toThrow(/Azure CLI/);
     const failureCall = setCredentialSnapshot.mock.calls.find((c) => c[0]?.state === "failed");
     expect(failureCall).toBeDefined();
-    expect(failureCall![0].copyable).toBe("az login --tenant 72f988bf-86f1-41af-91ab-2d7cd011db47");
+    expect(failureCall![0].copyable).toBe("az login --tenant aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     expect(failureCall![0].remediation).toMatch(/Azure CLI/);
   });
 

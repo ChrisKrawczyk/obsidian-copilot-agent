@@ -47,7 +47,7 @@ The plan is structured so each phase is independently reviewable and lands behin
 **Verification approach:**
 - `npm test` passes with new + existing tests.
 - `npm run build` succeeds with strict TypeScript.
-- Manual: install the rebuilt plugin into the test vault (`C:\Users\chkraw\OneDrive - Microsoft\Vaults\copilot-test`) and exercise SC-001 through SC-010 by hand.
+- Manual: install the rebuilt plugin into the test vault and exercise SC-001 through SC-010 by hand.
 
 ## What We're NOT Doing
 

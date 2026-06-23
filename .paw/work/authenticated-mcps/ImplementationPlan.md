@@ -251,7 +251,7 @@ Add a `credentials` field to HTTP MCP server configs supporting three behavioral
 - **Tests**:
   - `src/settings/presets/McpServerPresets.test.ts`: snapshot test pinning every field listed in FR-008 (URL, command verbatim, refresh buffer, JSON paths, preflight command and install hint).
   - `src/mcp/credentials/M365RemediationFormatter.test.ts`:
-    - **az path detection**: `(command-based, unauthorized, command="az account get-access-token ...", lastTenantId="72f988bf-...")` → `copyable === "az login --tenant 72f988bf-..."`; same inputs with `lastTenantId = null` → `copyable === "az login"`.
+    - **az path detection**: `(command-based, unauthorized, command="az account get-access-token ...", lastTenantId="aaaaaaaa-bbbb-...")` → `copyable === "az login --tenant aaaaaaaa-bbbb-..."`; same inputs with `lastTenantId = null` → `copyable === "az login"`.
     - **Windows az.cmd detection**: `command = "C:\\Program Files\\Azure CLI\\wbin\\az.cmd account get-access-token ..."` triggers the same `az login` specialization.
     - **Custom command-based servers fall through**: `(command-based, unauthorized, command="my-helper.sh", ...)` does NOT return `az login` — it delegates to `DefaultRemediationFormatter`. This is the P2-user-story guard Gemini called out.
     - Null `command` falls through. Non-`unauthorized` errors fall through. Non-`command-based` variants fall through.

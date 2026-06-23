@@ -15,15 +15,15 @@ more presets means:
 
 1. Code change to the plugin
 2. PR + review + ship + user update
-3. **Anything that requires referencing an internal-only or
-   environment-specific tool gets stuck.** Example: Microsoft has the
-   `agency` CLI (`aka.ms/agency`) that proxies every M365 Graph product
-   as its own stdio MCP server (mail, calendar, teams, onedrive,
-   sharepoint, planner, word, etc.) with full EntraID auth handled.
-   It would be a perfect set of presets — but we cannot ship them in
-   the public plugin because `agency` is internal-only. We also don't
-   want to leak internal `aka.ms` links, support contacts
-   (`mcpplat@microsoft.com`), or service names into a community plugin.
+3. **Anything that requires referencing an organization-specific or
+   environment-specific tool gets stuck.** Many organizations have
+   internal CLIs that proxy each of their hosted services as its own
+   stdio MCP server (mail, calendar, files, etc.) with their auth model
+   already handled. Those would be perfect sets of presets — but they
+   cannot be shipped in a community plugin because the tool is
+   internal, the install instructions are internal, and the support
+   contacts are internal. We don't want any of that leaking into a
+   public codebase.
 
 The asymmetry: the *value* of presets scales with how many of them
 exist, but the *cost of distribution* fights against tenant-specific,
@@ -44,29 +44,28 @@ A **preset pack** is a JSON document describing one or more
 ```jsonc
 {
   "$schema": "https://obsidian-copilot-agent.dev/schemas/preset-pack-v1.json",
-  "id": "internal-microsoft-agency-pack",
-  "label": "Microsoft Agency MCPs (internal)",
+  "id": "example-internal-mcp-pack",
+  "label": "Example Internal MCP Bridges",
   "version": "2026.6.1",
-  "source": "https://aka.ms/agency",   // documentation pointer (display-only)
   "presets": [
     {
-      "id": "agency-mail",
-      "label": "Microsoft Mail (via agency)",
-      "description": "Microsoft 365 Mail MCP server via agency CLI.",
+      "id": "example-mail",
+      "label": "Mail (via internal CLI)",
+      "description": "Mail MCP server via the org's internal MCP bridge CLI.",
       "server": {
-        "name": "Microsoft Mail",
+        "name": "Mail",
         "transport": "stdio",
-        "command": "agency",
+        "command": "internal-mcp-cli",
         "args": ["mcp", "mail"]
       },
       "credentials": { "kind": "none" },
       "preflight": {
         "type": "findOnPath",
-        "command": "agency",
-        "installHint": "Install: iex \"& { $(irm aka.ms/InstallTool.ps1)} agency\""
+        "command": "internal-mcp-cli",
+        "installHint": "Install the internal MCP bridge CLI per your org's documentation."
       }
     }
-    // ...calendar, teams, onedrive, sharepoint, planner, word, etc.
+    // ...calendar, files, etc.
   ]
 }
 ```
@@ -177,21 +176,15 @@ without touching plugin source.
 - New credential variants (e.g. real `oauth-pkce`) — orthogonal; this
   proposal is about distribution shape, not new credential kinds.
 
-### Related: Microsoft WorkIQ
+### Related: future single-scope MCP gateways
 
-Microsoft's [WorkIQ](https://eng.ms/docs/experiences-devices/m365-core-substrate/copilot-extensibility/work-iq/work-iq)
-gateway (`workiq.svc.cloud.microsoft`) is the closest existing
-example of a single Entra-protected resource that fronts the broader
-M365 surface (file search, mail, calendar, Teams) under just two
-scopes — `WorkIQ.Ask` / `WorkIQ.Selected`. It is **A2A today, not
-MCP**, but the catalog spec reserves space for MCP entries. When that
-lights up, an "internal pack" distributed via this proposal could
-ship a single WorkIQ preset that covers what would otherwise be
-~10 individual `agency mcp <product>` stdio bridges. That pack
-would use the (future) `oauth-pkce` credential variant and a
-`WorkIQ.Ask` scope — no `agency` CLI dependency. Until then, the
-internal pack pattern is the `agency mcp <product>` stdio bridges
-described above.
+As Entra-protected MCP gateways consolidate broad product surfaces
+(file search, mail, calendar, etc.) behind one or two unified scopes,
+a single preset distributed via this proposal could replace what would
+otherwise be many per-product stdio bridges. Such a pack would use the
+(future) `oauth-pkce` credential variant — no internal-CLI dependency.
+Until that lights up, the internal-pack pattern is the per-product
+stdio bridges described in the example above.
 
 
 ## Acceptance criteria (sketch)
@@ -206,8 +199,8 @@ described above.
   those presets — those are independent instances).
 - Schema validation rejects malformed packs with a single user-visible
   error citing the offending field path.
-- An "internal Microsoft agency MCP pack" (curated separately,
-  distributed outside this repo) can be installed and yields working
-  presets for mail / calendar / teams / onedrive / sharepoint /
-  planner / word / m365-copilot / m365-user — verifiable manually,
-  not in the public test suite.
+- An "internal MCP pack" (curated separately, distributed outside
+  this repo) can be installed and yields working presets for
+  organization-specific MCP servers (e.g. per-product stdio bridges
+  fronted by an internal CLI) — verifiable manually, not in the public
+  test suite.
