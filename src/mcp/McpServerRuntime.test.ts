@@ -188,7 +188,9 @@ describe("McpServerRuntime", () => {
   });
 
   test("HTTP shutdown attempts bounded DELETE with session id then clears it", async () => {
-    const fetchSpy = vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    let captured: { url: unknown; init: RequestInit | undefined } | null = null;
+    const fetchSpy = vi.fn((url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      captured = { url, init };
       init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     }));
     const transport = new FakeTransport(
@@ -205,14 +207,41 @@ describe("McpServerRuntime", () => {
       const unload = rt.unload();
       await vi.advanceTimersByTimeAsync(1_500);
       await unload;
-      expect(fetchSpy).toHaveBeenCalledWith("https://example.com/mcp", expect.objectContaining({
-        method: "DELETE",
-        headers: expect.objectContaining({ "Mcp-Session-Id": "sid-secret" }),
-      }));
+      expect(captured).not.toBeNull();
+      const init = (captured as { init: RequestInit }).init;
+      expect(init.method).toBe("DELETE");
+      expect(new Headers(init.headers).get("Mcp-Session-Id")).toBe("sid-secret");
       expect(rt.getVolatileSessionIdForTest()).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("HTTP shutdown DELETE carries dynamic Authorization from getAuthorization", async () => {
+    let captured: { url: unknown; init: RequestInit | undefined } | null = null;
+    const fetchSpy = vi.fn((url: unknown, init?: RequestInit) => {
+      captured = { url, init };
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const transport = new FakeTransport(
+      {
+        initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} } },
+        "tools/list": { tools: [] },
+      },
+      { sessionId: "sid-secret" },
+    );
+    const rt = runtime(transport, httpConfig(), {
+      fetch: fetchSpy as never,
+      getAuthorization: async () => "Bearer dynamic-cleanup",
+    });
+    await rt.connect();
+    await rt.unload();
+    expect(captured).not.toBeNull();
+    const init = (captured as { init: RequestInit }).init;
+    expect(init.method).toBe("DELETE");
+    const headers = new Headers(init.headers);
+    expect(headers.get("Mcp-Session-Id")).toBe("sid-secret");
+    expect(headers.get("Authorization")).toBe("Bearer dynamic-cleanup");
   });
 
   test("five crashes in five minutes enter crashloop terminal state", async () => {

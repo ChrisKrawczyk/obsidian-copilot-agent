@@ -51,7 +51,7 @@ Add a `credentials` field to HTTP MCP server configs supporting three behavioral
 - [x] **Phase 1: Credential schema, types, and persistence round-trip** — Discriminated union; `oauth-pkce` reserved fields preserved.
 - [x] **Phase 2: Pure credential resolver utility** — JSON path, expiry math, in-memory cache, rate limit; no I/O.
 - [x] **Phase 3: Command runner backend with timeout** — Direct spawn, 15s cap, shared `findOnPath` extracted.
-- [ ] **Phase 4: HTTP transport integration + 401 retry + trust-epoch invariance** — Header stamped per request via resolver callback; exactly-one retry; grants survive rotation.
+- [x] **Phase 4: HTTP transport integration + 401 retry + trust-epoch invariance** — Header stamped per request via resolver callback; exactly-one retry; grants survive rotation.
 - [ ] **Phase 5: Preset registry, settings UI, Test connection, preflight** — Data-driven preset + DOM-thin UI with all logic in pure helpers.
 - [ ] **Phase 6: Documentation** — `docs/m365-graph-mcp.md`, README, CHANGELOG, PAW Docs.md, smoke checklist.
 

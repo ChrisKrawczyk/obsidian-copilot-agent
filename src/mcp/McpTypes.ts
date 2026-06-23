@@ -55,6 +55,23 @@ export interface McpHttpServerConfig extends McpServerConfigBase {
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
 
+export type McpCredentialResolutionState = "ok" | "failed" | "not-applicable";
+
+export interface McpCredentialSnapshot {
+  /** Outcome of the most recent credential resolution attempt. */
+  state: McpCredentialResolutionState;
+  /** Discriminator from the configured credentials block. */
+  variant: "none" | "static-bearer" | "command-based" | "oauth-pkce";
+  /** Epoch millis when the active token expires (if known). */
+  expiresAt?: number;
+  /** Epoch millis when the resolver expects to refresh next (if known). */
+  nextRefreshAt?: number;
+  /** Redacted error detail when state === "failed". Never contains token material. */
+  lastError?: string;
+  /** Human-readable remediation hint (already redacted). */
+  remediation?: string;
+}
+
 export interface McpServerRuntimeSnapshot {
   id: McpServerId;
   status: McpRuntimeStatus;
@@ -63,6 +80,8 @@ export interface McpServerRuntimeSnapshot {
   instructions?: string;
   protocolVersion?: string;
   stderrTail?: string;
+  /** Credential resolution snapshot (Phase 4+). Absent for stdio servers and HTTP servers without credentials. */
+  credential?: McpCredentialSnapshot;
 }
 
 export interface McpServerRedactedSnapshot {

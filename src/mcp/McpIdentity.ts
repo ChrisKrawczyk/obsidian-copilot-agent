@@ -25,6 +25,12 @@ export function normalizeServerId(raw: string): McpServerId {
 }
 
 export function computeTrustEpoch(config: Pick<McpServerConfig, "name" | "transport"> & Partial<McpServerConfig>): McpTrustEpoch {
+  // FR-011: trust-epoch material MUST include only identity-defining fields
+  // (name, transport, command/args or url). Credential variants, token paths,
+  // command lines used to resolve credentials, OAuth client ids, etc. are
+  // explicitly excluded so that changes to *how* a server authenticates do
+  // NOT invalidate existing per-tool approvals. Adding any credentials-derived
+  // field here would silently revoke grants on every credential edit.
   const material =
     config.transport === "stdio"
       ? {

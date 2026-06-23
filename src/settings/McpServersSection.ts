@@ -264,6 +264,14 @@ export class McpServersSection {
       await this.options.store.markAuthorizationNoticeShown();
     }
     await this.handleTrustEpochChange(meta, config.name, config.trustEpoch);
+    // Phase 4 (FR-011): credential-only edits MUST NOT revoke grants. The
+    // trust-epoch helper above is the only path that calls
+    // `revokeGrantsForServer`, and `computeTrustEpoch` excludes credentials,
+    // so a credential edit reaches here without touching grants. Notify the
+    // manager so the cached credential is invalidated on the next request.
+    if (existing && credentialsChanged(existing, config)) {
+      this.options.manager.onCredentialConfigChanged?.(config.id);
+    }
     if (config.enabled) {
       void this.options.manager.enable(config.id).catch((err: unknown) => this.noticeError(err));
     }
@@ -477,4 +485,11 @@ function shouldShowAuthorizationNotice(
     !!existing.authorization ||
     existing.credentials?.kind === "static-bearer";
   return !existingHasAuth;
+}
+
+export function credentialsChanged(prev: McpServerConfig, next: McpServerConfig): boolean {
+  if (prev.transport !== "http" || next.transport !== "http") return false;
+  const prevKey = JSON.stringify({ a: prev.authorization ?? null, c: prev.credentials ?? null });
+  const nextKey = JSON.stringify({ a: next.authorization ?? null, c: next.credentials ?? null });
+  return prevKey !== nextKey;
 }

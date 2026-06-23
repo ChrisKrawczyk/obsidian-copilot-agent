@@ -7,6 +7,7 @@ import type {
   McpRuntimeStatus,
   McpServerConfig,
   McpServerRuntimeSnapshot,
+  McpCredentialSnapshot,
   McpToolInventoryEntry,
 } from "./McpTypes";
 import { formatSyntheticId, isValidMcpToolName } from "./McpToolIdentity";
@@ -18,6 +19,7 @@ import {
   validateRedirectHop,
 } from "./httpPolicy";
 import { StdioTransport, MCP_STDIO_FRAME_LIMIT_BYTES } from "./transport/StdioTransport";
+import { McpHttpError } from "./McpHttpError";
 
 export const MCP_ADVERTISED_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_COMPAT_PROTOCOL_VERSION = "2024-11-05";
@@ -41,6 +43,15 @@ export interface McpServerRuntimeOptions {
   now?: () => number;
   onListChanged?: (serverId: McpServerConfig["id"]) => void;
   onForcedKill?: (event: { serverId: McpServerConfig["id"]; pid?: number; reason: string }) => void;
+  /**
+   * Dynamic Authorization-header provider (Phase 4). When supplied for an HTTP
+   * runtime, the streamable-http fetch wrapper calls this immediately before
+   * each request and overrides the `Authorization` header with the returned
+   * value (or omits it if `null`). After a cross-origin redirect, the existing
+   * strip path in `createMcpHttpFetchWrapper` removes any dynamic header and
+   * we do NOT re-inject — FR-017 + SC-009.
+   */
+  getAuthorization?: () => Promise<string | null>;
 }
 
 export interface DiscoveredInventory {
@@ -65,6 +76,7 @@ export class McpServerRuntime {
   private listChangedSubscribed = false;
   private crashAttempts: number[] = [];
   private lifecycleEpoch = 0;
+  private credentialSnapshot: McpCredentialSnapshot | undefined;
 
   constructor(
     private readonly config: McpServerConfig,
@@ -205,7 +217,18 @@ export class McpServerRuntime {
       ...(this.instructions ? { instructions: redactSensitive(this.instructions) } : {}),
       ...(this.protocolVersion ? { protocolVersion: this.protocolVersion } : {}),
       ...(stderrTail ? { stderrTail: redactSensitive(stderrTail) } : {}),
+      ...(this.credentialSnapshot ? { credential: this.credentialSnapshot } : {}),
     });
+  }
+
+  /**
+   * Manager-driven hook (Phase 4) — records the most recent credential
+   * resolution outcome so it appears in `snapshot().credential`. Never
+   * carries token material; `lastError` / `remediation` are pre-redacted
+   * by the caller.
+   */
+  setCredentialSnapshot(next: McpCredentialSnapshot | undefined): void {
+    this.credentialSnapshot = next ? Object.freeze({ ...next }) : undefined;
   }
 
   inventory(): DiscoveredInventory {
@@ -258,7 +281,9 @@ export class McpServerRuntime {
         onForcedKill: (event) => this.options.onForcedKill?.({ serverId: this.config.id, ...event }),
       });
     }
-    return createStreamableHttpTransport(this.config, this.options.fetch ?? fetch);
+    return createStreamableHttpTransport(this.config, this.options.fetch ?? fetch, {
+      getAuthorization: this.options.getAuthorization,
+    });
   }
 
   private async discoverTools(): Promise<McpToolInventoryEntry[]> {
@@ -454,13 +479,35 @@ export class McpServerRuntime {
     this.sessionId = undefined;
     const controller = new AbortController();
     const timer = (this.options.setTimeout ?? setTimeout)(() => controller.abort(), 1_500);
+    let authorization: string | null = null;
     try {
-      await (this.options.fetch ?? fetch)(this.config.url, {
+      authorization = this.options.getAuthorization
+        ? await this.options.getAuthorization()
+        : null;
+    } catch {
+      authorization = null;
+    }
+    if (!authorization && this.config.authorization) {
+      authorization = this.config.authorization;
+    }
+    // FR-007 / SC-009: route DELETE through the same fetch wrapper as
+    // initialize / list / call so private-network, metadata, redirect, and
+    // body-cap guardrails apply. We do NOT enable `throwOnHttpError` —
+    // session cleanup is best-effort and must not throw on a server-side
+    // 4xx. The dynamic Authorization is injected via the wrapper's
+    // `getAuthorization` hook (passing a thunk that returns the value we
+    // already resolved above keeps the wrapper's contract intact).
+    const wrappedFetch = createMcpHttpFetchWrapper(
+      this.options.fetch ?? fetch,
+      MCP_HTTP_BODY_LIMIT_BYTES,
+      { getAuthorization: async () => authorization },
+    );
+    try {
+      await wrappedFetch(this.config.url, {
         method: "DELETE",
         headers: {
           "Mcp-Session-Id": sessionId,
           ...(this.protocolVersion ? { "MCP-Protocol-Version": this.protocolVersion } : {}),
-          ...(this.config.authorization ? { Authorization: this.config.authorization } : {}),
         },
         signal: controller.signal,
       });
@@ -489,28 +536,58 @@ export class McpServerRuntime {
   }
 }
 
+export interface McpStreamableHttpTransportOptions {
+  /** Dynamic Authorization provider; falls back to `config.authorization` when absent. */
+  getAuthorization?: () => Promise<string | null>;
+}
+
 export function createStreamableHttpTransport(
   config: McpHttpServerConfig,
   baseFetch: typeof fetch,
+  options: McpStreamableHttpTransportOptions = {},
 ): Transport {
   const validation = validateMcpHttpUrl(config.url, { allowPrivateNetwork: true });
   if (validation.hostClass === "metadata") throw new Error("MCP HTTP URL targets metadata.");
   const headers: Record<string, string> = {};
+  // Static fallback so SDK-initiated requests that bypass the dynamic injector
+  // (none today, but defensive) still carry a sensible Authorization. The
+  // dynamic injector inside the wrapper always overrides this when present.
   if (config.authorization) headers.Authorization = config.authorization;
   return new StreamableHTTPClientTransport(validation.url, {
     requestInit: { headers },
-    fetch: createMcpHttpFetchWrapper(baseFetch),
+    fetch: createMcpHttpFetchWrapper(baseFetch, MCP_HTTP_BODY_LIMIT_BYTES, {
+      getAuthorization: options.getAuthorization,
+      throwOnHttpError: true,
+    }),
   });
+}
+
+export interface McpHttpFetchWrapperOptions {
+  /** Called immediately before the initial fetch (and any same-origin retry). */
+  getAuthorization?: () => Promise<string | null>;
+  /** When true, throw `McpHttpError` for responses with status >= 400. */
+  throwOnHttpError?: boolean;
 }
 
 export function createMcpHttpFetchWrapper(
   baseFetch: typeof fetch,
   bodyLimitBytes = MCP_HTTP_BODY_LIMIT_BYTES,
+  wrapperOptions: McpHttpFetchWrapperOptions = {},
 ): typeof fetch {
+  const { getAuthorization, throwOnHttpError = false } = wrapperOptions;
   return async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     assertNoTlsBypassOptions(init as Record<string, unknown>);
     let url = input instanceof Request ? new URL(input.url) : new URL(String(input));
     let headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
+    // Phase 4: inject the dynamic Authorization once before the FIRST hop.
+    // On subsequent same-origin redirects we keep whatever survived; on
+    // cross-origin we let `stripCrossOriginAuthHeaders` remove it and
+    // intentionally do not re-inject (FR-017, SC-009).
+    if (getAuthorization) {
+      const dyn = await getAuthorization();
+      if (dyn) headers.set("Authorization", dyn);
+      else headers.delete("Authorization");
+    }
     let currentInit: RequestInit = { ...init, headers, redirect: "manual" };
     for (let hop = 0; ; hop += 1) {
       const validation = validateMcpHttpUrl(url, { allowPrivateNetwork: true });
@@ -520,6 +597,9 @@ export function createMcpHttpFetchWrapper(
       const response = await baseFetch(validation.url, currentInit);
       const location = response.headers.get("location");
       if (![301, 302, 303, 307, 308].includes(response.status) || !location) {
+        if (throwOnHttpError && response.status >= 400) {
+          throw new McpHttpError(response.status, response.headers.get("www-authenticate"));
+        }
         return enforceResponseSize(response, bodyLimitBytes);
       }
       const next = validateRedirectHop(validation.url, location, hop + 1, {
@@ -656,8 +736,19 @@ function withTimeout<T>(
   });
 }
 
-function sanitizeError(err: unknown): Error {
+export function sanitizeError(err: unknown): Error {
   const source = err instanceof Error ? err : new Error(String(err));
+  // Phase 4: typed errors that carry structured discriminants
+  // (McpHttpError.status, CredentialResolutionFailed.error.kind) MUST
+  // survive the sanitize boundary or the manager's 401-retry / formatter
+  // dispatch can never run. We mutate the existing instance in place
+  // (redact message + stack) so `instanceof` and field accesses both
+  // continue to work upstream.
+  if (source.name === "McpHttpError" || source.name === "CredentialResolutionFailed") {
+    source.message = redactSensitive(source.message);
+    if (source.stack) source.stack = redactSensitive(source.stack);
+    return source;
+  }
   const next = new Error(redactSensitive(source.message));
   next.name = source.name;
   next.stack = source.stack ? redactSensitive(source.stack) : undefined;

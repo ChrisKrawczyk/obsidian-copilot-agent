@@ -37,6 +37,9 @@ import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { McpSettingsStore } from "./settings/McpSettingsStore";
 import { McpManager } from "./mcp/McpManager";
+import { CredentialResolver } from "./mcp/credentials/CredentialResolver";
+import { SpawnCommandRunner } from "./mcp/credentials/SpawnCommandRunner";
+import { DefaultRemediationFormatter } from "./mcp/credentials/RemediationFormatter";
 import type { McpServerId } from "./mcp/McpTypes";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { buildMcpToolRegistrySnapshot } from "./mcp/McpToolRegistry";
@@ -314,6 +317,10 @@ export default class CopilotAgentPlugin extends Plugin {
       session: AgentSession;
       conversationId: string;
     }>();
+    const mcpCredentialResolver = new CredentialResolver({
+      clock: () => Date.now(),
+      runner: new SpawnCommandRunner(),
+    });
     const mcpManager = new McpManager({
       vaultRoot,
       serversProvider: () => mcpSettingsStore.snapshot(),
@@ -330,6 +337,8 @@ export default class CopilotAgentPlugin extends Plugin {
         // eslint-disable-next-line no-console -- documented redaction seam (Phase 6 forced MCP child shutdown warning)
         console.warn(`[Copilot Agent] ${event.reason} pid=${event.pid ?? "unknown"} serverId=${event.serverId}`);
       },
+      credentialResolver: mcpCredentialResolver,
+      remediationFormatter: new DefaultRemediationFormatter(),
     });
     this.mcpManager = mcpManager;
     const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
