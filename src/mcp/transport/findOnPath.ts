@@ -10,9 +10,12 @@ import path from "node:path";
  * sometimes preserves `Path` rather than `PATH`); the PATH value is
  * split on `path.win32.delimiter` (`;`) so Windows-style PATH strings
  * round-trip correctly regardless of host platform (e.g. when this code
- * is exercised from Linux CI). Each candidate is joined with the
- * platform-default `path.join` so the resulting absolute path uses the
- * correct directory separator for the host filesystem.
+ * is exercised from Linux CI). Each candidate is joined using `path.win32`
+ * when the entry looks Windows-styled (drive letter prefix or contains
+ * backslashes), otherwise using the platform-default `path.join`. This
+ * keeps Windows PATH entries matching backslash-paths on the host
+ * filesystem (or in mocked `existsSync`) while still letting real
+ * POSIX paths on Linux/macOS resolve normally.
  *
  * Extracted from `StdioTransport.ts` so the same resolution logic can be
  * reused by `SpawnCommandRunner` without coupling credential-command
@@ -26,8 +29,13 @@ export function findOnPath(
   const pathValue = pathKey ? env[pathKey] : "";
   for (const entry of pathValue.split(path.win32.delimiter)) {
     if (!entry) continue;
-    const candidate = path.join(entry, command);
+    const joiner = looksWindowsPath(entry) ? path.win32.join : path.join;
+    const candidate = joiner(entry, command);
     if (fs.existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+function looksWindowsPath(entry: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(entry) || entry.includes("\\");
 }
