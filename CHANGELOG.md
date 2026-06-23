@@ -3,6 +3,40 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.7.0] - Unreleased
+
+Adds authenticated MCP server support and the first built-in preset (Microsoft 365 Graph via Azure CLI). Additive over v0.6; no breaking changes.
+
+### Added
+
+- **Per-request credential resolver for HTTP MCP servers.** New `ServerCredentials` discriminated union (`none` | `static-bearer` | `command-based`, plus reserved `oauth-pkce`). The HTTP transport asks the resolver for an `Authorization` value before each initial-hop fetch and respects the existing redirect / cross-origin / private-network policies on subsequent hops. Tokens from command-based credentials live in memory only; the resolver caches them until `expiresOn - refreshBufferSeconds`. (`src/mcp/credentials/`, `src/mcp/McpServerRuntime.ts`.)
+- **One-shot 401 retry.** On a 401 from a credential-bearing request, `McpManager` invalidates the per-server token cache and retries exactly once. Token rotation across a long chat session is therefore chat-invisible. (`src/mcp/McpManager.ts`, `src/mcp/McpManager.credentials.test.ts`.)
+- **Preset registry + Microsoft 365 Graph preset.** Settings → MCP Servers → Add → preset dropdown. The shipped preset is **Microsoft 365 Graph (via Azure CLI)**, pinned to the FR-008 values and asserted by snapshot test. Selecting it pre-fills the entire form. (`src/settings/presets/McpServerPresets.ts`.)
+- **Inline preflight install hint.** `src/settings/isCommandOnPath.ts` resolves bare commands against `PATH` (with Windows `PATHEXT` probing). The settings form surfaces a non-blocking install hint when the preset's command is missing.
+- **Test connection** button on every HTTP MCP server row. Runs the initialize handshake against the live server. (`src/settings/McpServersSection.ts`.)
+- **`M365RemediationFormatter`.** Chat-side credential errors now include a copyable remediation hint specific to the M365 preset (install hint when `az` is absent, `az login --tenant <…>` when present). Custom commands fall through to a generic hint. (`src/mcp/credentials/M365RemediationFormatter.ts`, wired in `src/main.ts`.)
+- **Obsidian-renderer fetch adapter.** `src/mcp/transport/obsidianFetch.ts` wraps Obsidian's `requestUrl()` API as a `fetch`-compatible function so MCP HTTP traffic bypasses Electron-renderer CORS. Required for the M365 Graph MCP and any other enterprise MCP server that doesn't emit `Access-Control-Allow-Origin` for the Obsidian origin.
+- **User guide** at [`docs/m365-graph-mcp.md`](docs/m365-graph-mcp.md): quick start, credential model, troubleshooting matrix, custom commands, security posture, scope limits.
+- **PAW technical reference** at [`.paw/work/authenticated-mcps/Docs.md`](.paw/work/authenticated-mcps/Docs.md). Manual smoke checklist at [`.paw/work/authenticated-mcps/SmokeChecklist.md`](.paw/work/authenticated-mcps/SmokeChecklist.md).
+- **Forward-looking proposals.** [`proposals/0006`](proposals/0006-tool-picker-and-scope-aware-credentials.md) — tool picker driving scope selection via `oauth-pkce`. [`proposals/0007`](proposals/0007-importable-preset-packs.md) — importable preset packs for distributing per-product Graph MCPs (e.g. `agency mcp mail`, `agency mcp calendar`) outside the public plugin.
+
+### Changed
+
+- HTTP MCP servers configured with a top-level `authorization` string in v0.5/v0.6 are migrated to the `static-bearer` credential variant on read. The on-disk shape is preserved unless the row is re-saved through the new settings UI.
+- `createMcpHttpFetchWrapper` now passes HTTP 405 through to the SDK as a `Response` instead of throwing `McpHttpError`. The MCP Streamable HTTP spec treats 405 on the optional SSE GET listening stream — and on session DELETE — as the "feature not supported" signal, which the SDK handles internally. All other ≥400 statuses still throw with the redacted `WWW-Authenticate` value preserved.
+
+### Fixed (Obsidian renderer environment)
+
+- `setTimeout` / `clearTimeout` in `SpawnCommandRunner` are captured at construction time as arrow wrappers so calls survive Obsidian's renderer process, where the receiver of the bare global must be `globalThis`.
+- `fetch` is invoked via `globalThis.fetch.bind(globalThis)` when no adapter is injected, for the same reason.
+- `az` (and any bare command without an extension) now resolves via `PATHEXT` on Windows before `spawn`, so `az` → `az.cmd` is dispatched through the existing `cmd.exe /d /s /c` wrapper.
+
+### Known limitations
+
+- **Permission scopes via `az` are bounded to what the Azure CLI client is pre-consented for on the MCP service** — in practice `User.Read`-class data. Calendar / mail / files / Teams calls typically return HTTP 403 server-side via OBO. Documented in [`docs/m365-graph-mcp.md`](docs/m365-graph-mcp.md) § "Permission scopes and 403 errors". Tracked forward in [`proposals/0006`](proposals/0006-tool-picker-and-scope-aware-credentials.md) and [`proposals/0007`](proposals/0007-importable-preset-packs.md).
+- **`oauth-pkce` is schema-only.** The shape persists round-trip but there is no runtime resolver yet.
+- **`requestUrl` follows HTTP redirects internally**, so the manual-redirect policy in `createMcpHttpFetchWrapper` only sees the initial URL and the final response when the Obsidian adapter is in use. Pre-fetch URL validation (private-network, metadata block) still applies. Cross-origin `Authorization` strip on intermediate hops becomes a trust-but-verify property of `requestUrl` under the adapter.
+
 ## [0.6.0] - 2026-06-19
 
 Graduation of `v0.6.0-rc.1` to stable. No user-visible code changes since the RC — the RC was validated end-to-end via BRAT install in a clean Obsidian vault (binary download, OAuth sign-in, read tools, approval-gated writes, cache reuse on reload).

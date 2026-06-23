@@ -53,7 +53,7 @@ Add a `credentials` field to HTTP MCP server configs supporting three behavioral
 - [x] **Phase 3: Command runner backend with timeout** — Direct spawn, 15s cap, shared `findOnPath` extracted.
 - [x] **Phase 4: HTTP transport integration + 401 retry + trust-epoch invariance** — Header stamped per request via resolver callback; exactly-one retry; grants survive rotation.
 - [x] **Phase 5: Preset registry, settings UI, Test connection, preflight** — Data-driven preset + DOM-thin UI with all logic in pure helpers.
-- [ ] **Phase 6: Documentation** — `docs/m365-graph-mcp.md`, README, CHANGELOG, PAW Docs.md, smoke checklist.
+- [x] **Phase 6: Documentation** — `docs/m365-graph-mcp.md`, README, CHANGELOG, PAW Docs.md, smoke checklist.
 
 ## Phase Candidates
 
