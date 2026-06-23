@@ -3,7 +3,7 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-06-23
 
 Adds authenticated MCP server support and the first built-in preset (Microsoft 365 Graph via Azure CLI). Additive over v0.6; no breaking changes.
 
