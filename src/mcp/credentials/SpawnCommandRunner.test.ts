@@ -137,6 +137,31 @@ describe("resolveCommandForSpawn", () => {
     expect(out).toEqual({ command: "script.cmd", args: ["x"], usedCmdWrapper: false });
   });
 
+  it("resolves bare command via PATHEXT (Windows) — `az` → `az.cmd` wrapper", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "resolveBareCmd-"));
+    try {
+      const cmdPath = path.join(tmpDir, "az.cmd");
+      fs.writeFileSync(cmdPath, "@echo off\n");
+      const env = { PATH: tmpDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+      const out = resolveCommandForSpawn("az", ["account", "get-access-token"], env, "win32");
+      expect(out.command).toBe("cmd.exe");
+      expect(out.usedCmdWrapper).toBe(true);
+      expect(out.args).toEqual([
+        "/d",
+        "/s",
+        "/c",
+        `""${cmdPath}" "account" "get-access-token""`,
+      ]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to raw command on Windows when bare name not found on PATH", () => {
+    const out = resolveCommandForSpawn("nonexistent-tool-xyz", ["x"], { PATH: "" }, "win32");
+    expect(out).toEqual({ command: "nonexistent-tool-xyz", args: ["x"], usedCmdWrapper: false });
+  });
+
   it("quotes args containing whitespace-free cmd metacharacters so each token remains a single arg", () => {
     const out = resolveCommandForSpawn(
       "C:\\Tools\\az.cmd",

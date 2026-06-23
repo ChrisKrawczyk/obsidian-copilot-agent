@@ -180,6 +180,17 @@ describe("MCP HTTP fetch wrapper", () => {
     const response = await wrapper("https://example.com/mcp");
     expect(response.status).toBe(200);
   });
+
+  test("throwOnHttpError passes 405 through as a Response (SDK treats 405 as non-fatal on SSE GET / DELETE)", async () => {
+    const baseFetch = vi.fn(async () => new Response(null, { status: 405 }));
+    const wrapper = createMcpHttpFetchWrapper(
+      baseFetch as unknown as typeof globalThis.fetch,
+      undefined,
+      { throwOnHttpError: true },
+    );
+    const response = await wrapper("https://example.com/mcp", { method: "GET" });
+    expect(response.status).toBe(405);
+  });
 });
 
 function redirect(location: string): Response {

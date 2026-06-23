@@ -70,8 +70,18 @@ export class SpawnCommandRunner implements CommandRunner {
     this.platform = options.platform ?? process.platform;
     this.inheritedEnv = options.inheritedEnv ?? process.env;
     this.spawn = options.spawn ?? (nodeSpawn as SpawnFn);
-    this.setTimeoutFn = options.setTimeout ?? setTimeout;
-    this.clearTimeoutFn = options.clearTimeout ?? clearTimeout;
+    // Wrap timer functions to preserve their global `this` binding. In
+    // Obsidian's Electron renderer process, the global `setTimeout` /
+    // `clearTimeout` are browser methods that require `this === window`;
+    // calling them via `this.setTimeoutFn(...)` would bind `this` to the
+    // class instance and throw "Illegal invocation". Tests pass their own
+    // function — wrap it the same way so behavior is identical.
+    const rawSetTimeout = options.setTimeout ?? setTimeout;
+    const rawClearTimeout = options.clearTimeout ?? clearTimeout;
+    this.setTimeoutFn = ((fn: (...args: unknown[]) => void, ms?: number, ...rest: unknown[]) =>
+      rawSetTimeout(fn, ms, ...rest)) as typeof setTimeout;
+    this.clearTimeoutFn = ((handle: ReturnType<typeof setTimeout>) =>
+      rawClearTimeout(handle)) as typeof clearTimeout;
   }
 
   run(argv: string[], timeoutMs: number): Promise<CommandRunResult> {
@@ -216,10 +226,29 @@ export function resolveCommandForSpawn(
   env: Record<string, string>,
   platform: NodeJS.Platform,
 ): { command: string; args: string[]; usedCmdWrapper: boolean } {
-  if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(command)) {
-    return { command, args: [...args], usedCmdWrapper: false };
+  // Windows-only: bare command without an extension (e.g. `az`) cannot be
+  // executed via `spawn(..., { shell: false })` because Node passes the
+  // exact filename to CreateProcess and only that filename is probed on
+  // PATH. Resolve through PATHEXT so `az` → `az.cmd`, then fall through to
+  // the existing `.cmd` / `.bat` wrapper branch below.
+  let resolvedCommand = command;
+  if (platform === "win32" && !path.extname(command)) {
+    const pathext = (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";");
+    for (const ext of pathext) {
+      const candidate = command + ext.toLowerCase();
+      const found = findOnPath(candidate, env);
+      if (found) {
+        resolvedCommand = found;
+        break;
+      }
+    }
   }
-  const resolved = path.isAbsolute(command) ? command : findOnPath(command, env) ?? command;
+  if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(resolvedCommand)) {
+    return { command: resolvedCommand, args: [...args], usedCmdWrapper: false };
+  }
+  const resolved = path.isAbsolute(resolvedCommand)
+    ? resolvedCommand
+    : findOnPath(resolvedCommand, env) ?? resolvedCommand;
   const tokens = [resolved, ...args].map(quoteForCmd);
   const inner = tokens.join(" ");
   return {

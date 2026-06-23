@@ -20,6 +20,7 @@ import type { ModelCatalog, ModelCatalogState } from "../sdk/ModelCatalog";
 import type { McpSettingsStore } from "./McpSettingsStore";
 import type { McpManager } from "../mcp/McpManager";
 import { McpServersSection } from "./McpServersSection";
+import { isCommandOnPath } from "./isCommandOnPath";
 import { CliBinarySection, type CliBinaryHostPlugin } from "./CliBinarySection";
 import { PINNED_BINARY_VERSION } from "../sdk/pinnedBinaryVersion";
 
@@ -282,6 +283,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
         safetyStore: this.safetyStore,
         vaultRoot,
         pathExists: (path) => fs.existsSync(path),
+        executableExists: (command) => isCommandOnPath(command),
       });
       this.mcpSection.mount(containerEl);
     }

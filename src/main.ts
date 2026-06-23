@@ -39,7 +39,8 @@ import { McpSettingsStore } from "./settings/McpSettingsStore";
 import { McpManager } from "./mcp/McpManager";
 import { CredentialResolver } from "./mcp/credentials/CredentialResolver";
 import { SpawnCommandRunner } from "./mcp/credentials/SpawnCommandRunner";
-import { DefaultRemediationFormatter } from "./mcp/credentials/RemediationFormatter";
+import { M365RemediationFormatter } from "./mcp/credentials/M365RemediationFormatter";
+import { createObsidianFetch } from "./mcp/transport/obsidianFetch";
 import type { McpServerId } from "./mcp/McpTypes";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { buildMcpToolRegistrySnapshot } from "./mcp/McpToolRegistry";
@@ -338,7 +339,11 @@ export default class CopilotAgentPlugin extends Plugin {
         console.warn(`[Copilot Agent] ${event.reason} pid=${event.pid ?? "unknown"} serverId=${event.serverId}`);
       },
       credentialResolver: mcpCredentialResolver,
-      remediationFormatter: new DefaultRemediationFormatter(),
+      remediationFormatter: new M365RemediationFormatter(),
+      // Obsidian's renderer-process fetch is CORS-enforced; route MCP
+      // HTTP through `requestUrl` (Electron main process) so non-CORS
+      // endpoints like the M365 Graph MCP work.
+      fetch: createObsidianFetch(),
     });
     this.mcpManager = mcpManager;
     const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {

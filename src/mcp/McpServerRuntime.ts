@@ -21,6 +21,23 @@ import {
 import { StdioTransport, MCP_STDIO_FRAME_LIMIT_BYTES } from "./transport/StdioTransport";
 import { McpHttpError } from "./McpHttpError";
 
+/**
+ * In Obsidian's Electron renderer, the global `fetch` is a browser method
+ * that requires `this === window` when invoked. Saving `fetch` as a value
+ * (e.g. `const f = fetch; f(...)`) loses that binding and triggers a
+ * "Failed to fetch" / "Illegal invocation" TypeError. Use this helper at
+ * every call site that stores or forwards `fetch` to preserve the binding.
+ */
+function boundFetch(): typeof fetch {
+  // Bind to the global so the browser's fetch implementation sees its
+  // expected receiver (`window` in Electron renderer). A plain arrow
+  // wrapper like `(...a) => fetch(...a)` is NOT enough — the inner
+  // `fetch(...)` is still a free call with `this === undefined` in strict
+  // mode, which the browser binding rejects with "Failed to fetch".
+  const g = (globalThis as { fetch: typeof fetch });
+  return g.fetch.bind(g);
+}
+
 export const MCP_ADVERTISED_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_COMPAT_PROTOCOL_VERSION = "2024-11-05";
 export const MCP_INITIALIZE_TIMEOUT_MS = 10_000;
@@ -281,7 +298,7 @@ export class McpServerRuntime {
         onForcedKill: (event) => this.options.onForcedKill?.({ serverId: this.config.id, ...event }),
       });
     }
-    return createStreamableHttpTransport(this.config, this.options.fetch ?? fetch, {
+    return createStreamableHttpTransport(this.config, this.options.fetch ?? boundFetch(), {
       getAuthorization: this.options.getAuthorization,
     });
   }
@@ -498,7 +515,7 @@ export class McpServerRuntime {
     // `getAuthorization` hook (passing a thunk that returns the value we
     // already resolved above keeps the wrapper's contract intact).
     const wrappedFetch = createMcpHttpFetchWrapper(
-      this.options.fetch ?? fetch,
+      this.options.fetch ?? boundFetch(),
       MCP_HTTP_BODY_LIMIT_BYTES,
       { getAuthorization: async () => authorization },
     );
@@ -597,7 +614,12 @@ export function createMcpHttpFetchWrapper(
       const response = await baseFetch(validation.url, currentInit);
       const location = response.headers.get("location");
       if (![301, 302, 303, 307, 308].includes(response.status) || !location) {
-        if (throwOnHttpError && response.status >= 400) {
+        // 405 has protocol-level meaning in MCP Streamable HTTP: the SDK
+        // interprets it on the optional SSE listen (GET) as "server does
+        // not offer that endpoint" and on DELETE as "session termination
+        // not supported" — both non-fatal. Throwing would preempt that
+        // handling. Pass it through to the SDK as a Response.
+        if (throwOnHttpError && response.status >= 400 && response.status !== 405) {
           throw new McpHttpError(response.status, response.headers.get("www-authenticate"));
         }
         return enforceResponseSize(response, bodyLimitBytes);
