@@ -8,7 +8,7 @@ Execution Mode: current-checkout
 Repository Identity: github.com/chriskrawczyk/obsidian-copilot-agent@e2ac86c62d1416ce9ee8ae372a479b1a88e78948
 Execution Binding: none
 Workflow Mode: full
-Review Strategy: prs
+Review Strategy: local
 Review Policy: milestones
 Session Policy: continuous
 Final Agent Review: enabled
