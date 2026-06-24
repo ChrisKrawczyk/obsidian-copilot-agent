@@ -1,7 +1,7 @@
 # Feature Specification: Importable Preset Packs
 
 **Branch**: feature/preset-packs  |  **Created**: 2026-06-23  |  **Status**: Draft (rev 2)
-**Input Brief**: Implement proposal 0007 — make MCP server presets data, not code — and author the first internal pack (agency M365) in a sibling private repo.
+**Input Brief**: Implement proposal 0007 — make MCP server presets data, not code — and author the first internal pack (internal-organization M365) in a sibling private repo.
 
 ## Overview
 
@@ -28,8 +28,8 @@ Once this lands, organization-specific or environment-specific presets
 MCP bridges) ship as a single JSON file on whatever distribution
 channel the organization prefers, without touching plugin source. The
 companion private repo `obsidian-copilot-presets-internal` is the
-first such consumer: it will host packs for the internal agency MCP
-bridges across the full M365 surface, one pack file per product, so
+first such consumer: it will host packs for the products surfaced by
+the user's internal MCP bridge CLI, one pack file per product, so
 users import only the products they need.
 
 ## Objectives
@@ -125,11 +125,11 @@ empty and marked as required.
 4. Given a configured server has secret-bearing credential fields (e.g. a static bearer token, a static header secret, a raw credential-command string, an environment variable holding a secret), when exported, then every such field is replaced with a templatized placeholder in the resulting pack JSON, and the original secret value never appears in the exported file.
 5. Given a preset imported from a pack contains templatized credential placeholders, when the user selects it in the Add Server flow, then the server form pre-fills the structural fields and marks each placeholder field as a required input the user must supply before saving.
 
-### User Story P5 – Author and consume the internal agency pack (out-of-band deliverable)
+### User Story P5 – Author and consume the internal internal pack (out-of-band deliverable)
 
 **Narrative.** In the sibling private repo
 `obsidian-copilot-presets-internal`, one pack JSON per M365 product
-exposed by the internal agency MCP CLI (mail, calendar, files, teams,
+exposed by the internal internal MCP bridge CLI (mail, calendar, files, teams,
 …) is authored and committed. A user imports any subset of these
 pack files into their vault. The internal-CLI-backed presets appear
 in the Add Server dropdown alongside the built-in M365 Graph preset.
@@ -143,9 +143,9 @@ the mail MCP successfully (manual smoke test — not part of the public
 test suite).
 
 **Acceptance Scenarios.**
-1. Given the private repo contains one pack JSON per agency-exposed M365 product, when each is imported, then each contributes one (or more) presets to the Add Server dropdown, grouped under that pack's label.
-2. Given a configured server from an agency-pack preset, when the user runs a chat tool call against it, then the call succeeds end-to-end (manual verification).
-3. Given the public plugin codebase, when audited, then no agency-specific identifiers (internal CLI name, internal URLs, internal contact aliases) appear anywhere in source, tests, docs, or settings.
+1. Given the private repo contains one pack JSON per internal-CLI-exposed M365 product, when each is imported, then each contributes one (or more) presets to the Add Server dropdown, grouped under that pack's label.
+2. Given a configured server from an internal-pack preset, when the user runs a chat tool call against it, then the call succeeds end-to-end (manual verification).
+3. Given the public plugin codebase, when audited, then no organization-specific identifiers (internal CLI binary names, internal URLs, internal contact aliases) appear anywhere in source, tests, docs, or settings.
 
 ### Edge Cases
 
@@ -191,8 +191,8 @@ test suite).
 - **FR-014:** Importing a pack MUST NOT auto-enable any of its presets as configured servers; the user must still explicitly add a server from each preset. *(Story: P1)*
 - **FR-015:** Pack-declared `preflight` checks MUST behave identically to built-in preflight checks (non-fatal hints, same UI rendering). *(Story: P5)*
 - **FR-016:** No code path triggered by pack import or pack rendering may execute, spawn, or evaluate any command declared in the pack; commands only run via the existing server-spawn path with its safety prompt. *(Story: P1)*
-- **FR-017:** Pack validation MUST reuse the existing credential-shape validation primitives in the settings layer; no new schema-library dependency MAY be introduced. *(Cross-cutting)*
-- **FR-018:** All user-visible UI surface (settings rows, dropdown labels, error messages, dialogs) for pack management MUST be implemented in the existing settings UI conventions and reuse existing form/dialog primitives — no new framework or UI library. *(Cross-cutting)*
+- **FR-017:** *(merged into Cross-Cutting Non-Functional — see "Reuse existing validation primitives" below.)*
+- **FR-018:** *(merged into Cross-Cutting Non-Functional — see "Reuse existing UI conventions" below.)*
 - **FR-019:** The companion private repo `obsidian-copilot-presets-internal` MUST contain one pack JSON per M365 product surfaced by the internal MCP CLI, each validating against the same schema. *(Story: P5)*
 - **FR-020:** Server export MUST template-ize every secret-bearing field — i.e. fields that hold or could hold credential VALUES (bearer tokens, header secret values, raw credential-command strings, environment variables marked secret) — by replacing each such field with an explicit "needs value" placeholder. The exported pack JSON MUST never contain the original secret VALUES. The set of secret-bearing fields is determined by the credential KIND, not by content inspection. *(Story: P4)*
 - **FR-021:** Pack diff and equality MUST be computed over a canonical form of the pack content: JSON key order normalized (lexicographic), whitespace collapsed, the persisted import metadata (timestamp, source path, internal record id) EXCLUDED from comparison. Two packs whose canonical forms are byte-equal are considered equal; otherwise the differing preset entries (by `id`) are surfaced as added / removed / changed in the diff. *(Stories: P3)*
@@ -207,10 +207,12 @@ test suite).
 
 ### Cross-Cutting / Non-Functional
 
-- **Privacy / leak prevention**: This work bridges a public repo and a private companion repo. The PUBLIC repo (source, tests, fixtures, snapshot data, sample packs, documentation, screenshots, CHANGELOG entries, CI run output, logs surfaced by tests, in-repo PAW artifacts) MUST remain free of organization-specific identifiers (internal CLI binary names, internal hostnames, internal documentation URLs, internal contact aliases, tenant identifiers). Real pack content for internal organizations lives only in the PRIVATE repo. Sample packs used in public tests/fixtures MUST use generic placeholder values (e.g. `internal-mcp-cli`, `example.org`).
+- **Privacy / leak prevention**: This work bridges a public repo and a private companion repo. The PUBLIC repo (source, tests, fixtures, snapshot data, sample packs, documentation, screenshots, CHANGELOG entries, CI run output, logs surfaced by tests, in-repo PAW artifacts) MUST remain free of organization-specific identifiers (internal CLI binary names, internal hostnames, internal documentation URLs, internal contact aliases, tenant identifiers, personal filesystem paths). Real pack content for internal organizations lives only in the PRIVATE repo. Sample packs used in public tests/fixtures MUST use generic placeholder values (e.g. `internal-mcp-cli`, `example.org`).
 - **Reversibility**: Every state change made by pack management (import, re-import, remove) is reversible by undoing the inverse action without manual settings file editing.
 - **No new runtime trust surface**: Pack data flows are restricted to schema validation and settings persistence; no fetch, exec, or eval.
-- **Settings size**: Pack JSONs within the size envelope of FR-023 MUST not increase the time to open or save the settings tab by more than 200 ms on a typical desktop.
+- **Settings performance**: Pack JSONs within the size envelope of FR-023 MUST not increase settings-tab open or save latency by more than 200 ms (measured on the developer's reference workstation; specific hardware noted alongside the measurement).
+- **No new schema-library dependency**: The plugin already validates credential and form input without a JSON-schema dependency; pack validation MUST be implementable with the same approach. (Constraint, not a directive on a specific module.)
+- **Reuse existing UI conventions**: Pack-management UI surfaces MUST be implementable within the plugin's existing settings UI conventions and primitives. No new UI framework or component library may be introduced for this feature. (Constraint, not a directive on specific components.)
 
 ## Success Criteria
 
@@ -218,7 +220,7 @@ test suite).
 - **SC-002:** A pack containing 1, 5, and 20 presets each round-trips through export → import without loss for all NON-SECRET fields: the resulting server form pre-fill is byte-for-byte identical for every non-secret field of every preset; secret-bearing fields exported as templatized placeholders are surfaced as required form input on import. *(FR-005, FR-011, FR-012, FR-020)*
 - **SC-003:** A pack with a deliberately malformed field (missing required, wrong type, unknown preset-level field, comment in JSON, BOM only — covered separately) yields exactly one user-visible error message naming the offending field path or parse location, and nothing is persisted to settings. *(FR-002, FR-022)*
 - **SC-004:** After removing an imported pack, zero of its presets remain in the Add Server dropdown, while 100% of servers previously configured from those presets continue to start, accept requests, and respond identically to before the pack removal. *(FR-007, FR-008)*
-- **SC-005:** For each pack JSON authored in the private companion repo (one per agency-MCP-exposed M365 product), importing the pack into a vault, configuring a server from one of its presets, and issuing at least one chat tool call against that server completes successfully (manual smoke verification, recorded as a checklist in the private repo's README). *(FR-019, P5)*
+- **SC-005:** For each pack JSON authored in the private companion repo (one per internal-CLI-exposed M365 product), importing the pack into a vault, configuring a server from one of its presets, and issuing at least one chat tool call against that server completes successfully (manual smoke verification, recorded as a checklist in the private repo's README). *(FR-019, P5)*
 - **SC-006:** Importing a pack JSON whose declared command does not exist on the current OS still succeeds; the install hint surfaces only when the user actually tries to use a server configured from one of its presets. *(FR-015)*
 - **SC-007:** Re-importing a pack file whose canonical form (FR-021) is identical to the already-imported pack shows an empty diff and updates only the import timestamp; re-importing a pack file whose canonical form differs surfaces a non-empty diff itemizing added / removed / changed preset ids. *(FR-009, FR-021)*
 - **SC-008:** Pack files between 100 KB and 1 MB import successfully (with a "large pack" notice in the confirm dialog); files above 1 MB are rejected before parse with a "pack too large" error. *(FR-023)*
@@ -243,7 +245,7 @@ test suite).
 - Export of one or more configured servers as a pack file, with secret-templatization
 - Namespacing of conflicting preset ids per FR-013 rules
 - Grouping by source in the Add Server dropdown
-- Authoring one M365 product pack per agency-MCP-exposed product in `obsidian-copilot-presets-internal`
+- Authoring one M365 product pack per internal-CLI-exposed product in `obsidian-copilot-presets-internal`
 - Updating in-repo documentation (`docs/`, `README.md`, `CHANGELOG.md`) to describe pack import/export
 
 **Out of Scope:**
@@ -257,14 +259,14 @@ test suite).
 - New credential variants (e.g. real `oauth-pkce`); the pack format reflects what's already shippable today
 - Per-server tool subset selection (covered by proposal 0006)
 - A pack-authoring UI in the plugin
-- Automated end-to-end tests against the internal agency MCP servers in CI
+- Automated end-to-end tests against the internal MCP bridge servers in CI
 
 ## Dependencies
 
 - Predecessor work shipped in v0.7.0 (`authenticated-mcps`) — established the in-code preset registry and the credential discriminated-union shape that the pack schema serializes; established the validation primitives the pack validator reuses.
 - Existing Settings → MCP servers section as the host UI surface.
 - Existing safety prompt at first command spawn (no change required, just relied upon).
-- A separate private GitHub repo (`obsidian-copilot-presets-internal`, cloned at `C:\Repos\`) for authoring and distributing the internal agency packs — not in the public source tree.
+- A separate private GitHub repo (`obsidian-copilot-presets-internal`) for authoring and distributing the internal internal packs — not in the public source tree.
 
 ## Risks & Mitigations
 
@@ -282,5 +284,6 @@ test suite).
 - Proposal: `proposals/0007-importable-preset-packs.md`
 - Predecessor work: `proposals/0005-mcp-slice7-followup.md`; v0.7.0 release (`authenticated-mcps`)
 - Tangent: `proposals/0006-tool-picker-and-scope-aware-credentials.md`
-- Companion private repo: `obsidian-copilot-presets-internal` (PRIVATE, sibling at `C:\Repos\`)
+- Companion private repo: `obsidian-copilot-presets-internal` (PRIVATE)
 - WorkflowContext: `.paw/work/preset-packs/WorkflowContext.md`
+
