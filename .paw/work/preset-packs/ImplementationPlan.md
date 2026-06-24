@@ -238,7 +238,7 @@ deferrals:
 
 ## Phase Status
 
-- [ ] **Phase 1: Pure foundation modules** — Schema/types, parser (BOM + JSONC reject + size guard), validator (single-error contract), transport-union refactor, built-in pack wrapper, canonicalize/diff, secret-policy matrix, exporter, effective registry with namespacing. All pure, all node-testable. No UI, no persistence wiring.
+- [x] **Phase 1: Pure foundation modules** — Schema/types, parser (BOM + JSONC reject + size guard), validator (single-error contract), transport-union refactor, built-in pack wrapper, canonicalize/diff, secret-policy matrix, exporter, effective registry with namespacing. All pure, all node-testable. No UI, no persistence wiring.
 - [ ] **Phase 2: Persistence** — `PresetPacksStore` with new `mcpPresetPacks` top-level key; sibling-key preservation; plugin onload integration.
 - [ ] **Phase 3: Import flow + Settings UI** — File-IO abstraction, import orchestrator, "Imported preset packs" subsection in Settings → MCP servers with import / remove / re-import diff modals.
 - [ ] **Phase 4: Add Server dropdown grouping + Export UI** — Optgroup-grouped dropdown with pack pre-fill and secret-placeholder handling; export multi-select dialog producing a pack file.

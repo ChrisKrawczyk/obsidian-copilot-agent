@@ -24,7 +24,12 @@ export interface McpSettingsMutationResult {
   removed?: boolean;
 }
 
-const RUNTIME_KEYS = new Set([
+/**
+ * Runtime-only fields that MUST be stripped before persisting (or exporting)
+ * an MCP server config. Exported for the pack exporter (Phase 1C) and reused
+ * by the persistence path.
+ */
+export const RUNTIME_FIELDS: ReadonlySet<string> = new Set([
   "status",
   "lastError",
   "lastConnectedAt",
@@ -35,6 +40,8 @@ const RUNTIME_KEYS = new Set([
   "tools",
   "instructions",
 ]);
+
+const RUNTIME_KEYS = RUNTIME_FIELDS;
 
 export class McpSettingsStore {
   private tail: Promise<void> = Promise.resolve();
