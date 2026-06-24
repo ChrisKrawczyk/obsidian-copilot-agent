@@ -260,7 +260,7 @@ deferrals:
 
 ## Phase 1: Pure foundation modules
 
-**Covers:** FR-002, FR-009, FR-011, FR-012, FR-013 (a/b/c/d), FR-014, FR-016, FR-020, FR-021, FR-022, FR-023; SC-002, SC-003, SC-006 (import-side: pack with missing-on-PATH command imports without invoking preflight), SC-007, SC-008, SC-009; prerequisite for FR-005/FR-015. **Cross-cutting NFRs (FR-017 "reuse validation primitives", FR-018 "reuse UI conventions") are honored here by lifting `parseServerCredentials` and `mcpServerFormLogic.shared.ts`; their gate is "all existing test suites stay green," asserted in every phase's Automated Verification.**
+**Covers:** FR-002, FR-009, FR-011, FR-012, FR-013 (a/b/c/d), FR-014, FR-016, FR-020, FR-021, FR-022, FR-023; SC-002, SC-003, SC-006 (import-side: pack with missing-on-PATH command imports without invoking preflight), SC-007, SC-008, SC-009; prerequisite for FR-005/FR-015. **Cross-Cutting NFRs "Reuse existing validation primitives" and "Reuse existing UI conventions" (`Spec.md:214-215` — note FR-017/FR-018 were merged into Cross-Cutting per `Spec.md:194-195`) are honored here by lifting `parseServerCredentials` and `mcpServerFormLogic.shared.ts`; their gate is "all existing test suites stay green," asserted in every phase's Automated Verification.**
 
 This phase establishes every pure module the later phases compose, with full Vitest coverage. No persistence, no DOM, no file IO. Logical sub-sections kept in commit history for reviewability.
 
@@ -318,8 +318,10 @@ This phase establishes every pure module the later phases compose, with full Vit
   | --- | --- | --- |
   | `none` | (none) | `kind` |
   | `static-bearer` | `token` | `kind` |
-  | `command-based` | `command`, `args` | `kind`, `tokenPath`, `expiryPath`, `refreshBufferSeconds` |
+  | `command-based` | (none, when `command` is a bare CLI token — see rationale) | `kind`, `command`, `args`, `tokenPath`, `expiryPath`, `refreshBufferSeconds` |
   | `oauth-pkce` | `refreshTokenRef`, `tenantId`, **all unknown future keys** (defensive default — Spec Risks last bullet) | `kind`, `clientId`, `authorizationEndpoint`, `tokenEndpoint`, `scopes`, `redirectUri`, `pkceMethod` |
+
+  Rationale for `command-based`: per Spec FR-020 (revised), the CLI invocation itself is structural — the M365 built-in's `copilot` command is a public binary name, the secret resolution happens inside the CLI's own process, and SC-009 + P4 Independent Test require round-trip without user re-entry. Authors who place literal secret values inside `args` (e.g. `--api-key <literal>`) are responsible for redacting before export; the system does not content-scan. (Earlier draft templatized `command`/`args` based on FR-020's pre-revision wording; the spec revision authorized this carve-out.)
 
   Rationale for `oauth-pkce` placement: `clientId` is a public OAuth identifier (not secret); `tenantId` is an organization identifier and the Spec privacy NFR (`.paw\work\preset-packs\Spec.md:208-213`) explicitly lists "tenant identifiers" as forbidden in public artifacts and shareable packs — templating it is required for cross-org pack sharing.
 
@@ -341,7 +343,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Runtime fields stripped (FR-011, SC-002).
   - Stdio with denylisted env value (e.g. `MCP_SECRET_TOKEN`) → value templatized to `SECRET_PLACEHOLDER`; non-denylisted env value (e.g. `PATH`, `LOG_LEVEL`) → preserved verbatim (FR-020, SC-002 non-secret round-trip).
   - HTTP `static-bearer` token replaced with `SECRET_PLACEHOLDER`; assert via substring search on `JSON.stringify(pack)` that the original token never appears.
-  - HTTP `command-based`: `command` and `args` replaced; `tokenPath` / `expiryPath` / `refreshBufferSeconds` preserved verbatim (SC-009).
+  - HTTP `command-based`: `command` and `args` PRESERVED verbatim (revised per Spec FR-020 carve-out and SC-009); `tokenPath` / `expiryPath` / `refreshBufferSeconds` preserved verbatim. Test asserts the round-trip pre-fill is byte-equal on every field of a representative M365-style `copilot --mcp ...` config.
   - `oauth-pkce` with an unknown future key: future key templatized (defensive default); `tenantId` templatized; `clientId` preserved.
   - Legacy HTTP `authorization` migrates to `{ kind: "static-bearer", token: SECRET_PLACEHOLDER }`.
   - Multiple servers with the same `name` get deduped preset ids.
@@ -429,12 +431,12 @@ This phase establishes every pure module the later phases compose, with full Vit
 ### Changes Required:
 
 - **`src\settings\presets\packFileIO.ts`** (new): pure interface + Obsidian-desktop implementation factory.
-  - `interface PackFileReader { pickAndReadPackFile(): Promise<{ ok: true; text: string; sourcePath: string; byteLength: number } | { ok: false; reason: "cancelled" | "missing" | "io"; message?: string }> }`.
+  - `interface PackFileReader { pickAndReadPackFile(): Promise<{ ok: true; text: string; sourcePath: string; byteLength: number } | { ok: false; reason: "cancelled" | "io"; message?: string }> }`.
   - `interface PackFileWriter { saveTextToPath(suggestedFilename: string, text: string): Promise<{ ok: true; path: string } | { ok: false; reason: "cancelled" | "io"; message?: string }> }`.
-  - **Desktop file-picker implementation (FR-001 mandates a file picker):** use an off-DOM `<input type="file" accept=".json,application/json">` element programmatically clicked from the "Import pack from file…" button handler. This is the standard browser-native file picker, works reliably in Obsidian Desktop's Chromium runtime across all currently-supported Electron versions, and is the same primitive Obsidian itself uses for image / attachment imports. On selection, the runtime returns a `File` object; in Obsidian Desktop (Electron) the `File` object exposes the absolute path via the Electron-specific `file.path` extension property — this is documented Electron behavior and is what we persist as `sourcePath` (FR-006). The `File.text()` API yields the contents. No Electron `remote` shim is involved; no fallback text-input path is needed.
-  - **Save-as implementation (Spec.md:122 — file save dialog for export):** use Electron's modern non-`remote` `dialog.showSaveDialog` via the Obsidian-exposed `electron` module (resolved through `require("electron")` inside the Electron-backed renderer). Obsidian Desktop exposes `electron.remote` and/or `@electron/remote` reliably across the supported Obsidian versions (validate at top of `packFileIO.ts` and surface a one-time clear error to the user if neither is available, rather than silently degrading). **Suggested filename: `<sanitized-label>.pack.json`** (consistent with the Export UI in 4B at `~line 510`; do not propose two conventions). Returned path is what `fs.writeFileSync` writes to.
-  - **Reading and writing** go through Node `fs` against the absolute path returned by the picker, mirroring the established pattern at `src\settings\SettingsTab.ts:276-288`. `fs.statSync(path).size` is called BEFORE reading file contents to enforce the FR-023 byte-size cap; `byteLength` is taken from `stat.size` (not recomputed from the in-memory string).
-  - **Mobile / non-desktop is explicitly out of scope:** if Node `fs` or Electron `dialog` is unavailable at module load, both reader and writer return `{ ok: false, reason: "io", message: "Desktop-only feature." }`. This is consistent with the existing MCP feature which already requires desktop (Node `child_process`).
+  - **Desktop file-picker implementation (FR-001 mandates a file picker):** use an off-DOM `<input type="file" accept=".json,application/json">` element programmatically clicked from the "Import pack from file…" button handler. This is the standard browser-native file picker, works reliably in Obsidian Desktop's Chromium runtime across all currently-supported Electron versions, and is the same primitive Obsidian itself uses for image / attachment imports. On selection, the runtime returns a browser `File` object. Read via the HTML5 `File` API directly: `file.size` (synchronous, used to enforce the FR-023 byte cap BEFORE reading) and `await file.text()` (async, yields decoded UTF-8 contents). The `sourcePath` (FR-006) comes from the Electron-specific `file.path` extension property exposed on the `File` object in Obsidian Desktop's Electron runtime — this is documented Electron behavior, persisted as the canonical absolute path. **No Node `fs` use on the import (read) path** — the HTML5 `File` API is sufficient and avoids a redundant filesystem round-trip.
+  - **Save-as implementation (Spec.md:122 — file save dialog for export):** Electron's `dialog` module is a main-process-only module; in the renderer process it MUST be accessed via the remote bridge. Implementation: `require("@electron/remote").dialog.showSaveDialog(...)` with a fallback to `require("electron").remote.dialog.showSaveDialog(...)` for older Obsidian builds that still ship the legacy `remote` shim. Validate at module load (`packFileIO.ts` initializer) that at least one of these is callable; if neither is, surface a one-time clear error and return `{ ok: false, reason: "io", message: "Save dialog unavailable in this runtime." }` rather than silently degrading. **Suggested filename: `<sanitized-label>.pack.json`** (consistent with the Export UI in 4B). Returned path is what `fs.writeFileSync` writes to.
+  - **Writing** goes through Node `fs.writeFileSync` against the absolute path returned by the save dialog (mirroring `src\settings\SettingsTab.ts:276-288` pattern). Node `fs` is used ONLY on the export (write) path; import uses HTML5 `File` API exclusively.
+  - **Mobile / non-desktop is explicitly out of scope:** if Node `fs` or the Electron remote `dialog` is unavailable at module load, the writer returns `{ ok: false, reason: "io", message: "Desktop-only feature." }`. The reader (HTML5 `File` API) is cross-platform-compatible, but since the rest of the MCP feature already requires desktop, the reader also returns the desktop-only error when `(window as any).process?.versions?.electron` is absent (consistent with existing MCP desktop gating).
 - **`src\settings\presets\packImporter.ts`** (new): pure orchestration
   - `type ImportPackOutcome` discriminated union: `sizeError | parseError | validationError | ioError | cancelled | confirmNew | confirmReimport`. Confirm variants carry the parsed `pack`; `confirmReimport` additionally carries `diff` and `metadataChanged`. All variants carry `sizeWarning` where applicable.
   - `runPackImport(args: { text; sourcePath; byteLength; existingRecord: ImportedPackRecord | null }): ImportPackOutcome` — composes `parsePackText` → `validatePack` → if `existingRecord` then `diffPacks` → outcome. Returns the first error encountered; zero side effects.
@@ -574,15 +576,14 @@ This phase establishes every pure module the later phases compose, with full Vit
 ### Changes Required (in the PRIVATE repo only):
 
 - One pack JSON per internal-CLI-exposed M365 product (e.g. mail, calendar, files, teams — whichever surfaces the internal CLI exposes), each validating against the v1 schema established in Phase 1. Authoring path: configure one server per product by hand in a real vault, use the Phase 4 export feature to bootstrap a starter JSON, then hand-refine labels, descriptions, and `preflight.installHint` text.
-- A `README.md` in the private repo describing the import → configure → smoke-test checklist (SC-005).
-- A `CHECKLIST.md` enumerating manual smoke results per pack.
+- A `README.md` in the private repo describing the import → configure → smoke-test workflow AND containing the per-pack smoke-test checklist (one section per pack). Per Spec SC-005, the README is the canonical evidence location — no separate `CHECKLIST.md`.
 
 ### Success Criteria:
 
 #### Automated Verification:
 - N/A in the public repo. Public CI is unaffected.
 
-#### Manual Verification (recorded in the private repo's `CHECKLIST.md`):
+#### Manual Verification (recorded in the private repo's `README.md`):
 - [ ] Each pack file validates: import via the plugin and observe no validation errors.
 - [ ] Each pack imported renders its presets under the expected pack group in the Add Server dropdown.
 - [ ] Configuring a server from each pack preset succeeds end-to-end with at least one chat tool call (per FR-019 / SC-005).
