@@ -2,7 +2,15 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.7 — Adds authenticated MCP server support and the first built-in preset (Microsoft 365 Graph via Azure CLI). Builds on v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+> **Status:** v0.8 — Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7's authenticated MCP server support. Builds on v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+
+## What's new in v0.8
+
+- **Importable preset packs.** Settings → MCP Servers → **Imported preset packs** → **Import pack…** picks a `.json` pack file and adds its presets to the Add Server dropdown under a per-pack group. Built-in presets always sort first. Import is inert: no process is spawned, no network call is made.
+- **Re-import diff and remove.** Re-importing the same pack file shows a structural diff before applying. Removing a pack never touches MCP servers you already configured from it.
+- **Export servers as pack.** A new **Export servers as pack…** button in the MCP Servers header writes a JSON pack into `<vault>/exported-packs/` with every secret replaced by the literal placeholder `__NEEDS_VALUE__`. Re-importing the file surfaces the required fields in the Add Server form before Save is allowed.
+- **Grouped Add Server dropdown.** The preset dropdown is now grouped (built-in first, then one optgroup per imported pack). Collisions between pack ids are resolved with `<packId>.<presetId>` namespacing per FR-013.
+- **Full reference**: [`docs/preset-packs.md`](docs/preset-packs.md). Technical notes: [`.paw/work/preset-packs/Docs.md`](.paw/work/preset-packs/Docs.md). Smoke checklist: [`.paw/work/preset-packs/SmokeChecklist.md`](.paw/work/preset-packs/SmokeChecklist.md).
 
 ## What's new in v0.7
 

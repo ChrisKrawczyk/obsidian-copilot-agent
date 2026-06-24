@@ -243,7 +243,7 @@ deferrals:
 - [x] **Phase 3: Import flow + Settings UI** — File-IO abstraction, import orchestrator, "Imported preset packs" subsection in Settings → MCP servers with import / remove / re-import diff modals.
 - [x] **Phase 4: Add Server dropdown grouping + Export UI** — Optgroup-grouped dropdown with pack pre-fill and secret-placeholder handling; export multi-select dialog producing a pack file.
 - [ ] **Phase 5 (out-of-band, no public-repo commits): Author internal packs in `obsidian-copilot-presets-internal`** — One pack JSON per internal-CLI-exposed M365 product; manual end-to-end smoke.
-- [ ] **Phase 6: Documentation** — `docs\preset-packs.md`, README "What's new", CHANGELOG, PAW `Docs.md`, `SmokeChecklist.md`.
+- [x] **Phase 6: Documentation** — `docs\preset-packs.md`, README "What's new", CHANGELOG, PAW `Docs.md`, `SmokeChecklist.md`.
 
 ## Phase Candidates
 
