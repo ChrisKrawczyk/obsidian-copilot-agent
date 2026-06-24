@@ -105,9 +105,10 @@ organization-specific identifiers
   (`.github\copilot-instructions.md:39-45`,
   `src\ui\chatKeydown.test.ts:1-72`,
   `src\settings\McpServersSection.phase5.test.ts:1-88`).
-- **Test baseline:** all current Vitest suites passing under
-  `npm test`; `npm run typecheck` clean; `npm run build` clean
-  (`package.json:8-27`).
+- **Test baseline:** `npm test`, `npm run typecheck`, and
+  `npm run build` are expected to pass on the current `feature/preset-packs`
+  HEAD; each implementation phase re-verifies under its automated
+  criteria. (Scripts at `package.json:8-27`.)
 
 ## Desired End State
 
@@ -181,7 +182,7 @@ organization-specific identifiers
 - Manual smoke per phase: `npm run deploy` → reload Obsidian →
   exercise the phase's user-visible surface (per-phase manual steps
   below).
-- End-to-end smoke at Phase 10: copy a private-repo pack file →
+- End-to-end smoke at Phase 5: copy a private-repo pack file →
   import via the new UI → select a preset → save → issue a chat MCP
   tool call → expect a successful response after first-run safety
   prompt.
@@ -251,7 +252,7 @@ deferrals:
 
 ## Phase 1: Pure foundation modules
 
-**Covers:** FR-002, FR-009, FR-011, FR-012, FR-013 (a/b/c/d), FR-014, FR-016, FR-020, FR-021, FR-022, FR-023; SC-002, SC-003, SC-007, SC-008, SC-009; prerequisite for FR-005/FR-015.
+**Covers:** FR-002, FR-009, FR-011, FR-012, FR-013 (a/b/c/d), FR-014, FR-016, FR-020, FR-021, FR-022, FR-023; SC-002, SC-003, SC-006 (import-side: pack with missing-on-PATH command imports without invoking preflight), SC-007, SC-008, SC-009; prerequisite for FR-005/FR-015. **Cross-cutting NFRs (FR-017 "reuse validation primitives", FR-018 "reuse UI conventions") are honored here by lifting `parseServerCredentials` and `mcpServerFormLogic.shared.ts`; their gate is "all existing test suites stay green," asserted in every phase's Automated Verification.**
 
 This phase establishes every pure module the later phases compose, with full Vitest coverage. No persistence, no DOM, no file IO. Logical sub-sections kept in commit history for reviewability.
 
@@ -265,14 +266,14 @@ This phase establishes every pure module the later phases compose, with full Vit
   - The existing `M365_GRAPH_PRESET.build()` continues to return the HTTP shape unchanged; the existing byte-equality test
     (`src\settings\presets\McpServerPresets.test.ts:13-67`) is preserved.
 - **`src\settings\presets\packTypes.ts`** (new): pure types — `PackPreset`, `Pack` (with `schemaVersion: 1`), `ImportedPackRecord`, `PackValidationError { pointer: string; message: string }`, `PackParseError { kind: "parse" | "size" | "io"; message: string; line?: number; column?: number }`.
-- **`src\settings\presets\packParser.ts`** (new): pure `parsePackText(text, opts: { maxBytes }): { ok, raw?, sizeWarning?, error? }`. Strips a leading UTF-8 BOM. Rejects size > 1 MB before parse (`kind: "size"`). Sets `sizeWarning: true` when `text.length > 100 * 1024`. Pre-scans for `//` or `/*` outside string literals using a small string-aware tokenizer (NOT a naïve regex; honors `"…"` with `\` escapes); on hit returns `kind: "parse"` with message `"JSON-with-comments is not allowed"` (FR-022). Wraps `JSON.parse` and extracts `line`/`column` from `SyntaxError` where present.
-- **`src\settings\presets\packValidator.ts`** (new): pure `validatePack(raw: unknown): { ok, pack?, error? }`. Returns the FIRST validation error (single-error contract per FR-002 / SC-003) with `pointer` as RFC 6901 JSON Pointer (e.g. `/presets/2/credentials/token`). Top-level checks: `schemaVersion === 1`; `id`/`label`/`version` non-empty strings; `presets` is a non-empty array (rejects zero-preset packs per Edge Cases); duplicate preset ids within the pack rejected (FR-013c). Unknown TOP-level fields ignored with `console.warn`. Unknown PRESET-level fields rejected. Per-preset checks call the validators extracted below.
+- **`src\settings\presets\packParser.ts`** (new): pure `parsePackText(text, opts: { maxBytes }): { ok, raw?, sizeWarning?, error? }`. Strips a leading UTF-8 BOM. Size enforcement is **byte-based** (FR-023): use `Buffer.byteLength(text, "utf8")` (or the caller-provided `byteLength`) — NOT `text.length`, which under-counts multi-byte characters. Rejects byte-length > 1 MB before parse (`kind: "size"`). Sets `sizeWarning: true` when byte-length > 100 KB. Pre-scans for `//` or `/*` outside string literals using a small string-aware tokenizer (NOT a naïve regex; honors `"…"` with `\` escapes); on hit returns `kind: "parse"` with message `"JSON-with-comments is not allowed"` (FR-022). Wraps `JSON.parse` and extracts `line`/`column` from `SyntaxError` where present.
+- **`src\settings\presets\packValidator.ts`** (new): pure `validatePack(raw: unknown): { ok, pack?, error? }`. Returns the FIRST validation error (single-error contract per FR-002 / SC-003) with `pointer` as RFC 6901 JSON Pointer (e.g. `/presets/2/credentials/token`). Field segments containing `~` or `/` are escaped per RFC 6901 (`~0`, `~1`). Top-level checks: `schemaVersion === 1`; `id`/`label`/`version` non-empty strings; `presets` is a non-empty array (rejects zero-preset packs per Edge Cases); duplicate preset ids within the pack rejected (FR-013c). Unknown TOP-level fields ignored with `console.warn`. Unknown PRESET-level fields rejected. Per-preset checks call the validators extracted below. **The lifted `parseServerCredentials` retains its existing `oauth-pkce` unknown-future-keys passthrough behavior (`src\settings\McpSettingsStore.ts:492-515`) — the pack validator's "reject unknown preset-level fields" rule applies at the preset level only, NOT inside `credentials.oauth-pkce` where passthrough is required for forward-compatible byte-equivalent round-trip.**
 - **`src\settings\mcpServerFormLogic.shared.ts`** (new): Extract shared, DOM-free helpers from `mcpServerFormLogic.ts` for URL validation (`validateMcpHttpUrl`), TLS-bypass rejection, control-character checks, and `parseArgs`-style validation (`src\settings\mcpServerFormLogic.ts:120-178`). Both the form and the pack validator import from here. No behavior change for the form.
 - **`src\settings\McpSettingsStore.ts`**: Lift the private `parseCredentials` (`src\settings\McpSettingsStore.ts:428-517`) into a new exported pure helper `parseServerCredentials(raw, pointerBase): { ok, value?, error? }`. Replace the existing call site to use the lifted helper. Pack validator imports it directly.
-- **`src\settings\presets\BuiltInPacks.ts`** (new): Wrap `BUILT_IN_PRESETS` as a synthetic in-memory `Pack` with `id: "builtin"`, `label: "Built-in"`, `version` matching `manifest.json`, and run `validatePack` on it at module load. Failing built-in validation throws at startup so later phases can rely on the invariant "every preset everywhere conforms to `PackPreset`." (Spec Risks & Mitigations bullet 2.)
+- **`src\settings\presets\BuiltInPacks.ts`** (new): Wrap `BUILT_IN_PRESETS` as a synthetic in-memory `Pack` with `id: "builtin"`, `label: "Built-in"`, and a **hardcoded `version: "1"`** (NOT `manifest.json` — divorcing built-in pack content from plugin release version avoids spurious `metadataChanged` on every plugin release). Run `validatePack` on it at module load. Failing built-in validation throws at startup so later phases can rely on the invariant "every preset everywhere conforms to `PackPreset`." (Spec Risks & Mitigations bullet 2.)
 
 #### Tests:
-- **`src\settings\presets\packParser.test.ts`** (new): BOM strip; happy path; trailing-comma rejected with line/column; `//` and `/* */` rejected; > 1 MB rejected before parse; > 100 KB sets sizeWarning; empty string rejected.
+- **`src\settings\presets\packParser.test.ts`** (new): BOM strip; happy path; trailing-comma rejected with line/column; `//` and `/* */` rejected; **byte-length** > 1 MB rejected before parse (test includes a multi-byte-character payload to verify byte-vs-char distinction); byte-length > 100 KB sets sizeWarning; empty string rejected.
 - **`src\settings\presets\packValidator.test.ts`** (new): minimal valid pack accepted; missing required field → pointer `/id` or `/presets/0/server/command`; unknown preset-level field rejected; unknown top-level field warned-and-accepted; duplicate preset ids rejected with pointer to the second; empty `presets[]` rejected; each credential kind accepted; `static-bearer` with empty token rejected; HTTP URL guardrails enforced; stdio server with control character in command rejected; preflight with unknown `type` rejected.
 - **`src\settings\presets\BuiltInPacks.test.ts`** (new): current built-in pack validates; pinned id/label preserved.
 - **`src\settings\presets\McpServerPresets.test.ts`**: continues to assert M365 build-result byte-equality after the union refactor.
@@ -310,10 +311,12 @@ This phase establishes every pure module the later phases compose, with full Vit
   | `none` | (none) | `kind` |
   | `static-bearer` | `token` | `kind` |
   | `command-based` | `command`, `args` | `kind`, `tokenPath`, `expiryPath`, `refreshBufferSeconds` |
-  | `oauth-pkce` | `clientId`, `refreshTokenRef`, **all unknown future keys** (defensive default — Spec Risks last bullet) | `kind`, `authorizationEndpoint`, `tokenEndpoint`, `tenantId`, `scopes`, `redirectUri`, `pkceMethod` |
+  | `oauth-pkce` | `refreshTokenRef`, `tenantId`, **all unknown future keys** (defensive default — Spec Risks last bullet) | `kind`, `clientId`, `authorizationEndpoint`, `tokenEndpoint`, `scopes`, `redirectUri`, `pkceMethod` |
+
+  Rationale for `oauth-pkce` placement: `clientId` is a public OAuth identifier (not secret); `tenantId` is an organization identifier and the Spec privacy NFR (`.paw\work\preset-packs\Spec.md:208-213`) explicitly lists "tenant identifiers" as forbidden in public artifacts and shareable packs — templating it is required for cross-org pack sharing.
 
   Additional rules:
-  - **stdio `env`:** every key is treated as secret-bearing by default. Keep env keys; replace values with `SECRET_PLACEHOLDER`. Rationale: FR-020 forbids content inspection, and the env denylist already enforces that secret-named keys are screened, so we cannot reliably distinguish secret from non-secret env values structurally.
+  - **stdio `env` values:** templatize *only* values whose KEY matches the existing env denylist (`collectDenylistWarnings` in `src\settings\mcpServerFormLogic.ts:397`). This is the "marked secret" mechanism FR-020 references. Non-denylisted env values are preserved verbatim — required for SC-002 (round-trip fidelity for non-secret fields) and SC-009 (`none`-credential round-trip).
   - **stdio `command` / `args`:** NOT secret. CLI invocations are equivalent in trust shape to a manually-typed server command — structural identity.
   - **Legacy HTTP `authorization`:** omitted from export; canonical credential is `credentials`. Migration on export: any server with `authorization` set is exported with `credentials: { kind: "static-bearer", token: SECRET_PLACEHOLDER }`.
   - **Unknown credential kind:** defensive default — every field is treated as secret-bearing.
@@ -325,13 +328,13 @@ This phase establishes every pure module the later phases compose, with full Vit
 - **`src\settings\McpSettingsStore.ts`**: Factor the runtime-field list into an exported `RUNTIME_FIELDS` constant.
 
 #### Tests:
-- **`packSecretPolicy.test.ts`** (new): matrix above; unknown credential kind → all fields secret; `secretFieldsForCredentials` returns frozen array.
+- **`packSecretPolicy.test.ts`** (new): matrix above; unknown credential kind → all fields secret; `secretFieldsForCredentials` returns frozen array; `tenantId` listed as secret-bearing for `oauth-pkce` (privacy NFR).
 - **`packExporter.test.ts`** (new):
   - Runtime fields stripped (FR-011, SC-002).
-  - Stdio with non-secret env (e.g. `PATH`) — still templatized to `SECRET_PLACEHOLDER` (policy is structural).
+  - Stdio with denylisted env value (e.g. `MCP_SECRET_TOKEN`) → value templatized to `SECRET_PLACEHOLDER`; non-denylisted env value (e.g. `PATH`, `LOG_LEVEL`) → preserved verbatim (FR-020, SC-002 non-secret round-trip).
   - HTTP `static-bearer` token replaced with `SECRET_PLACEHOLDER`; assert via substring search on `JSON.stringify(pack)` that the original token never appears.
   - HTTP `command-based`: `command` and `args` replaced; `tokenPath` / `expiryPath` / `refreshBufferSeconds` preserved verbatim (SC-009).
-  - `oauth-pkce` with an unknown future key: future key templatized (defensive default).
+  - `oauth-pkce` with an unknown future key: future key templatized (defensive default); `tenantId` templatized; `clientId` preserved.
   - Legacy HTTP `authorization` migrates to `{ kind: "static-bearer", token: SECRET_PLACEHOLDER }`.
   - Multiple servers with the same `name` get deduped preset ids.
   - Round-trip: `validatePack(exportServersAsPack([s_1, …, s_N], meta)).ok === true` for N ∈ {1, 5, 20} (SC-002).
@@ -381,7 +384,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 
 ## Phase 2: Persistence
 
-**Covers:** FR-003, FR-006, FR-007, FR-008.
+**Covers:** FR-003; FR-006 (data model + store-side invariants — UI rendering of the list is Phase 3); FR-008 (store-side invariant: `remove(packId)` does not touch `mcpServers` — UI affordance is Phase 3).
 
 ### Changes Required:
 
@@ -392,7 +395,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - `addOrReplace(pack: Pack, sourcePath: string): Promise<ImportedPackRecord>` — keyed by `pack.id`; if existing, replaces in place, generates fresh `recordId`, sets `importedAt = Date.now()`. Persists.
   - `remove(packId: string): Promise<void>` — removes by `pack.id`. Persists. MUST NOT touch `mcpServers` (FR-008).
   - `persist()` mirrors `McpSettingsStore.persist` (`src\settings\McpSettingsStore.ts:209-230`): re-read latest plugin data, spread all top-level keys, then write `mcpPresetPacks` last.
-- **`src\main.ts`**: Instantiate `PresetPacksStore` alongside `McpSettingsStore`; call `.load()` during plugin `onload` (`src\main.ts:254-266`); expose via the same dependency container used by `McpServersSection`.
+- **`src\main.ts`**: Instantiate `PresetPacksStore` alongside `McpSettingsStore` (around the existing store construction at `src\main.ts:254-266`); call `presetPacksStore.load()` during plugin `onload` at the same point the other stores are loaded; expose via the same dependency container used by `McpServersSection`.
 - **`src\settings\McpServersSection.ts`**: Add a constructor option `presetPacksStore: PresetPacksStore` (no UI changes yet — Phase 3 consumes it).
 
 ### Tests:
@@ -407,22 +410,22 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] Test asserts `mcpServers`, `safety`, `auth`, `conversations` keys survive `mcpPresetPacks` save/load cycles unchanged.
 
 #### Manual Verification:
-- [ ] `npm run deploy`, reload Obsidian; existing settings load with no regression; `data.json` shows no new keys yet (Phase 3 introduces the import button).
-- [ ] Hand-edit `data.json` to seed a valid `mcpPresetPacks` array with one fixture pack; reload; confirm via temporary debug log (removed before commit) that `PresetPacksStore.snapshot()` returns it.
+- [ ] `npm run deploy`, reload Obsidian; existing settings load with no regression; `data.json` shows no new keys yet (Phase 3 introduces the import button). Phase 2 ships no user-visible surface; persistence verification is automated only. Manual UI verification deferred to Phase 3.
 
 ---
 
 ## Phase 3: Import flow + Settings UI
 
-**Covers:** FR-001, FR-002, FR-006, FR-007, FR-008, FR-009, FR-010, FR-022, FR-023; SC-001, SC-003, SC-004, SC-007, SC-008.
+**Covers:** FR-001, FR-002, FR-006 (UI rendering of pack list), FR-007 (UI remove affordance), FR-008 (UI guarantees configured servers untouched on remove), FR-009, FR-010, FR-022, FR-023; SC-001 (import-side: ≤4 clicks + persistence on confirm — dropdown-visibility side is Phase 4), SC-003, SC-004 (state side: store no longer has presets after remove — dropdown disappearance is Phase 4), SC-007, SC-008.
 
 ### Changes Required:
 
 - **`src\settings\presets\packFileIO.ts`** (new): pure interface + Obsidian-desktop implementation factory.
   - `interface PackFileReader { pickAndReadPackFile(): Promise<{ ok: true; text: string; sourcePath: string; byteLength: number } | { ok: false; reason: "cancelled" | "missing" | "io"; message?: string }> }`.
   - `interface PackFileWriter { saveTextToPath(suggestedFilename: string, text: string): Promise<{ ok: true; path: string } | { ok: false; reason: "cancelled" | "io"; message?: string }> }`.
-  - Default desktop implementation: uses Electron's dialog via `(window as any).electron?.remote?.dialog` when available. Falls back to `vault.adapter` + Node `fs` via `getBasePath()` for direct read by absolute path (mirroring `src\settings\SettingsTab.ts:276-288`). If neither is available, returns `{ ok: false, reason: "io" }` with a clear message.
-  - Re-stats the path via `fs.statSync` to enforce the size cap BEFORE reading file contents.
+  - **Desktop implementation (committed approach):** a small modal dialog with a text input ("Pack file path") plus a `Browse...` button. The `Browse...` button attempts to invoke an Electron dialog only if `(window as any).electron?.remote?.dialog?.showOpenDialog` is callable at runtime (modern Electron may expose this via the Obsidian-injected remote shim, older builds do not); if present, the dialog populates the text input. If absent, the text input is the only entry path — typing or pasting an absolute path is fully supported. Reading is via `vault.adapter` + Node `fs.readFileSync` against the absolute path (mirroring the precedent at `src\settings\SettingsTab.ts:276-288`). This makes the picker UX deterministic on every Electron version (text-input always works), with the native dialog as a best-effort convenience. Mobile / non-desktop is out of scope — returns `{ ok: false, reason: "io", message: "Desktop-only feature." }`.
+  - `fs.statSync(path)` is called BEFORE reading file contents to enforce the byte-size cap (FR-023); `byteLength` is taken from `stat.size`.
+  - Save flow: same pattern — text input with a best-effort `Browse...` for `showSaveDialog`; the file is written via `fs.writeFileSync` to the absolute path.
 - **`src\settings\presets\packImporter.ts`** (new): pure orchestration
   - `type ImportPackOutcome` discriminated union: `sizeError | parseError | validationError | ioError | cancelled | confirmNew | confirmReimport`. Confirm variants carry the parsed `pack`; `confirmReimport` additionally carries `diff` and `metadataChanged`. All variants carry `sizeWarning` where applicable.
   - `runPackImport(args: { text; sourcePath; byteLength; existingRecord: ImportedPackRecord | null }): ImportPackOutcome` — composes `parsePackText` → `validatePack` → if `existingRecord` then `diffPacks` → outcome. Returns the first error encountered; zero side effects.
@@ -446,6 +449,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Re-import with identical canonical form → `confirmReimport` with empty deltas (SC-007 no-change).
   - Re-import with one added + one changed → diff matches (SC-007 changed).
   - `applyConfirmedImport` calls `store.addOrReplace`.
+  - **SC-006 (import side): `runPackImport` for a stdio pack whose `command` does not exist on PATH still produces `confirmNew` (no preflight/exec callback invoked, no error). Asserted by injecting a spy `commandExists` fake and verifying it is never called during import.**
 - **`packFileIO.test.ts`** (new, limited): injection contract; in-memory fake reader; error reasons round-trip.
 - **`packSettingsLogic.test.ts`** (new): render model zero/N records; `formatImportConfirmText` grammar (1 preset / N presets) and large-pack notice append; `formatReimportDiffText` empty → `"No changes."`; non-empty sections rendered with preset ids.
 - **`McpServersSection.packsList.test.ts`** (new, FakeElement): seeded store renders one row per record with expected text; `Remove pack` invokes destructive-confirm helper; on confirm, store's `remove` is invoked; existing `mcpServers` snapshot unchanged before/after.
@@ -461,7 +465,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] Typecheck: `npm run typecheck`
 - [ ] Build: `npm run build`
 - [ ] All `ImportPackOutcome` variants covered by tests.
-- [ ] SC-001, SC-003, SC-004, SC-007, SC-008 each have at least one assertion.
+- [ ] SC-001 (import-side ≤4 clicks + persistence on confirm), SC-003, SC-004 (state-side), SC-006 (import side: no preflight invocation), SC-007, SC-008 each have at least one assertion.
 
 #### Manual Verification:
 - [ ] `npm run deploy`, reload Obsidian. Author a minimal fixture pack JSON (`fixtures/sample.pack.json` — non-committed, generic placeholders per Spec NFR). Import via the new button → confirm preview → pack appears in the list. (Add Server dropdown grouping lands in Phase 4.)
@@ -475,7 +479,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 
 ## Phase 4: Add Server dropdown grouping + Export UI
 
-**Covers:** FR-004, FR-005, FR-011, FR-012, FR-013d, FR-014, FR-015, FR-020; SC-001 (dropdown side), SC-002, SC-004, SC-009.
+**Covers:** FR-004, FR-005, FR-011, FR-012, FR-013d, FR-014, FR-015, FR-020; SC-001 (dropdown-visibility side: imported presets visible immediately on import confirm via re-render hook), SC-002, SC-004 (dropdown side: removed pack's presets disappear from dropdown), SC-006 (preflight install hint surfaces only on server-form selection, not on import), SC-009.
 
 ### Changes Required:
 
@@ -516,8 +520,9 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Zero packs → dropdown contents unchanged from today.
   - One fixture pack present → dropdown lists new preset under its pack group label.
   - Selecting an imported preset whose credential is templatized leaves the token field empty and renders the "required" hint.
-  - After Phase 3 import re-render hook fires, dropdown re-renders without form rebuild (SC-001).
-  - After Phase 3 remove, dropdown no longer contains the removed presets (SC-004).
+  - After Phase 3 import re-render hook fires, dropdown re-renders without form rebuild (SC-001 dropdown side).
+  - After Phase 3 remove, dropdown no longer contains the removed presets (SC-004 dropdown side).
+  - **SC-006 (selection side): selecting a stdio preset whose `command` does not exist on PATH still completes pre-fill (no thrown error, form state populated) and renders the existing non-blocking preflight install hint exactly as a hand-typed missing command does today (reusing the unmodified preflight path at `src\settings\McpServersSection.ts:416-427`). Fake `commandExists` returns `false` for the test fixture.**
 - **`packExportFlow.test.ts`** (new):
   - Empty selection → `no-selection` reason.
   - One selected `static-bearer` → exported pack has placeholder; round-trips through `validatePack`.
@@ -533,7 +538,9 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] Tests pass: `npm test`
 - [ ] Typecheck: `npm run typecheck`
 - [ ] Build: `npm run build`
-- [ ] SC-001 (preset visible immediately on registry change) asserted via FakeElement test.
+- [ ] SC-001 (dropdown-visibility-on-import-confirm) asserted via FakeElement re-render-hook test.
+- [ ] SC-004 (dropdown-side: removed pack's presets disappear) asserted in `McpServersSection.packDropdown.test.ts`.
+- [ ] SC-006 (selection-side: missing-on-PATH command still pre-fills + shows non-blocking hint) asserted in `McpServersSection.packDropdown.test.ts`.
 - [ ] SC-002 (1/5/20 round-trip) and SC-009 (secret vs non-secret) explicitly asserted in `packExportFlow.test.ts`.
 
 #### Manual Verification:
@@ -587,6 +594,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - "Export servers as a pack" — including the secret-templating contract: which fields per credential kind become `__NEEDS_VALUE__` placeholders, why, and what the recipient sees on import.
   - "Conflict namespacing" — FR-013 rules with worked examples.
   - "Safety model" — packs are inert; first command spawn still hits the safety prompt; importing never auto-enables.
+  - "Reserved-but-inert credential variants" — `oauth-pkce` is accepted by the schema but the runtime resolver throws `not-implemented` at first tool call. Pack authors should NOT use `oauth-pkce` in shippable v1 presets.
   - "Troubleshooting" — parse errors, validation errors, missing source file, large pack rejected.
 - **`README.md`**: "What's new" section adds a one-line bullet under the next version with a link to `docs\preset-packs.md` (existing pattern at `README.md:7-19`).
 - **`CHANGELOG.md`**: New unreleased section (e.g. `[0.8.0] - Unreleased`) summarizing the feature in 3-5 bullets, mirroring v0.7.0 style (`CHANGELOG.md:12-21`).
