@@ -101,12 +101,14 @@ servers can select one or more of them and export them as a pack JSON
 file. The exported file is a clean pack: runtime state (last error,
 last token expiry, etc.) is stripped, the structural shape of each
 server's configuration (transport, command, args, credential KIND) is
-preserved, and any **secret-bearing fields** (bearer tokens, raw
-credential commands, sensitive header values, environment variables)
-are templatized — replaced with explicit "needs value" placeholders
-so the recipient is prompted to provide their own values at the
-point they configure a server from the imported preset. The exported
-pack captures the SHAPE of a server, never its secret VALUES.
+preserved, and any **secret-bearing fields** (bearer tokens,
+sensitive header values, secret-marked environment variables; see
+FR-020 for the per-kind classification including the `command-based`
+carve-out for bare-CLI commands) are templatized — replaced with
+explicit "needs value" placeholders so the recipient is prompted to
+provide their own values at the point they configure a server from
+the imported preset. The exported pack captures the SHAPE of a
+server, never its secret VALUES.
 
 **Independent Test.** Configure two MCP servers in vault A — one
 with non-secret credentials (e.g. `none` or a `command-based` credential whose command itself contains no secret values), one
@@ -122,7 +124,7 @@ empty and marked as required.
 1. Given one or more configured servers, when the user clicks **Export as preset pack**, then a file save dialog produces a JSON file whose schema validates against the same validator used for import.
 2. Given an exported pack containing only non-secret credential kinds, when re-imported on another vault, then the resulting presets, when selected, pre-fill the server form with the original configurations (modulo any per-row runtime state).
 3. Given a configured server has runtime-only fields (last refresh time, last error, etc.), when exported, then those fields are absent from the resulting pack JSON.
-4. Given a configured server has secret-bearing credential fields (e.g. a static bearer token, a static header secret, a raw credential-command string, an environment variable holding a secret), when exported, then every such field is replaced with a templatized placeholder in the resulting pack JSON, and the original secret value never appears in the exported file.
+4. Given a configured server has secret-bearing credential fields per FR-020's per-kind classification (e.g. a static bearer token, a static header secret, a secret-marked environment variable value), when exported, then every such field is replaced with the `__NEEDS_VALUE__` placeholder in the resulting pack JSON, and the original secret value never appears in the exported file. (Note: per FR-020's `command-based` carve-out, a bare-CLI `command`/`args` pair is structural and round-trips verbatim — authors are responsible for redacting literal secrets embedded in `args`.)
 5. Given a preset imported from a pack contains templatized credential placeholders, when the user selects it in the Add Server flow, then the server form pre-fills the structural fields and marks each placeholder field as a required input the user must supply before saving.
 
 ### User Story P5 – Author and consume the internal-organization pack (out-of-band deliverable)
