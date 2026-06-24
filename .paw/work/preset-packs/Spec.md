@@ -1,6 +1,6 @@
 # Feature Specification: Importable Preset Packs
 
-**Branch**: feature/preset-packs  |  **Created**: 2026-06-23  |  **Status**: Draft
+**Branch**: feature/preset-packs  |  **Created**: 2026-06-23  |  **Status**: Draft (rev 2)
 **Input Brief**: Implement proposal 0007 — make MCP server presets data, not code — and author the first internal pack (agency M365) in a sibling private repo.
 
 ## Overview
@@ -98,21 +98,32 @@ reflects the new content after confirmation.
 
 **Narrative.** A user who has hand-configured a useful set of MCP
 servers can select one or more of them and export them as a pack JSON
-file. The exported file is a clean pack — runtime state (last error,
-last token expiry, etc.) is stripped, the server configurations are
-templatized in the same shape an authored pack would have, and the
-file can be re-imported on a different vault or machine to reproduce
-the same set of presets.
+file. The exported file is a clean pack: runtime state (last error,
+last token expiry, etc.) is stripped, the structural shape of each
+server's configuration (transport, command, args, credential KIND) is
+preserved, and any **secret-bearing fields** (bearer tokens, raw
+credential commands, sensitive header values, environment variables)
+are templatized — replaced with explicit "needs value" placeholders
+so the recipient is prompted to provide their own values at the
+point they configure a server from the imported preset. The exported
+pack captures the SHAPE of a server, never its secret VALUES.
 
-**Independent Test.** Configure two MCP servers manually in vault A.
-Export them as a single pack file. Import the pack into vault B on a
-different machine. Verify the two presets appear in vault B and
-selecting them pre-fills the form identically to vault A.
+**Independent Test.** Configure two MCP servers in vault A — one
+with non-secret credentials (e.g. `none` or `azure-cli-token`), one
+with a static bearer token. Export both as a single pack file. Open
+the JSON: the first preset preserves its credential config verbatim;
+the second has its token field replaced by the templatized
+placeholder. Import the pack into vault B. Selecting the first
+preset pre-fills the form identically to vault A. Selecting the
+second preset pre-fills everything EXCEPT the token field, which is
+empty and marked as required.
 
 **Acceptance Scenarios.**
 1. Given one or more configured servers, when the user clicks **Export as preset pack**, then a file save dialog produces a JSON file whose schema validates against the same validator used for import.
-2. Given an exported pack, when re-imported on another vault, then the resulting presets, when selected, pre-fill the server form with the original configurations (modulo any per-row runtime state).
+2. Given an exported pack containing only non-secret credential kinds, when re-imported on another vault, then the resulting presets, when selected, pre-fill the server form with the original configurations (modulo any per-row runtime state).
 3. Given a configured server has runtime-only fields (last refresh time, last error, etc.), when exported, then those fields are absent from the resulting pack JSON.
+4. Given a configured server has secret-bearing credential fields (e.g. a static bearer token, a static header secret, a raw credential-command string, an environment variable holding a secret), when exported, then every such field is replaced with a templatized placeholder in the resulting pack JSON, and the original secret value never appears in the exported file.
+5. Given a preset imported from a pack contains templatized credential placeholders, when the user selects it in the Add Server flow, then the server form pre-fills the structural fields and marks each placeholder field as a required input the user must supply before saving.
 
 ### User Story P5 – Author and consume the internal agency pack (out-of-band deliverable)
 
@@ -138,75 +149,89 @@ test suite).
 
 ### Edge Cases
 
-- **Malformed JSON pack** — a single user-visible error names the offending field path; nothing is imported.
-- **Schema-invalid pack** (extra unknown fields, missing required fields, wrong types) — same: single error, nothing imported, no partial state.
-- **Pack contains a preset whose `id` collides with a built-in preset's id** — the imported preset is namespaced with the pack id (effective id `<packId>.<presetId>`); the display label disambiguates with `(from <pack label>)`.
-- **Pack contains a preset whose `id` collides with a preset already imported from a different pack** — same namespacing applies; both presets remain visible, each grouped under its own pack label.
-- **Pack file containing zero presets** — accepted, but a warning notes the pack added nothing visible.
-- **Pack file containing duplicate preset ids within itself** — rejected as malformed, single error citing the duplicated id.
+- **Malformed JSON pack** (e.g. unclosed brace, trailing comma where strict JSON forbids it) — a single user-visible error names the offending field path (or, for parse-stage errors, line/column); nothing is imported.
+- **Pack file is JSONC** (contains `//` comments) — rejected as malformed. The pack format is **strict JSON only**; the proposal example using `// ...` is illustrative, not a literal sample.
+- **Schema-invalid pack** (extra unknown preset-level fields, missing required fields, wrong types) — same: single error, nothing imported, no partial state.
+- **Pack JSON begins with a UTF-8 BOM** — the BOM is tolerated and stripped before parsing; the import proceeds normally.
+- **Pack file is mid-write at the moment of import** (the author saves while the user picks it) — JSON parse fails, import errors out, user can retry.
+- **Pack file is deleted or renamed between the file picker and the confirm step** — the import is aborted with a "source file no longer available" error; nothing is persisted.
+- **Pack file exceeds soft size threshold (100 KB)** — import succeeds, but the confirm dialog shows a "large pack" notice.
+- **Pack file exceeds hard size threshold (1 MB)** — rejected before parsing, with a "pack too large" error.
+- **Pack contains a preset whose `id` collides with a built-in preset's id** — the imported preset is namespaced (effective id `<packId>.<presetId>`); the built-in preset's id is unchanged. The display label disambiguates with `(from <pack label>)`.
+- **Pack contains a preset whose `id` collides with a preset already imported from another pack** — both presets remain visible; both are namespaced (`<thisPackId>.<presetId>` and `<otherPackId>.<presetId>`) so neither pack's presets shift identity when the other is added or removed.
+- **Pack contains a preset whose `id` collides with another preset in the SAME pack** — rejected as malformed, single error citing the duplicated id.
+- **Pack file containing zero presets** — rejected as malformed. A pack must declare at least one preset.
+- **Preset id case-sensitivity across operating systems** — ids are treated as case-sensitive strings everywhere (comparison, namespacing, persistence). Two ids that differ only by case are considered distinct.
 - **Removing a pack while a configured server from one of its presets is currently running** — the server keeps running; only the dropdown entry disappears.
-- **Importing a pack whose declared command does not exist on the current OS** — the import succeeds; the preflight `installHint` is surfaced when the user actually configures and tries to use the server (FR-018 in authenticated-mcps applies).
+- **Importing a pack whose declared command does not exist on the current OS** — the import succeeds; the preflight `installHint` surfaces when the user actually configures and tries to use the server (existing first-run preflight behavior applies).
 - **Exporting a server whose preset came from a pack** — the export captures the server's current configuration as a fresh preset; it does NOT carry the original pack ancestry.
-- **Pack JSON file > 1 MB** — accepted; warn user (suspiciously large pack is usually a mistake).
-- **Pack schema version mismatch** (future field unknown to current plugin) — unknown top-level fields ignored with a console warning; unknown preset-level fields rejected at validation (no silent partial data loss for server configs).
+- **Pack schema version mismatch** (future field unknown to current plugin) — unknown TOP-LEVEL pack fields are ignored with a console warning; unknown PRESET-level fields are rejected at validation (no silent partial data loss for server configs).
 
 ## Requirements
 
 ### Functional Requirements
 
-- **FR-001:** The plugin MUST accept a local JSON file as a preset pack via a file picker in Settings → MCP servers. *(Stories: P1, P3)*
-- **FR-002:** The plugin MUST validate an imported pack against a versioned pack schema and reject malformed packs with a single user-visible error citing the offending field path; no partial state is persisted. *(Stories: P1, P3)*
+- **FR-001:** The plugin MUST accept a local JSON file as a preset pack via a file picker in the existing MCP servers settings surface. *(Stories: P1, P3)*
+- **FR-002:** The plugin MUST validate an imported pack against a versioned pack schema and reject malformed packs with a single user-visible error citing the offending field path (or, for parse errors, line/column); no partial state is persisted. *(Stories: P1, P3)*
 - **FR-003:** On successful import, the plugin MUST persist the pack (its full JSON, import timestamp, original source path, and pack id) in vault-local plugin settings. *(Stories: P1, P2, P3)*
 - **FR-004:** The Add Server dropdown MUST present built-in and pack-sourced presets in a single list, grouped by source ("Built-in", "From <pack label>", per pack). *(Stories: P1, P5)*
-- **FR-005:** Selecting an imported preset MUST pre-fill the server form identically to selecting a built-in preset of equivalent shape. *(Stories: P1, P4, P5)*
-- **FR-006:** The plugin MUST list imported packs in Settings, showing each pack's label, version, source path, import time, and preset count. *(Story: P2)*
-- **FR-007:** The plugin MUST allow the user to remove an imported pack from Settings, after explicit confirmation. *(Story: P2)*
+- **FR-005:** Selecting an imported preset MUST pre-fill the server form identically to selecting a built-in preset of equivalent shape, with the exception of any secret-templatized fields which MUST be marked as required user input. *(Stories: P1, P4, P5)*
+- **FR-006:** The plugin MUST list imported packs in the settings surface, showing each pack's label, version, source path, import time, and preset count. *(Story: P2)*
+- **FR-007:** The plugin MUST allow the user to remove an imported pack from the settings surface, after explicit confirmation. *(Story: P2)*
 - **FR-008:** Removing a pack MUST remove its presets from the Add Server dropdown but MUST NOT modify any existing configured servers. *(Story: P2)*
-- **FR-009:** Re-importing a pack whose `id` matches an already-imported pack MUST present a diff (added / removed / changed presets) and persist only on user confirmation. *(Story: P3)*
+- **FR-009:** Re-importing a pack whose `id` matches an already-imported pack MUST present a diff (added / removed / changed presets) computed by structural comparison of canonical pack content (see FR-021) and persist only on user confirmation. *(Story: P3)*
 - **FR-010:** Cancelling a re-import MUST leave the previously imported pack unchanged. *(Story: P3)*
 - **FR-011:** The plugin MUST provide an "Export as preset pack" action that produces a pack JSON file from one or more user-configured MCP servers, omitting runtime-only state. *(Story: P4)*
 - **FR-012:** An exported pack MUST validate against the same schema used to validate imports (round-trip property). *(Story: P4)*
-- **FR-013:** The plugin MUST namespace preset ids that collide with built-in ids or with another pack's preset ids by prefixing the pack id, and MUST disambiguate display labels with the source pack label. *(Stories: P1, P2)*
+- **FR-013:** Conflict namespacing rules: *(Stories: P1, P2)*
+  - **a.** An imported preset whose `id` collides with a BUILT-IN preset's id is namespaced (effective id `<packId>.<presetId>`); the built-in preset's id is unchanged.
+  - **b.** When two imported packs declare presets with the same `id`, BOTH presets are namespaced (`<thisPackId>.<presetId>`) so neither shifts identity when packs are added or removed.
+  - **c.** Duplicate ids within a SINGLE pack are rejected at import (see Edge Cases).
+  - **d.** Display labels for namespaced presets MUST disambiguate by appending `(from <pack label>)`.
 - **FR-014:** Importing a pack MUST NOT auto-enable any of its presets as configured servers; the user must still explicitly add a server from each preset. *(Story: P1)*
 - **FR-015:** Pack-declared `preflight` checks MUST behave identically to built-in preflight checks (non-fatal hints, same UI rendering). *(Story: P5)*
 - **FR-016:** No code path triggered by pack import or pack rendering may execute, spawn, or evaluate any command declared in the pack; commands only run via the existing server-spawn path with its safety prompt. *(Story: P1)*
-- **FR-017:** Pack validation MUST be implemented using the same hand-rolled primitives already used for `ServerCredentials` validation; no new schema-library dependency MAY be introduced. *(Cross-cutting)*
-- **FR-018:** All user-visible UI surface (settings rows, dropdown labels, error messages, dialogs) for pack management MUST be implemented in the existing settings code style and reuse existing form/dialog primitives — no new framework or UI library. *(Cross-cutting)*
-- **FR-019:** The companion private repo `obsidian-copilot-presets-internal` MUST contain one pack JSON per M365 product surfaced by the internal agency MCP CLI, each validating against the same schema. *(Story: P5)*
-- **FR-020:** The public `obsidian-copilot-agent` repo, after this work, MUST contain zero references to internal-specific CLI names, internal hostnames, internal documentation URLs, or internal contact aliases — verified by a grep audit before the final PR. *(Story: P5, cross-cutting)*
+- **FR-017:** Pack validation MUST reuse the existing credential-shape validation primitives in the settings layer; no new schema-library dependency MAY be introduced. *(Cross-cutting)*
+- **FR-018:** All user-visible UI surface (settings rows, dropdown labels, error messages, dialogs) for pack management MUST be implemented in the existing settings UI conventions and reuse existing form/dialog primitives — no new framework or UI library. *(Cross-cutting)*
+- **FR-019:** The companion private repo `obsidian-copilot-presets-internal` MUST contain one pack JSON per M365 product surfaced by the internal MCP CLI, each validating against the same schema. *(Story: P5)*
+- **FR-020:** Server export MUST template-ize every secret-bearing field — i.e. fields that hold or could hold credential VALUES (bearer tokens, header secret values, raw credential-command strings, environment variables marked secret) — by replacing each such field with an explicit "needs value" placeholder. The exported pack JSON MUST never contain the original secret VALUES. The set of secret-bearing fields is determined by the credential KIND, not by content inspection. *(Story: P4)*
+- **FR-021:** Pack diff and equality MUST be computed over a canonical form of the pack content: JSON key order normalized (lexicographic), whitespace collapsed, the persisted import metadata (timestamp, source path, internal record id) EXCLUDED from comparison. Two packs whose canonical forms are byte-equal are considered equal; otherwise the differing preset entries (by `id`) are surfaced as added / removed / changed in the diff. *(Stories: P3)*
+- **FR-022:** The pack file format is strict JSON. JSON-with-comments (`//`, `/* */`) and other JSONC extensions are rejected at parse time. *(Cross-cutting, P1)*
+- **FR-023:** Pack files larger than 1 MB MUST be rejected before parsing with a "pack too large" error; files larger than 100 KB MUST trigger a "large pack" notice in the confirm dialog but proceed. *(Cross-cutting, P1)*
 
 ### Key Entities
 
-- **Preset Pack** — A JSON document with an `id`, `label`, `version`, optional `$schema` URI, and a non-empty list of `presets`. Stored verbatim in plugin settings under `mcp.presetPacks` alongside its import metadata.
+- **Preset Pack** — A JSON document with an `id`, `label`, `version`, optional `$schema` URI, and a non-empty list of `presets` (≥1). Stored verbatim in plugin settings, alongside its import metadata, under a dedicated settings key.
 - **Imported Pack Record** — The persisted form of an imported pack: the pack JSON plus import timestamp, source path, and a stable internal record id.
-- **Preset (as packed)** — A direct serialization of the existing `McpServerPreset` build output: `id`, `label`, `description`, `server`, `credentials`, optional `preflight`. No new fields beyond what the in-code preset already exposes.
+- **Preset (as packed)** — A direct serialization of the existing in-code preset build output: `id`, `label`, `description`, `server`, `credentials`, optional `preflight`. No new fields beyond what the in-code preset already exposes.
 
 ### Cross-Cutting / Non-Functional
 
-- **Privacy / leak prevention**: The public plugin codebase remains free of internal-only identifiers across source, tests, docs, fixtures, and proposal text.
+- **Privacy / leak prevention**: This work bridges a public repo and a private companion repo. The PUBLIC repo (source, tests, fixtures, snapshot data, sample packs, documentation, screenshots, CHANGELOG entries, CI run output, logs surfaced by tests, in-repo PAW artifacts) MUST remain free of organization-specific identifiers (internal CLI binary names, internal hostnames, internal documentation URLs, internal contact aliases, tenant identifiers). Real pack content for internal organizations lives only in the PRIVATE repo. Sample packs used in public tests/fixtures MUST use generic placeholder values (e.g. `internal-mcp-cli`, `example.org`).
 - **Reversibility**: Every state change made by pack management (import, re-import, remove) is reversible by undoing the inverse action without manual settings file editing.
 - **No new runtime trust surface**: Pack data flows are restricted to schema validation and settings persistence; no fetch, exec, or eval.
-- **Settings size**: Pack JSONs of typical size (≤100 presets, ≤100 KB) MUST not visibly degrade settings open/save latency.
+- **Settings size**: Pack JSONs within the size envelope of FR-023 MUST not increase the time to open or save the settings tab by more than 200 ms on a typical desktop.
 
 ## Success Criteria
 
-- **SC-001:** A user with a valid pack JSON file can import it through the settings UI and see its presets in the Add Server dropdown in fewer than four clicks total (Open Settings → Import pack from file → pick file → Confirm). *(FR-001, FR-003, FR-004)*
-- **SC-002:** A pack containing 1, 5, and 20 presets each round-trips through export → import without loss: the resulting server form pre-fills are byte-for-byte identical for every preset. *(FR-005, FR-011, FR-012)*
-- **SC-003:** A pack with a deliberately malformed field (missing required, wrong type, unknown preset-level field) yields exactly one user-visible error message naming the offending field path, and nothing is persisted to settings. *(FR-002)*
-- **SC-004:** After removing an imported pack, zero of its presets remain in the Add Server dropdown, while 100% of servers previously configured from those presets continue to function unchanged. *(FR-007, FR-008)*
-- **SC-005:** Importing the four+ M365 product packs from the internal private repo (mail, calendar, files, teams, …) yields working stdio MCP server configurations for each, confirmed by at least one successful chat tool call against each configured server (manual verification, captured in a checklist on the private repo's README). *(FR-019, P5)*
-- **SC-006:** A grep audit of the public repo (executed in CI or pre-merge) finds zero occurrences of the agreed internal-identifier patterns (internal CLI name, internal URLs, internal contact aliases) anywhere outside `.git/` and ignored paths. *(FR-020)*
-- **SC-007:** Importing a pack JSON whose declared command does not exist on the current OS still succeeds, and the install hint surfaces only when the user actually tries to use a server configured from one of its presets. *(FR-015)*
-- **SC-008:** Re-importing the same pack file with no changes shows an empty diff ("no changes") and persists nothing new beyond an updated import timestamp. *(FR-009)*
+- **SC-001:** A user with a valid pack JSON file can import it through the settings UI in fewer than four clicks (open Settings → Import pack from file → pick file → Confirm); imported presets are visible in the Add Server dropdown immediately on confirm. *(FR-001, FR-003, FR-004)*
+- **SC-002:** A pack containing 1, 5, and 20 presets each round-trips through export → import without loss for all NON-SECRET fields: the resulting server form pre-fill is byte-for-byte identical for every non-secret field of every preset; secret-bearing fields exported as templatized placeholders are surfaced as required form input on import. *(FR-005, FR-011, FR-012, FR-020)*
+- **SC-003:** A pack with a deliberately malformed field (missing required, wrong type, unknown preset-level field, comment in JSON, BOM only — covered separately) yields exactly one user-visible error message naming the offending field path or parse location, and nothing is persisted to settings. *(FR-002, FR-022)*
+- **SC-004:** After removing an imported pack, zero of its presets remain in the Add Server dropdown, while 100% of servers previously configured from those presets continue to start, accept requests, and respond identically to before the pack removal. *(FR-007, FR-008)*
+- **SC-005:** For each pack JSON authored in the private companion repo (one per agency-MCP-exposed M365 product), importing the pack into a vault, configuring a server from one of its presets, and issuing at least one chat tool call against that server completes successfully (manual smoke verification, recorded as a checklist in the private repo's README). *(FR-019, P5)*
+- **SC-006:** Importing a pack JSON whose declared command does not exist on the current OS still succeeds; the install hint surfaces only when the user actually tries to use a server configured from one of its presets. *(FR-015)*
+- **SC-007:** Re-importing a pack file whose canonical form (FR-021) is identical to the already-imported pack shows an empty diff and updates only the import timestamp; re-importing a pack file whose canonical form differs surfaces a non-empty diff itemizing added / removed / changed preset ids. *(FR-009, FR-021)*
+- **SC-008:** Pack files between 100 KB and 1 MB import successfully (with a "large pack" notice in the confirm dialog); files above 1 MB are rejected before parse with a "pack too large" error. *(FR-023)*
+- **SC-009:** An exported pack containing only non-secret credential kinds (`none`, `azure-cli-token`) imports on a different machine and yields servers that function identically without any user-supplied credential input. An exported pack containing secret-bearing credential kinds yields presets whose form pre-fill marks every secret field as a required user input before save. *(FR-005, FR-020)*
 
 ## Assumptions
 
-- The existing `McpServerPreset` build output shape is stable enough to serve as the v1 pack schema directly; future schema changes will use the pack's `version` field plus tolerant unknown-field handling.
-- The plugin settings store can hold a pack of typical size (≤100 presets, ≤100 KB JSON) without performance impact; existing storage already holds vault-scoped, similarly sized config.
-- Users authoring packs are technical enough to hand-edit JSON or use the export feature; we do not need a pack-authoring UI in v1.
-- Internal-pack consumption is a smoke-test exercise, not a unit-test exercise — the public test suite stays free of internal MCP commands.
-- The grep audit in SC-006 enumerates a fixed pattern list (CLI binary names, internal hostnames, internal contact email domains) agreed during planning; the list is committed as an audit script in the public repo.
-- Re-import diff visualization is content-based (compare preset entries by `id`, treat any field difference as "changed"); semantic diff (e.g. "label changed, command unchanged") is not required in v1.
+- The existing in-code preset build output shape is stable enough to serve as the v1 pack schema directly; future schema changes use the pack's `version` field plus tolerant unknown-top-level-field handling.
+- The plugin settings store can hold a pack within the FR-023 size envelope without performance impact; existing storage already holds vault-scoped, similarly sized config.
+- Users authoring packs are technical enough to hand-edit JSON or use the export feature; no pack-authoring UI in v1.
+- Internal-pack consumption is a smoke-test exercise, not a unit-test exercise — the public test suite stays free of internal MCP commands and identifiers.
+- Re-import diff is structural over canonical JSON; semantic diff (e.g. "label changed, command unchanged" highlighted separately) is not required in v1.
+- Leak prevention in the public repo is enforced by code review and developer discipline; there is no automated CI gate for internal-identifier patterns, because the pattern list itself would constitute a leak.
 
 ## Scope
 
@@ -214,16 +239,16 @@ test suite).
 - File-based pack import via Settings UI
 - Pack validation against a versioned schema
 - Listing and removing imported packs from Settings
-- Re-import with diff confirmation
-- Export of one or more configured servers as a pack file
-- Namespacing of conflicting preset ids
+- Re-import with structural-diff confirmation
+- Export of one or more configured servers as a pack file, with secret-templatization
+- Namespacing of conflicting preset ids per FR-013 rules
 - Grouping by source in the Add Server dropdown
 - Authoring one M365 product pack per agency-MCP-exposed product in `obsidian-copilot-presets-internal`
-- Grep audit in the public repo for internal-identifier patterns
-- Updating `docs/`, `README.md`, and `CHANGELOG.md` to describe pack import/export
+- Updating in-repo documentation (`docs/`, `README.md`, `CHANGELOG.md`) to describe pack import/export
 
 **Out of Scope:**
 - URL-based pack import (deferred — proposal open question on checksum trust model)
+- Automated CI grep audit for internal-identifier leaks (rejected: the pattern list would itself leak; relies on code review instead)
 - Central preset marketplace / discovery service
 - Cryptographic signing of packs
 - Auto-update of imported packs from their source URL
@@ -236,20 +261,21 @@ test suite).
 
 ## Dependencies
 
-- `authenticated-mcps` (v0.7.0) — `McpServerPreset` registry and `ServerCredentials` discriminated union shape; validation primitives in `mcpServerFormLogic.ts`.
+- Predecessor work shipped in v0.7.0 (`authenticated-mcps`) — established the in-code preset registry and the credential discriminated-union shape that the pack schema serializes; established the validation primitives the pack validator reuses.
 - Existing Settings → MCP servers section as the host UI surface.
 - Existing safety prompt at first command spawn (no change required, just relied upon).
 - A separate private GitHub repo (`obsidian-copilot-presets-internal`, cloned at `C:\Repos\`) for authoring and distributing the internal agency packs — not in the public source tree.
 
 ## Risks & Mitigations
 
-- **Risk:** Internal identifiers leak into the public repo (the exact failure that motivated this proposal). **Mitigation:** A committed grep-audit script enumerates the agreed pattern list; runs in CI on every PR; SC-006 makes this success-criterion-level.
-- **Risk:** Pack format drift between built-in `McpServerPreset` shape and the persisted pack schema. **Mitigation:** Build presets from the same data path used to load packs; the built-in preset registry is itself implemented via the pack schema as a runtime preload, validated by the same validator.
-- **Risk:** Settings UI complexity creep — pack listing, diff dialog, conflict labels, source-grouped dropdown — destabilizes settings rendering. **Mitigation:** Limit each new UI surface to existing primitives; phase the work so the dropdown grouping (UI-visible everywhere) ships before re-import diff (rarely exercised).
-- **Risk:** Validator allows silent partial data loss when packs declare unknown preset-level fields (future schema). **Mitigation:** Preset-level unknown fields are a hard reject in v1; only top-level pack fields are tolerantly ignored, with console warning. SC-003 explicitly tests this.
-- **Risk:** Diff computation for re-import is wrong (false "changed" for semantically equivalent presets). **Mitigation:** Diff is structural over canonical JSON serialization; equality is normalized JSON byte-equality. Re-import-with-no-changes case is in SC-008.
-- **Risk:** Internal pack authoring is blocked because the internal CLI's argument shapes aren't yet known to the pack author. **Mitigation:** Author the packs by inspecting one configured-by-hand instance per product (the export feature, P4, exists partly to bootstrap this); refine as needed in the private repo without churning the public schema.
+- **Risk:** Internal identifiers leak into the public repo (the v0.7.0 failure mode). **Mitigation:** Leak prevention is treated as a code-review responsibility. The reviewer (and the author) explicitly scan diffs for internal-identifier patterns (binary names, hostnames, URLs, contact aliases, tenant identifiers) before merge. The cross-cutting privacy NFR enumerates the public surfaces that must remain clean. Decision rationale documented under Out of Scope (automated audit rejected because the pattern list itself would constitute a leak).
+- **Risk:** Pack format drift between in-code preset shape and the persisted pack schema. **Mitigation:** Built-in presets are themselves expressed as a pack-shape that the same validator accepts; any drift fails the built-in load path immediately during normal startup.
+- **Risk:** Settings UI complexity creep — pack listing, diff dialog, conflict labels, source-grouped dropdown — destabilizes the settings render. **Mitigation:** Limit each new UI surface to existing primitives; phase the work so the dropdown grouping (UI-visible everywhere) ships before re-import diff (rarely exercised).
+- **Risk:** Validator allows silent partial data loss when packs declare unknown preset-level fields (future schema). **Mitigation:** Preset-level unknown fields are a hard reject in v1; only top-level pack fields are tolerantly ignored, with console warning (Edge Cases + FR-002 + Pack schema version mismatch case).
+- **Risk:** Diff computation for re-import flags semantically equivalent packs as "changed" because key order differs. **Mitigation:** FR-021 mandates canonical-form comparison; SC-007 explicitly tests the no-change case.
+- **Risk:** Internal pack authoring is blocked because the internal CLI's argument shapes aren't yet known to the pack author. **Mitigation:** Author the packs by first configuring one server per product by hand, then exporting (User Story P4) to bootstrap the pack JSON; refine in the private repo.
 - **Risk:** Export feature scope expands to "pack-authoring tool" with template editing, metadata fields, etc. **Mitigation:** v1 export is one-shot: pick servers → produce file. No in-app editing of the output.
+- **Risk:** Exported pack contains secret values despite FR-020 (e.g. a future credential kind ships before its export branch is updated). **Mitigation:** Secret templatization is gated by credential KIND, not by content inspection; new credential kinds default to "treat all fields as secret" until explicitly classified, so the failure mode is "field gets templatized when it didn't need to be," not "secret leaks."
 
 ## References
 
