@@ -18,6 +18,7 @@ import type {
 } from "./VaultAwarenessSettings";
 import type { ModelCatalog, ModelCatalogState } from "../sdk/ModelCatalog";
 import type { McpSettingsStore } from "./McpSettingsStore";
+import type { PresetPacksStore } from "./PresetPacksStore";
 import type { McpManager } from "../mcp/McpManager";
 import { McpServersSection } from "./McpServersSection";
 import { isCommandOnPath } from "./isCommandOnPath";
@@ -52,6 +53,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
   private modelCatalog?: ModelCatalog;
   private mcpSettingsStore?: McpSettingsStore;
   private mcpManager?: McpManager;
+  private presetPacksStore?: PresetPacksStore;
 
   constructor(
     app: App,
@@ -86,6 +88,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     modelCatalog: ModelCatalog;
     mcpSettingsStore: McpSettingsStore;
     mcpManager: McpManager;
+    presetPacksStore?: PresetPacksStore;
   }): void {
     this.authController = deps.authController;
     this.tokenStore = deps.tokenStore;
@@ -93,6 +96,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
     this.modelCatalog = deps.modelCatalog;
     this.mcpSettingsStore = deps.mcpSettingsStore;
     this.mcpManager = deps.mcpManager;
+    this.presetPacksStore = deps.presetPacksStore;
     if (this.containerEl && this.containerEl.isConnected) {
       this.display();
     }
@@ -284,6 +288,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
         vaultRoot,
         pathExists: (path) => fs.existsSync(path),
         executableExists: (command) => isCommandOnPath(command),
+        presetPacksStore: this.presetPacksStore,
       });
       this.mcpSection.mount(containerEl);
     }

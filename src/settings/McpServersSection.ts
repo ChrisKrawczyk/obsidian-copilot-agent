@@ -4,6 +4,7 @@ import type { McpServerConfig, McpServerRuntimeSnapshot } from "../mcp/McpTypes"
 import { redactSensitive } from "../mcp/redactSensitive";
 import type { SafetySettingsStore } from "./SafetySettingsStore";
 import type { McpSettingsStore, McpSettingsMutationResult } from "./McpSettingsStore";
+import type { PresetPacksStore } from "./PresetPacksStore";
 import {
   AUTHORIZATION_STORAGE_NOTICE,
   MCP_CALL_TIMEOUT_DEFAULT_SECONDS,
@@ -29,6 +30,13 @@ export interface McpServersSectionOptions {
    */
   executableExists?: (command: string) => boolean;
   notify?: (message: string) => void;
+  /**
+   * Phase 2 (preset packs): optional store reference. Phase 3 wires the
+   * "Imported preset packs" subsection; in Phase 2 the field exists only
+   * to thread the dependency through main.ts → SettingsTab without
+   * touching DOM render logic.
+   */
+  presetPacksStore?: PresetPacksStore;
 }
 
 type DomEl = HTMLElement & {

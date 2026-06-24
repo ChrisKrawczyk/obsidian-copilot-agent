@@ -29,9 +29,16 @@ export interface Pack {
 }
 
 export interface ImportedPackRecord {
+  /**
+   * Unique id for this record, regenerated on every `addOrReplace`. Used by
+   * the Settings UI to key list rows and trigger re-renders on re-import.
+   * NOT persisted across replaces — callers must not treat `recordId` as
+   * stable across re-imports of the same pack.
+   */
+  recordId: string;
   pack: Pack;
   /** Original on-disk path of the imported file (Electron `file.path`). */
-  sourcePath?: string;
+  sourcePath: string;
   /** Epoch ms at first import. Used for deterministic ordering. */
   importedAt: number;
 }
