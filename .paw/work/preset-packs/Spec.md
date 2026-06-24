@@ -125,11 +125,11 @@ empty and marked as required.
 4. Given a configured server has secret-bearing credential fields (e.g. a static bearer token, a static header secret, a raw credential-command string, an environment variable holding a secret), when exported, then every such field is replaced with a templatized placeholder in the resulting pack JSON, and the original secret value never appears in the exported file.
 5. Given a preset imported from a pack contains templatized credential placeholders, when the user selects it in the Add Server flow, then the server form pre-fills the structural fields and marks each placeholder field as a required input the user must supply before saving.
 
-### User Story P5 – Author and consume the internal internal pack (out-of-band deliverable)
+### User Story P5 – Author and consume the internal-organization pack (out-of-band deliverable)
 
 **Narrative.** In the sibling private repo
 `obsidian-copilot-presets-internal`, one pack JSON per M365 product
-exposed by the internal internal MCP bridge CLI (mail, calendar, files, teams,
+exposed by the internal MCP bridge CLI (mail, calendar, files, teams,
 …) is authored and committed. A user imports any subset of these
 pack files into their vault. The internal-CLI-backed presets appear
 in the Add Server dropdown alongside the built-in M365 Graph preset.
@@ -266,7 +266,7 @@ test suite).
 - Predecessor work shipped in v0.7.0 (`authenticated-mcps`) — established the in-code preset registry and the credential discriminated-union shape that the pack schema serializes; established the validation primitives the pack validator reuses.
 - Existing Settings → MCP servers section as the host UI surface.
 - Existing safety prompt at first command spawn (no change required, just relied upon).
-- A separate private GitHub repo (`obsidian-copilot-presets-internal`) for authoring and distributing the internal internal packs — not in the public source tree.
+- A separate private GitHub repo (`obsidian-copilot-presets-internal`) for authoring and distributing the internal-organization packs — not in the public source tree.
 
 ## Risks & Mitigations
 
@@ -286,4 +286,5 @@ test suite).
 - Tangent: `proposals/0006-tool-picker-and-scope-aware-credentials.md`
 - Companion private repo: `obsidian-copilot-presets-internal` (PRIVATE)
 - WorkflowContext: `.paw/work/preset-packs/WorkflowContext.md`
+
 
