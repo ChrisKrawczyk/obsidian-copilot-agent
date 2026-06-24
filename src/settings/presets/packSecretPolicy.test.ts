@@ -45,4 +45,13 @@ describe("packSecretPolicy", () => {
   test("SECRET_PLACEHOLDER is the locked literal", () => {
     expect(SECRET_PLACEHOLDER).toBe("__NEEDS_VALUE__");
   });
+
+  test("unknown credential kind → exporter callers must treat ALL fields as secret", () => {
+    // Contract: secretFieldsForCredentials returns the empty sentinel for an
+    // unknown kind. Callers are required to check isKnownCredentialKind FIRST
+    // and (when false) treat every credential field as secret. This test
+    // pins both halves of that contract.
+    expect(isKnownCredentialKind("future-variant")).toBe(false);
+    expect(secretFieldsForCredentials("future-variant")).toEqual([]);
+  });
 });

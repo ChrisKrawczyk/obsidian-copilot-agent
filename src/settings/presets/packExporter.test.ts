@@ -98,7 +98,15 @@ describe("exportServersAsPack", () => {
       url: "https://mcp.svc.cloud.microsoft/enterprise",
       credentials: {
         kind: "command-based",
-        command: "az account get-access-token --scope api://x/.default --output json",
+        command: "az",
+        args: [
+          "account",
+          "get-access-token",
+          "--scope",
+          "api://x/.default",
+          "--output",
+          "json",
+        ],
         tokenPath: "accessToken",
         expiryPath: "expiresOn",
         refreshBufferSeconds: 300,
@@ -108,9 +116,15 @@ describe("exportServersAsPack", () => {
     const creds = pack.presets[0].credentials;
     expect(creds.kind).toBe("command-based");
     if (creds.kind !== "command-based") throw new Error("unreachable");
-    expect(creds.command).toBe(
-      "az account get-access-token --scope api://x/.default --output json",
-    );
+    expect(creds.command).toBe("az");
+    expect(creds.args).toEqual([
+      "account",
+      "get-access-token",
+      "--scope",
+      "api://x/.default",
+      "--output",
+      "json",
+    ]);
     expect(creds.tokenPath).toBe("accessToken");
     expect(creds.expiryPath).toBe("expiresOn");
     expect(creds.refreshBufferSeconds).toBe(300);
