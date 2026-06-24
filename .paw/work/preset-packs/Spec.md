@@ -109,7 +109,7 @@ point they configure a server from the imported preset. The exported
 pack captures the SHAPE of a server, never its secret VALUES.
 
 **Independent Test.** Configure two MCP servers in vault A — one
-with non-secret credentials (e.g. `none` or `azure-cli-token`), one
+with non-secret credentials (e.g. `none` or a `command-based` credential whose command itself contains no secret values), one
 with a static bearer token. Export both as a single pack file. Open
 the JSON: the first preset preserves its credential config verbatim;
 the second has its token field replaced by the templatized
@@ -224,7 +224,7 @@ test suite).
 - **SC-006:** Importing a pack JSON whose declared command does not exist on the current OS still succeeds; the install hint surfaces only when the user actually tries to use a server configured from one of its presets. *(FR-015)*
 - **SC-007:** Re-importing a pack file whose canonical form (FR-021) is identical to the already-imported pack shows an empty diff and updates only the import timestamp; re-importing a pack file whose canonical form differs surfaces a non-empty diff itemizing added / removed / changed preset ids. *(FR-009, FR-021)*
 - **SC-008:** Pack files between 100 KB and 1 MB import successfully (with a "large pack" notice in the confirm dialog); files above 1 MB are rejected before parse with a "pack too large" error. *(FR-023)*
-- **SC-009:** An exported pack containing only non-secret credential kinds (`none`, `azure-cli-token`) imports on a different machine and yields servers that function identically without any user-supplied credential input. An exported pack containing secret-bearing credential kinds yields presets whose form pre-fill marks every secret field as a required user input before save. *(FR-005, FR-020)*
+- **SC-009:** An exported pack containing only non-secret credential kinds (`none`, and `command-based` whose declared command is a system-resolvable CLI containing no secret arguments) imports on a different machine and yields servers that function identically without any user-supplied credential input. An exported pack containing secret-bearing credential kinds yields presets whose form pre-fill marks every secret field as a required user input before save. *(FR-005, FR-020)*
 
 ## Assumptions
 
@@ -286,5 +286,6 @@ test suite).
 - Tangent: `proposals/0006-tool-picker-and-scope-aware-credentials.md`
 - Companion private repo: `obsidian-copilot-presets-internal` (PRIVATE)
 - WorkflowContext: `.paw/work/preset-packs/WorkflowContext.md`
+
 
 
