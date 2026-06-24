@@ -402,7 +402,9 @@ export class McpServersSection {
         if (!id.value) id.value = preset.id;
         name.value = built.server.name;
         transport.value = built.server.transport;
-        url.value = built.server.url;
+        if (built.server.transport === "http") {
+          url.value = built.server.url;
+        }
         if (built.credentials.kind === "command-based") {
           credentialKind.value = "command-based";
           credentialCommand.value = built.credentials.command;

@@ -1,8 +1,14 @@
 import { normalizeServerId } from "../mcp/McpIdentity";
 import type { McpServerConfig, McpServerId } from "../mcp/McpTypes";
 import { assertNoTlsBypassOptions, validateMcpHttpUrl, type HostClass } from "../mcp/httpPolicy";
-import { matchDenylist, type ExplicitDenylistOverrideWarning } from "../mcp/stdioEnv";
+import type { ExplicitDenylistOverrideWarning } from "../mcp/stdioEnv";
 import { redactSensitive } from "../mcp/redactSensitive";
+import {
+  collectDenylistWarnings as collectDenylistWarningsShared,
+  findTlsBypassKey as findTlsBypassKeyShared,
+  hasControlCharacter as hasControlCharacterShared,
+  parseArgsString,
+} from "./mcpServerFormLogic.shared";
 
 export const MCP_INITIALIZE_TIMEOUT_SECONDS = 10;
 export const MCP_TOOLS_LIST_PAGE_TIMEOUT_SECONDS = 10;
@@ -11,8 +17,6 @@ export const MCP_CALL_TIMEOUT_DEFAULT_SECONDS = 60;
 export const PRIVATE_NETWORK_CONFIRMATION_COPY = "This server is on a private network. Continue?";
 export const AUTHORIZATION_STORAGE_NOTICE =
   "Authorization headers are stored in plain text in data.json. If your vault is synced (Obsidian Sync, iCloud, Dropbox, etc.) this credential will sync too.";
-
-const TLS_BYPASS_KEYS = ["rejectUnauthorized", "insecure", "skipTls"] as const;
 
 export type McpCredentialKindUiSelection = "none" | "static-bearer" | "command-based";
 
@@ -90,7 +94,7 @@ export function validateMcpServerForm(
   let confirmationRequired = false;
   let hostClass: HostClass | undefined;
 
-  const tlsError = findTlsBypassKey(input as unknown as Record<string, unknown>);
+  const tlsError = findTlsBypassKeyShared(input as unknown as Record<string, unknown>);
   if (tlsError) errors.push(`TLS bypass option "${tlsError}" is not supported.`);
 
   try {
@@ -119,9 +123,9 @@ export function validateMcpServerForm(
     if (input.transport === "stdio") {
       const command = input.command?.trim() ?? "";
       if (!command) errors.push("Command is required for stdio MCP servers.");
-      if (hasControlCharacter(command)) errors.push("Command contains invalid control characters.");
-      const args = Array.isArray(input.args) ? input.args : parseArgs(input.args ?? "");
-      if (args.some((arg) => hasControlCharacter(arg))) {
+      if (hasControlCharacterShared(command)) errors.push("Command contains invalid control characters.");
+      const args = Array.isArray(input.args) ? input.args : parseArgsString(input.args ?? "");
+      if (args.some((arg) => hasControlCharacterShared(arg))) {
         errors.push("Arguments contain invalid control characters.");
       }
       const cwd = input.cwd?.trim() || context.vaultRoot;
@@ -129,7 +133,7 @@ export function validateMcpServerForm(
       if (context.pathExists && !context.pathExists(cwd)) {
         errors.push(`Working directory does not exist: ${cwd}`);
       }
-      const denylistEnvWarnings = collectDenylistWarnings(input.env, context.platform);
+      const denylistEnvWarnings = collectDenylistWarningsShared(input.env, context.platform);
       if (denylistEnvWarnings.length > 0) {
         warnings.push(
           `Explicit environment overrides match the MCP denylist: ${denylistEnvWarnings.map((w) => w.key).join(", ")}`,
@@ -183,7 +187,7 @@ export function validateMcpServerForm(
   }
 
   const denylistEnvWarnings =
-    input.transport === "stdio" ? collectDenylistWarnings(input.env, context.platform) : [];
+    input.transport === "stdio" ? collectDenylistWarningsShared(input.env, context.platform) : [];
   if (errors.length > 0 || !config) config = undefined;
 
   return {
@@ -234,7 +238,7 @@ export function displaySensitiveValue(value: string | undefined, reveal: boolean
 }
 
 export function assertNoTlsBypassFields(value: Record<string, unknown>): void {
-  const key = findTlsBypassKey(value);
+  const key = findTlsBypassKeyShared(value);
   if (key) throw new Error(`TLS bypass option "${key}" is not supported.`);
 }
 
@@ -392,39 +396,4 @@ function formatRelativeAgo(ms: number): string {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ago`;
-}
-
-function collectDenylistWarnings(
-  env: Record<string, string> | undefined,
-  platform: NodeJS.Platform = process.platform,
-): ExplicitDenylistOverrideWarning[] {
-  const caseInsensitive = platform === "win32";
-  return Object.keys(env ?? {}).flatMap((key) => {
-    const pattern = matchDenylist(key, caseInsensitive);
-    return pattern ? [{ key, pattern }] : [];
-  });
-}
-
-function parseArgs(raw: string): string[] {
-  const args: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(raw)) !== null) args.push(match[1] ?? match[2] ?? match[3]);
-  return args;
-}
-
-function hasControlCharacter(value: string): boolean {
-  return /[\u0000-\u001f\u007f]/.test(value);
-}
-
-function findTlsBypassKey(value: Record<string, unknown>): string | null {
-  for (const key of TLS_BYPASS_KEYS) {
-    if (Object.hasOwn(value, key)) return key;
-  }
-  if (value.headers && typeof value.headers === "object") {
-    for (const key of TLS_BYPASS_KEYS) {
-      if (Object.hasOwn(value.headers as Record<string, unknown>, key)) return key;
-    }
-  }
-  return null;
 }

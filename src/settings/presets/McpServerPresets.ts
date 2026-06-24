@@ -18,8 +18,21 @@ export interface PartialHttpServerInput {
   name: string;
 }
 
+export interface PartialStdioServerInput {
+  name: string;
+  transport: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+}
+
+export type PartialServerInput =
+  | PartialHttpServerInput
+  | PartialStdioServerInput;
+
 export interface McpServerPresetBuildResult {
-  server: PartialHttpServerInput;
+  server: PartialServerInput;
   credentials: ServerCredentials;
   preflight?: McpServerPresetPreflight;
 }
@@ -76,6 +89,7 @@ export const BUILT_IN_PRESETS: readonly McpServerPreset[] = Object.freeze([
   M365_GRAPH_PRESET,
 ]);
 
+/** @deprecated Use the effective preset registry (`buildEffectiveRegistry`). Retained for the legacy Settings dropdown until Phase 4. */
 export function getPresetById(id: string): McpServerPreset | undefined {
   return BUILT_IN_PRESETS.find((p) => p.id === id);
 }
