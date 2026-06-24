@@ -21,6 +21,7 @@ import type { McpSettingsStore } from "./McpSettingsStore";
 import type { PresetPacksStore } from "./PresetPacksStore";
 import type { McpManager } from "../mcp/McpManager";
 import { McpServersSection } from "./McpServersSection";
+import { createDesktopPackFileReader } from "./presets/packFileIO";
 import { isCommandOnPath } from "./isCommandOnPath";
 import { CliBinarySection, type CliBinaryHostPlugin } from "./CliBinarySection";
 import { PINNED_BINARY_VERSION } from "../sdk/pinnedBinaryVersion";
@@ -289,6 +290,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
         pathExists: (path) => fs.existsSync(path),
         executableExists: (command) => isCommandOnPath(command),
         presetPacksStore: this.presetPacksStore,
+        packFileReader: this.presetPacksStore ? createDesktopPackFileReader() : undefined,
       });
       this.mcpSection.mount(containerEl);
     }

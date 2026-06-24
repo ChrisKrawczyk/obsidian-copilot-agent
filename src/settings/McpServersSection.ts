@@ -5,6 +5,13 @@ import { redactSensitive } from "../mcp/redactSensitive";
 import type { SafetySettingsStore } from "./SafetySettingsStore";
 import type { McpSettingsStore, McpSettingsMutationResult } from "./McpSettingsStore";
 import type { PresetPacksStore } from "./PresetPacksStore";
+import type { PackFileReader } from "./presets/packFileIO";
+import { applyConfirmedImport, runImportFromReaderResult } from "./presets/packImporter";
+import {
+  formatImportConfirmText,
+  formatReimportDiffText,
+  renderModelForPackList,
+} from "./packSettingsLogic";
 import {
   AUTHORIZATION_STORAGE_NOTICE,
   MCP_CALL_TIMEOUT_DEFAULT_SECONDS,
@@ -31,12 +38,21 @@ export interface McpServersSectionOptions {
   executableExists?: (command: string) => boolean;
   notify?: (message: string) => void;
   /**
-   * Phase 2 (preset packs): optional store reference. Phase 3 wires the
-   * "Imported preset packs" subsection; in Phase 2 the field exists only
-   * to thread the dependency through main.ts → SettingsTab without
-   * touching DOM render logic.
+   * Phase 2 (preset packs): store reference. Phase 3 consumes it for the
+   * "Imported preset packs" subsection (list, import, remove).
    */
   presetPacksStore?: PresetPacksStore;
+  /**
+   * Phase 3 (preset packs): file picker for "Import pack from file…".
+   * Injected so tests can drive the import flow without a real DOM picker.
+   * Production wiring uses `createDesktopPackFileReader()`.
+   */
+  packFileReader?: PackFileReader;
+  /**
+   * Phase 3 (preset packs): destructive-confirm prompt. Defaults to
+   * `window.confirm`, mirroring the existing Remove-server pattern.
+   */
+  confirmPackAction?: (title: string, body: string) => boolean | Promise<boolean>;
 }
 
 type DomEl = HTMLElement & {
@@ -73,6 +89,11 @@ export class McpServersSection {
     this.root.setAttribute("aria-label", "MCP servers settings");
     this.unsubs.push(this.options.store.subscribe(() => this.render()));
     this.unsubs.push(this.options.manager.subscribe(() => this.render()));
+    if (this.options.presetPacksStore) {
+      this.unsubs.push(
+        this.options.presetPacksStore.subscribe(() => this.render()),
+      );
+    }
     this.render();
   }
 
@@ -98,6 +119,9 @@ export class McpServersSection {
     }
     const root = this.root;
     empty(root);
+    if (this.options.presetPacksStore) {
+      this.renderPacksSubsection(root);
+    }
     child(root, "h3", { text: "MCP servers" });
     child(root, "p", {
       cls: "setting-item-description",
@@ -576,6 +600,172 @@ export class McpServersSection {
   private noticeError(err: unknown): void {
     this.notify(`[Copilot Agent] MCP server operation failed: ${redactSensitive(err instanceof Error ? err.message : String(err))}`);
   }
+
+  private renderPacksSubsection(root: DomEl): void {
+    const packsStore = this.options.presetPacksStore;
+    if (!packsStore) return;
+    const section = child(root, "div", {
+      cls: "copilot-agent-preset-packs",
+      attr: { role: "region", "aria-label": "Imported preset packs" },
+    });
+    child(section, "h3", { text: "Imported preset packs" });
+    child(section, "p", {
+      cls: "setting-item-description",
+      text: "Preset packs add MCP server presets to the Add Server dropdown. Importing a pack does not configure or connect any server.",
+    });
+
+    const importBtn = child(section, "button", {
+      text: "Import pack from file…",
+      attr: { "aria-label": "Import preset pack from file" },
+    });
+    on(importBtn, "click", () => {
+      void this.handleImportPack();
+    });
+
+    const list = child(section, "div", {
+      attr: { role: "list", "aria-label": "Imported preset packs list" },
+    });
+    const records = packsStore.snapshot();
+    if (records.length === 0) {
+      child(list, "p", { text: "No preset packs imported." });
+      return;
+    }
+    const model = renderModelForPackList(records);
+    for (const row of model.rows) this.renderPackRow(list, row);
+  }
+
+  private renderPackRow(
+    list: DomEl,
+    row: ReturnType<typeof renderModelForPackList>["rows"][number],
+  ): void {
+    const rowEl = child(list, "div", {
+      cls: "copilot-agent-preset-pack-row",
+      attr: {
+        role: "listitem",
+        "aria-label": `Preset pack ${row.label} (${row.packId}) version ${row.version}`,
+      },
+    });
+    child(rowEl, "strong", { text: row.label });
+    child(rowEl, "span", {
+      text: ` ${row.packId} · v${row.version} · ${row.presetCount} preset${row.presetCount === 1 ? "" : "s"} · imported ${row.importedAtIso}`,
+    });
+    child(rowEl, "div", {
+      cls: "setting-item-description",
+      text: `Source: ${row.sourcePath}`,
+    });
+    const removeBtn = child(rowEl, "button", {
+      text: "Remove pack",
+      attr: { "aria-label": `Remove preset pack ${row.label}` },
+    });
+    on(removeBtn, "click", () => {
+      void this.handleRemovePack(row.packId, row.label);
+    });
+  }
+
+  private async handleImportPack(): Promise<void> {
+    const packsStore = this.options.presetPacksStore;
+    const reader = this.options.packFileReader;
+    if (!packsStore || !reader) {
+      this.notify("[Copilot Agent] Pack import is unavailable in this build.");
+      return;
+    }
+    const picked = await reader.pickAndReadPackFile();
+    const outcome = runImportFromReaderResult(picked, (text) =>
+      findExistingRecord(packsStore.snapshot(), text),
+    );
+
+    switch (outcome.kind) {
+      case "sizeError":
+      case "parseError": {
+        const loc =
+          outcome.error.line !== undefined && outcome.error.column !== undefined
+            ? ` (line ${outcome.error.line}, column ${outcome.error.column})`
+            : "";
+        this.notify(`[Copilot Agent] Pack import failed: ${outcome.error.message}${loc}`);
+        return;
+      }
+      case "validationError": {
+        this.notify(
+          `[Copilot Agent] Pack validation failed at ${outcome.error.pointer}: ${outcome.error.message}`,
+        );
+        return;
+      }
+      case "ioError":
+        this.notify(`[Copilot Agent] Could not read pack file: ${outcome.message}`);
+        return;
+      case "cancelled":
+        return;
+      case "confirmNew": {
+        const body = formatImportConfirmText(outcome);
+        const ok = await this.askConfirm("Import preset pack?", body);
+        if (!ok) return;
+        try {
+          await applyConfirmedImport(packsStore, outcome.pack, outcome.sourcePath);
+        } catch (err) {
+          this.noticeError(err);
+        }
+        return;
+      }
+      case "confirmReimport": {
+        const body = formatReimportDiffText(outcome);
+        const ok = await this.askConfirm(`Re-import "${outcome.pack.label}"?`, body);
+        if (!ok) return;
+        try {
+          await applyConfirmedImport(packsStore, outcome.pack, outcome.sourcePath);
+        } catch (err) {
+          this.noticeError(err);
+        }
+        return;
+      }
+    }
+  }
+
+  private async handleRemovePack(packId: string, label: string): Promise<void> {
+    const packsStore = this.options.presetPacksStore;
+    if (!packsStore) return;
+    const ok = await this.askConfirm(
+      `Remove pack ${label}?`,
+      `Remove pack ${label}? Already-configured servers will continue to function unchanged.`,
+    );
+    if (!ok) return;
+    try {
+      await packsStore.remove(packId);
+    } catch (err) {
+      this.noticeError(err);
+    }
+  }
+
+  private async askConfirm(title: string, body: string): Promise<boolean> {
+    if (this.options.confirmPackAction) {
+      return Promise.resolve(this.options.confirmPackAction(title, body));
+    }
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      return window.confirm(`${title}\n\n${body}`);
+    }
+    return true;
+  }
+}
+
+/**
+ * Resolve an existing record by parsing the incoming text JUST enough to
+ * extract the pack id. If parsing fails here, return null — `runPackImport`
+ * will surface the parse error via its own pipeline.
+ */
+function findExistingRecord(
+  records: ReadonlyArray<import("./presets/packTypes").ImportedPackRecord>,
+  text: string,
+): import("./presets/packTypes").ImportedPackRecord | null {
+  try {
+    const stripped =
+      text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    const parsed = JSON.parse(stripped) as { id?: unknown };
+    if (parsed && typeof parsed === "object" && typeof parsed.id === "string") {
+      return records.find((r) => r.pack.id === parsed.id) ?? null;
+    }
+  } catch {
+    // Ignore — main pipeline will produce the parse error.
+  }
+  return null;
 }
 
 function toInput(server: McpServerConfig): McpServerFormInput {
