@@ -432,7 +432,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - `applyConfirmedImport(store: PresetPacksStore, pack: Pack, sourcePath: string): Promise<ImportedPackRecord>` — calls `store.addOrReplace`.
 - **`src\settings\packSettingsLogic.ts`** (new): pure
   - `renderModelForPackList(records: ImportedPackRecord[]): { rows: { recordId: string; label: string; version: string; sourcePath: string; importedAtIso: string; presetCount: number }[] }`.
-  - `formatImportConfirmText(outcome: Extract<ImportPackOutcome, { kind: "confirmNew" }>): string` and `formatReimportDiffText(outcome: Extract<ImportPackOutcome, { kind: "confirmReimport" }>): string` produce the strings the confirm dialog shows (testable without DOM).
+  - `formatImportConfirmText(outcome: Extract<ImportPackOutcome, { kind: "confirmNew" }>): string` and `formatReimportDiffText(outcome: Extract<ImportPackOutcome, { kind: "confirmReimport" }>): string` produce the strings the confirm dialog shows (testable without DOM). **`formatImportConfirmText` MUST include all four of: pack `label`, pack `version`, source path (the absolute path the user supplied), and preset count — matching Spec P1 acceptance (`Spec.md:60-61`). Tests assert each of these four fields appears literally in the output, plus the large-pack notice when `sizeWarning` is set.**
 - **`src\settings\McpServersSection.ts`** (DOM wiring): Add a new "Imported preset packs" subsection above the configured-server list (`src\settings\McpServersSection.ts:85-109`). Use the same DOM idiom as the existing list. Per-row fields per FR-006: label, version, source path, formatted import time, preset count, `Remove pack` button.
   - `Import pack from file…` button → `packFileReader.pickAndReadPackFile()` → `runPackImport()` → render branch:
     - Error branches: single `new Notice` with parser/validator message and `pointer` (or `line:col`); nothing persists (FR-002, SC-003).
@@ -522,7 +522,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Selecting an imported preset whose credential is templatized leaves the token field empty and renders the "required" hint.
   - After Phase 3 import re-render hook fires, dropdown re-renders without form rebuild (SC-001 dropdown side).
   - After Phase 3 remove, dropdown no longer contains the removed presets (SC-004 dropdown side).
-  - **SC-006 (selection side): selecting a stdio preset whose `command` does not exist on PATH still completes pre-fill (no thrown error, form state populated) and renders the existing non-blocking preflight install hint exactly as a hand-typed missing command does today (reusing the unmodified preflight path at `src\settings\McpServersSection.ts:416-427`). Fake `commandExists` returns `false` for the test fixture.**
+  - **SC-006 dropdown-selection inertness: selecting a stdio preset whose `command` does not exist on PATH still completes pre-fill (no thrown error, form state populated) without `packDropdownLogic` invoking any preflight / `commandExists` / fs lookup itself. The existing form-level preflight hint at `src\settings\McpServersSection.ts:416-427` continues to render through its own unchanged code path; the pack dropdown adds no new preflight invocation. Asserted via spy fake `commandExists` provably not called from the dropdown selection path.**
 - **`packExportFlow.test.ts`** (new):
   - Empty selection → `no-selection` reason.
   - One selected `static-bearer` → exported pack has placeholder; round-trips through `validatePack`.
@@ -540,13 +540,14 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] Build: `npm run build`
 - [ ] SC-001 (dropdown-visibility-on-import-confirm) asserted via FakeElement re-render-hook test.
 - [ ] SC-004 (dropdown-side: removed pack's presets disappear) asserted in `McpServersSection.packDropdown.test.ts`.
-- [ ] SC-006 (selection-side: missing-on-PATH command still pre-fills + shows non-blocking hint) asserted in `McpServersSection.packDropdown.test.ts`.
+- [ ] SC-006 (dropdown-selection inertness: pack dropdown adds no new preflight invocation; existing form-level preflight hint code path unchanged) asserted in `McpServersSection.packDropdown.test.ts`.
 - [ ] SC-002 (1/5/20 round-trip) and SC-009 (secret vs non-secret) explicitly asserted in `packExportFlow.test.ts`.
 
 #### Manual Verification:
 - [ ] `npm run deploy`, reload Obsidian. With a previously imported pack (from Phase 3), open Add Server → new preset appears under `From <label>`; select it; pre-fill correct; templatized fields empty with the "required" hint. M365 built-in still pre-fills as before.
 - [ ] Configure a server from an imported preset; remove the pack (Phase 3 UI); preset disappears from dropdown but configured server still works (kick a chat tool call) — SC-004.
 - [ ] Configure two MCP servers (one HTTP `none`, one HTTP `static-bearer`). Click Export → select both → save file. Open the resulting JSON: second's token is the placeholder; first preserves verbatim non-secret fields. Import file into a different vault profile, select each preset, confirm pre-fill matches SC-009 expectations.
+- [ ] **SC-006 use-side (spec wording "when the user actually tries to use a server configured from one of its presets"):** Import a fixture pack whose stdio preset declares a deliberately bogus `command` (e.g. `nonexistent-cli-xyz`). Select that preset from the dropdown → save the resulting server config. Then issue a chat tool call that would route to that server. Verify the existing non-blocking install hint surfaces at the runtime touch point (not earlier — confirm no hint was shown during import confirm). Record measured behavior in the PR description.
 
 ---
 
@@ -581,7 +582,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 
 ## Phase 6: Documentation
 
-**Covers:** Spec § Scope "Updating in-repo documentation" (`.paw\work\preset-packs\Spec.md:249-250`).
+**Covers:** Spec § Scope "Updating in-repo documentation" (`.paw\work\preset-packs\Spec.md:249-250`); Settings-performance NFR (`Spec.md:213`) verified as a manual measurement and recorded in `SmokeChecklist.md`.
 
 ### Changes Required:
 
@@ -599,7 +600,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 - **`README.md`**: "What's new" section adds a one-line bullet under the next version with a link to `docs\preset-packs.md` (existing pattern at `README.md:7-19`).
 - **`CHANGELOG.md`**: New unreleased section (e.g. `[0.8.0] - Unreleased`) summarizing the feature in 3-5 bullets, mirroring v0.7.0 style (`CHANGELOG.md:12-21`).
 - **`.paw\work\preset-packs\Docs.md`**: Populate via `paw-docs-guidance` template — feature summary, doc locations, what intentionally was NOT documented (e.g. URL import).
-- **`.paw\work\preset-packs\SmokeChecklist.md`** (new): Final manual checklist spanning import, remove, re-import (no-change and changed), export round-trip, large-pack thresholds, and private-pack end-to-end smoke. Used as the manual verification record before the Final PR.
+- **`.paw\work\preset-packs\SmokeChecklist.md`** (new): Final manual checklist spanning import, remove, re-import (no-change and changed), export round-trip, large-pack thresholds, and private-pack end-to-end smoke. Used as the manual verification record before the Final PR. **MUST include a settings-performance measurement step (see Manual Verification below) satisfying Spec NFR (`Spec.md:213`).**
 
 ### Success Criteria:
 
@@ -616,6 +617,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] `SmokeChecklist.md` can be executed step-by-step on a deployed vault without consulting source code.
 - [ ] README "What's new" link opens the new doc.
 - [ ] CHANGELOG entry reads cleanly with no leaked internal identifiers.
+- [ ] **Settings performance NFR (`Spec.md:213`)**: On the developer's reference workstation (record CPU / RAM / OS in `SmokeChecklist.md` alongside the measurement), use the browser/Electron devtools Performance panel to time settings-tab open and a save round-trip in two states: (a) no imported packs (baseline), (b) five 100 KB packs imported and one 1 MB pack imported. The delta MUST be ≤ 200 ms for both open and save. Record both numbers in `SmokeChecklist.md` and reference them from the Final PR description. If the delta exceeds 200 ms, treat as a regression and open a follow-up issue before merging.
 
 ---
 
