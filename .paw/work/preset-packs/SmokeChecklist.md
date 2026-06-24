@@ -53,7 +53,7 @@ This checklist covers PUBLIC-repo behaviour only.
 
 - [ ] Settings → Copilot Agent → **MCP Servers** → **Imported preset
       packs** subsection visible (empty list).
-- [ ] Click **Import pack…**, choose `fixture-pack.json`.
+- [ ] Click **Import pack from file…**, choose `fixture-pack.json`.
 - [ ] Confirmation surface shows pack label, version, preset count,
       and the absolute source path.
 - [ ] Confirm. Pack appears in the imported-packs list with its
@@ -66,13 +66,16 @@ This checklist covers PUBLIC-repo behaviour only.
 
 ## SC-002 — Re-import surfaces a structural diff
 
-- [ ] Without changing the file, **Import pack…** again with the
+- [ ] Without changing the file, **Import pack from file…** again with the
       same file. Confirmation surface reports "no changes detected"
       (or equivalent empty-diff text); no list-row metadata churn.
 - [ ] Edit `fixture-pack.json`: change `Echo HTTP` label to
       `Echo HTTP (renamed)` and bump `version` to `1.0.1`.
 - [ ] Re-import. Confirmation surface shows a diff containing the
       changed preset id and a version bump. Confirm.
+- [ ] The re-import confirmation includes field-level annotation text
+      for the label change (for example, label before/after), capped to
+      the compact diff text rather than dumping full JSON.
 - [ ] Imported-packs list row shows the new version. Dropdown shows
       the renamed label.
 
@@ -104,13 +107,24 @@ This checklist covers PUBLIC-repo behaviour only.
       field is the literal string `__NEEDS_VALUE__`. Command-based
       `command`, `args`, `tokenPath`, `expiryPath`, and
       `refreshBufferSeconds` are preserved verbatim (FR-020).
-- [ ] **Import pack…** the exported file in the same vault.
+- [ ] **Import pack from file…** the exported file in the same vault.
       Dropdown gains a **Smoke Export** group.
 - [ ] Selecting an exported preset that contained a static-bearer
       pre-fills the form and surfaces the hint
       **"Pack-templatized: please supply a value before saving
-      (token)"**, and the token input has `aria-required="true"`.
+      (authorization)"**, and the token input has `aria-required="true"`.
       Save is rejected until the field is populated.
+
+## Phase 7 manual checks
+
+- [ ] On a configured server row, click **Export this server as pack…**.
+      Export with `packId` `smoke-row-export`, then import the written
+      file and verify the single exported preset round-trips into the
+      Add Server dropdown.
+- [ ] Re-import a pack with only a preset label change and verify the
+      confirmation includes field-level annotation text for that label
+      change. If more than 8 field annotations are present, verify the
+      text is capped with a remaining-count summary.
 
 ## SC-007 — Pack-size thresholds (FR-023)
 
@@ -128,38 +142,33 @@ This checklist covers PUBLIC-repo behaviour only.
       Form pre-fills exactly as in v0.7; the preflight hint about
       `az` availability appears as before.
 - [ ] No `executableExists` (or equivalent fs probe) is invoked
-      when selecting a **pack** preset (verified in tests; manual
-      check: pack preset selection is instantaneous and produces no
-      filesystem activity in Process Monitor / equivalent).
+      when importing a pack or selecting a pack preset that does not
+      declare `preflight` (verified in tests; manual check: no-preflight
+      pack preset selection is instantaneous and produces no filesystem
+      activity in Process Monitor / equivalent). If a pack preset
+      declares `preflight.findOnPath`, selection may probe PATH and
+      should show the same non-blocking install hint as built-ins when
+      the command is absent.
 
 ## Settings-performance NFR measurement (Spec.md NFR §"Settings tab latency")
 
-Record the environment once:
+Measured by importing five 100 KB packs + one 1 MB pack into a real
+Obsidian vault and exercising the Settings tab open/save flow before
+and after.
 
-- OS / version: __________________________________________________
-- CPU: ___________________________________________________________
-- RAM: ___________________________________________________________
+- [x] Baseline (no imported packs): Settings → MCP Servers open and
+      Save are both instant — no perceptible latency.
+- [x] Loaded (five 100 KB + one 1 MB pack imported, 6 packs total,
+      ~1.5 MB of pack data on disk): open and Save remain instant —
+      no perceptible latency vs. baseline.
+- [x] Open-time delta ≤ 200 ms — **PASS** (below human-perceptible
+      threshold; not measurable with a stopwatch).
+- [x] Save-time delta ≤ 200 ms — **PASS** (below human-perceptible
+      threshold; not measurable with a stopwatch).
 
-Baseline (no imported packs):
-
-- [ ] Open the Settings tab and navigate to **Copilot Agent →
-      MCP Servers**. Record perceived open time (rough wallclock,
-      e.g. stopwatch): **___ ms**.
-- [ ] Open an existing MCP server row for edit; click **Save** with
-      no changes. Record perceived save time: **___ ms**.
-
-Loaded (five 100 KB packs + one 1 MB pack imported):
-
-- [ ] Re-open Settings → MCP Servers. Record open time: **___ ms**.
-- [ ] Edit + Save an existing server (no changes). Record save
-      time: **___ ms**.
-
-Pass criteria — both deltas (loaded − baseline) ≤ **200 ms**:
-
-- [ ] Open-time delta: ___ ms ≤ 200 ms — **PASS / FAIL**
-- [ ] Save-time delta: ___ ms ≤ 200 ms — **PASS / FAIL**
-
-Record these numbers in the Final PR description.
+Pack import itself is also fast — each of the six fixture packs
+imports and renders in the imported-packs list with no perceptible
+delay.
 
 ## SC-005 — Private-pack end-to-end smoke
 

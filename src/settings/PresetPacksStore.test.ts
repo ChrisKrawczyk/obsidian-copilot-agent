@@ -24,7 +24,7 @@ function pack(id: string, overrides: Partial<Pack> = {}): Pack {
       {
         id: "p1",
         label: "Preset 1",
-        server: { name: "Preset 1", transport: "http", url: "https://example.com/mcp" },
+        server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
         credentials: { kind: "none" },
       },
     ],

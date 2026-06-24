@@ -94,7 +94,7 @@ function pack(id: string, overrides: Partial<Pack> = {}): Pack {
       {
         id: "p1",
         label: "Preset 1",
-        server: { name: "Preset 1", transport: "http", url: "https://example.com/mcp" },
+        server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
         credentials: { kind: "none" },
       },
     ],
@@ -266,6 +266,35 @@ describe("McpServersSection — pack import (FR-001/FR-002/SC-001/SC-003/SC-007)
     expect(ctx.packs.snapshot()).toHaveLength(1);
     expect(ctx.packs.snapshot()[0].recordId).not.toBe(originalRecordId);
     expect(ctx.packs.snapshot()[0].sourcePath).toBe("/v.json");
+  });
+
+  test("confirmReimport changed preset includes field annotations", async () => {
+    const original = pack("vendor");
+    const updated = pack("vendor", {
+      presets: [
+        {
+          id: "p1",
+          label: "Preset 1 updated",
+          server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
+          credentials: { kind: "none" },
+        },
+      ],
+    });
+    const text = JSON.stringify(updated);
+    const r = reader({ ok: true, text, sourcePath: "/v.json", byteLength: text.length });
+    const ctx = await mount({
+      initialPacks: [{ pack: original, sourcePath: "/orig.json" }],
+      packFileReader: r,
+      confirm: () => false,
+    });
+    ctx.root.byAria("Import preset pack from file").click();
+    await flush();
+    const reimportPrompt = ctx.confirmCalls.find((c) =>
+      c.title.startsWith("Re-import"),
+    );
+    expect(reimportPrompt).toBeDefined();
+    expect(reimportPrompt!.body).toContain('label changed: "Preset 1" → "Preset 1 updated"');
+    expect(ctx.packs.snapshot()[0].pack.presets[0].label).toBe("Preset 1");
   });
 
   test("reader returns cancelled → silent (no notice, no mutation)", async () => {

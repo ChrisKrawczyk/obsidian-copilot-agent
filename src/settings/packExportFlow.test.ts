@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { McpServerConfig, McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
 import {
   buildExportFlowModel,
+  buildExportFlowModelForServer,
   runExport,
   suggestedFilename,
   toggleSelection,
@@ -26,7 +27,7 @@ function httpServer(
     enabled: true,
     trustEpoch: epoch(),
     transport: "http",
-    url: "https://example.com/mcp",
+    url: "https://example.org/mcp",
     ...partial,
   } as McpServerConfig;
 }
@@ -48,6 +49,43 @@ describe("buildExportFlowModel", () => {
     expect(model.defaultPackMeta.version).toBe("2025-06-15");
     expect(model.defaultPackMeta.id).toBe("exported-pack");
     expect(model.defaultPackMeta.label).toBe("Exported servers");
+  });
+});
+
+describe("buildExportFlowModelForServer", () => {
+  test("selects only the requested server and derives single-server defaults", () => {
+    const alpha = httpServer({ id: brand("alpha"), name: "Example Corp Graph" });
+    const beta = httpServer({ id: brand("beta"), name: "Other" });
+    const model = buildExportFlowModelForServer(alpha, [alpha, beta]);
+    expect(model.rows).toEqual([
+      { id: "alpha", name: "Example Corp Graph", transport: "http", selected: true },
+    ]);
+    expect(model.defaultPackMeta).toEqual({
+      id: "example-corp-graph",
+      label: "Example Corp Graph",
+      version: "1.0.0",
+    });
+  });
+
+  test("slug generation preserves dot underscore dash and prefixes non-alphanumeric starts", () => {
+    const server = httpServer({ id: brand("s"), name: "...Example_Corp.Graph" });
+    const model = buildExportFlowModelForServer(server, [server]);
+    expect(model.defaultPackMeta.id).toBe("server...example_corp.graph");
+  });
+
+  test("empty slug falls back to server", () => {
+    const server = httpServer({ id: brand("s"), name: "!!!" });
+    const model = buildExportFlowModelForServer(server, [server]);
+    expect(model.defaultPackMeta.id).toBe("server");
+  });
+
+  test("slug collisions get deterministic row-order suffixes", () => {
+    const first = httpServer({ id: brand("a"), name: "Example Graph" });
+    const second = httpServer({ id: brand("b"), name: "Example---Graph" });
+    const third = httpServer({ id: brand("c"), name: "Example Graph!" });
+    expect(buildExportFlowModelForServer(first, [first, second, third]).defaultPackMeta.id).toBe("example-graph");
+    expect(buildExportFlowModelForServer(second, [first, second, third]).defaultPackMeta.id).toBe("example-graph-2");
+    expect(buildExportFlowModelForServer(third, [first, second, third]).defaultPackMeta.id).toBe("example-graph-3");
   });
 });
 
@@ -139,6 +177,32 @@ describe("runExport", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.serialized.startsWith("{\n  ")).toBe(true);
+  });
+
+  test("single-server model exports exactly one selected server", () => {
+    const alpha = httpServer({ id: brand("alpha"), name: "Alpha" });
+    const beta = httpServer({ id: brand("beta"), name: "Beta" });
+    const model = buildExportFlowModelForServer(beta, [alpha, beta]);
+    const exportedNames: string[][] = [];
+    const result = runExport(model.rows, [alpha, beta], model.defaultPackMeta, (servers, meta) => {
+      exportedNames.push(servers.map((server) => server.name));
+      return {
+        schemaVersion: 1,
+        id: meta.id,
+        label: meta.label,
+        version: meta.version,
+        presets: [
+          {
+            id: "beta",
+            label: "Beta",
+            server: { name: "Beta", transport: "http", url: "https://example.org/mcp" },
+            credentials: { kind: "none" },
+          },
+        ],
+      };
+    });
+    expect(result.ok).toBe(true);
+    expect(exportedNames).toEqual([["Beta"]]);
   });
 });
 

@@ -79,7 +79,7 @@ describe("mcpServerFormLogic", () => {
       {
         id: "http_auth",
         transport: "http",
-        url: "https://example.com/mcp",
+        url: "https://example.org/mcp",
         authorization: "Bearer secret",
       },
       ctx,
@@ -87,7 +87,7 @@ describe("mcpServerFormLogic", () => {
     expect(result.ok).toBe(true);
     expect(result.config).toMatchObject({
       transport: "http",
-      url: "https://example.com/mcp",
+      url: "https://example.org/mcp",
       credentials: { kind: "static-bearer", token: "Bearer secret" },
     });
     // Canonical-only: the legacy `authorization` field is no longer emitted
@@ -98,13 +98,13 @@ describe("mcpServerFormLogic", () => {
 
   test("omits the credentials field entirely for unauthenticated HTTP forms (preserves variant=none behavior)", () => {
     const result = validateMcpServerForm(
-      { id: "http_noauth", transport: "http", url: "https://example.com/mcp" },
+      { id: "http_noauth", transport: "http", url: "https://example.org/mcp" },
       ctx,
     );
     expect(result.ok).toBe(true);
     expect(result.config).toMatchObject({
       transport: "http",
-      url: "https://example.com/mcp",
+      url: "https://example.org/mcp",
     });
     expect(result.config).not.toHaveProperty("credentials");
     expect(result.config).not.toHaveProperty("authorization");
@@ -115,7 +115,7 @@ describe("mcpServerFormLogic", () => {
       {
         id: "http_hdr",
         transport: "http",
-        url: "https://example.com/mcp",
+        url: "https://example.org/mcp",
         headers: { Authorization: "Bearer from-headers" },
       },
       ctx,
@@ -128,7 +128,7 @@ describe("mcpServerFormLogic", () => {
 
   test("classifies loopback and https public URLs without warning", () => {
     const loopback = validateMcpServerForm({ id: "local", transport: "http", url: "http://127.0.0.1:3000/mcp" }, ctx);
-    const https = validateMcpServerForm({ id: "pub", transport: "http", url: "https://example.com/mcp" }, ctx);
+    const https = validateMcpServerForm({ id: "pub", transport: "http", url: "https://example.org/mcp" }, ctx);
     expect(loopback.ok).toBe(true);
     expect(loopback.hostClass).toBe("loopback");
     expect(https.ok).toBe(true);
@@ -144,7 +144,7 @@ describe("mcpServerFormLogic", () => {
 
   test("rejects metadata and non-loopback plain HTTP", () => {
     expect(validateMcpServerForm({ id: "meta", transport: "http", url: "https://169.254.169.254/mcp" }, ctx).errors.join(" ")).toMatch(/metadata/);
-    expect(validateMcpServerForm({ id: "plain", transport: "http", url: "http://example.com/mcp" }, ctx).errors.join(" ")).toMatch(/HTTPS/);
+    expect(validateMcpServerForm({ id: "plain", transport: "http", url: "http://example.org/mcp" }, ctx).errors.join(" ")).toMatch(/HTTPS/);
   });
 
   test("warns for explicit denylisted env keys but not normal env keys", () => {
@@ -156,7 +156,7 @@ describe("mcpServerFormLogic", () => {
 
   test("TLS-bypass fields are not accepted", () => {
     expect(() => assertNoTlsBypassFields({ rejectUnauthorized: false })).toThrow(/TLS bypass/);
-    const result = validateMcpServerForm({ id: "tls", transport: "http", url: "https://example.com", rejectUnauthorized: false } as never, ctx);
+    const result = validateMcpServerForm({ id: "tls", transport: "http", url: "https://example.org", rejectUnauthorized: false } as never, ctx);
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result.config ?? {})).not.toContain("rejectUnauthorized");
   });
@@ -176,7 +176,7 @@ describe("mcpServerFormLogic requiredSecretFields (Phase 4)", () => {
       {
         id: "srv",
         transport: "http",
-        url: "https://api.example/",
+        url: "https://example.org/api/",
         authorization: "",
         requiredSecretFields: ["authorization"],
       },
@@ -192,7 +192,7 @@ describe("mcpServerFormLogic requiredSecretFields (Phase 4)", () => {
       {
         id: "srv",
         transport: "http",
-        url: "https://api.example/",
+        url: "https://example.org/api/",
         authorization: "Bearer real-token",
         requiredSecretFields: ["authorization"],
       },
@@ -247,7 +247,7 @@ describe("mcpServerFormLogic credentialArgs round-trip (Phase 4)", () => {
       {
         id: "srv",
         transport: "http",
-        url: "https://api.example/",
+        url: "https://example.org/api/",
         credentialKind: "command-based",
         credentialCommand: "az",
         credentialArgs: ["account", "get-access-token", "--scope", "x"],
@@ -267,7 +267,7 @@ describe("mcpServerFormLogic credentialArgs round-trip (Phase 4)", () => {
       {
         id: "srv",
         transport: "http",
-        url: "https://api.example/",
+        url: "https://example.org/api/",
         credentialKind: "command-based",
         credentialCommand: "az",
       },

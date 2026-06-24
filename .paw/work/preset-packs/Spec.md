@@ -27,7 +27,7 @@ Once this lands, organization-specific or environment-specific presets
 (e.g. an internal CLI that proxies M365 products as individual stdio
 MCP bridges) ship as a single JSON file on whatever distribution
 channel the organization prefers, without touching plugin source. The
-companion private repo `obsidian-copilot-presets-internal` is the
+companion private repo `<companion-private-repo>` is the
 first such consumer: it will host packs for the products surfaced by
 the user's internal MCP bridge CLI, one pack file per product, so
 users import only the products they need.
@@ -121,7 +121,7 @@ second preset pre-fills everything EXCEPT the token field, which is
 empty and marked as required.
 
 **Acceptance Scenarios.**
-1. Given one or more configured servers, when the user clicks **Export as preset pack**, then a file save dialog produces a JSON file whose schema validates against the same validator used for import.
+1. Given one or more configured servers, when the user clicks **Export as preset pack**, then v1 writes a JSON file under `<vault>/exported-packs/<filename>` whose schema validates against the same validator used for import. Native save dialog UX is deferred; see `WorkflowContext.md` Phase 4B spike outcome.
 2. Given an exported pack containing only non-secret credential kinds, when re-imported on another vault, then the resulting presets, when selected, pre-fill the server form with the original configurations (modulo any per-row runtime state).
 3. Given a configured server has runtime-only fields (last refresh time, last error, etc.), when exported, then those fields are absent from the resulting pack JSON.
 4. Given a configured server has secret-bearing credential fields per FR-020's per-kind classification (e.g. a static bearer token, a static header secret, a secret-marked environment variable value), when exported, then every such field is replaced with the `__NEEDS_VALUE__` placeholder in the resulting pack JSON, and the original secret value never appears in the exported file. (Note: per FR-020's `command-based` carve-out, a bare-CLI `command`/`args` pair is structural and round-trips verbatim — authors are responsible for redacting literal secrets embedded in `args`.)
@@ -130,7 +130,7 @@ empty and marked as required.
 ### User Story P5 – Author and consume the internal-organization pack (out-of-band deliverable)
 
 **Narrative.** In the sibling private repo
-`obsidian-copilot-presets-internal`, one pack JSON per M365 product
+`<companion-private-repo>`, one pack JSON per M365 product
 exposed by the internal MCP bridge CLI (mail, calendar, files, teams,
 …) is authored and committed. A user imports any subset of these
 pack files into their vault. The internal-CLI-backed presets appear
@@ -194,10 +194,10 @@ test suite).
 - **FR-016:** No code path triggered by pack import or pack rendering may execute, spawn, or evaluate any command declared in the pack; commands only run via the existing server-spawn path with its safety prompt. *(Story: P1)*
 - **FR-017:** *(merged into Cross-Cutting Non-Functional — see "Reuse existing validation primitives" below.)*
 - **FR-018:** *(merged into Cross-Cutting Non-Functional — see "Reuse existing UI conventions" below.)*
-- **FR-019:** The companion private repo `obsidian-copilot-presets-internal` MUST contain one pack JSON per M365 product surfaced by the internal MCP CLI, each validating against the same schema. *(Story: P5)*
+- **FR-019:** The companion private repo `<companion-private-repo>` MUST contain one pack JSON per M365 product surfaced by the internal MCP CLI, each validating against the same schema. *(Story: P5)*
 - **FR-020:** Server export MUST template-ize every secret-bearing field — i.e. fields that hold or could hold credential VALUES — by replacing each such field with the explicit literal placeholder string **`__NEEDS_VALUE__`**. The exported pack JSON MUST never contain the original secret VALUES. The set of secret-bearing fields is determined by the credential KIND, per the following rules:
     - **`static-bearer`**: `token` is secret-bearing; templatized.
-    - **`command-based`**: `command` and `args` are STRUCTURAL (not secret-bearing) when the `command` is a bare CLI token (e.g. `copilot`, `npx`, an absolute path to a binary) — matching the M365 built-in's reality, where the CLI name itself is public and the secret resolution happens inside the CLI's own process. Authors who place literal secret material inside `args` (e.g. `--api-key <literal>`) are responsible for redacting before export; the system does not content-scan. `tokenPath`, `expiryPath`, `refreshBufferSeconds` remain STRUCTURAL.
+    - **`command-based`**: `command` and `args` are STRUCTURAL (not secret-bearing) when the `command` is a bare CLI token (e.g. `internal-mcp-cli`, `npx`, an absolute path to a binary) — matching the M365 built-in's reality, where the CLI name itself is public and the secret resolution happens inside the CLI's own process. Authors who place literal secret material inside `args` (e.g. `--api-key <literal>`) are responsible for redacting before export; the system does not content-scan. `tokenPath`, `expiryPath`, `refreshBufferSeconds` remain STRUCTURAL.
     - **stdio `env`**: a value is treated as secret-bearing when its KEY appears in the existing key-name denylist used by the live form validator (see "Reuse existing validation primitives" Cross-Cutting NFR; the implementation surfaces this denylist via the existing `collectDenylistWarnings` helper). Non-denylisted env values are preserved verbatim.
     - **`oauth-pkce`** (reserved/inert; no production users yet): per-field classification is enumerated authoritatively in the implementation plan's secret-policy table. The deviation from "default everything to secret" is deliberate and explicit because the `clientId`, `scopes`, redirect URI, and PKCE method are public OAuth identifiers by RFC, not secrets. Any UNKNOWN future field on an oauth-pkce credential is templatized by defensive default.
     - **New credential kinds added in future**: default to "treat all fields as secret" until explicitly classified in a Spec revision. Failure mode is "a field gets templatized when it didn't need to be," not "a secret leaks." *(Story: P4)*
@@ -251,7 +251,7 @@ test suite).
 - Export of one or more configured servers as a pack file, with secret-templatization
 - Namespacing of conflicting preset ids per FR-013 rules
 - Grouping by source in the Add Server dropdown
-- Authoring one M365 product pack per internal-CLI-exposed product in `obsidian-copilot-presets-internal`
+- Authoring one M365 product pack per internal-CLI-exposed product in `<companion-private-repo>`
 - Updating in-repo documentation (`docs/`, `README.md`, `CHANGELOG.md`) to describe pack import/export
 
 **Out of Scope:**
@@ -272,7 +272,7 @@ test suite).
 - Predecessor work shipped in v0.7.0 (`authenticated-mcps`) — established the in-code preset registry and the credential discriminated-union shape that the pack schema serializes; established the validation primitives the pack validator reuses.
 - Existing Settings → MCP servers section as the host UI surface.
 - Existing safety prompt at first command spawn (no change required, just relied upon).
-- A separate private GitHub repo (`obsidian-copilot-presets-internal`) for authoring and distributing the internal-organization packs — not in the public source tree.
+- A separate private GitHub repo (`<companion-private-repo>`) for authoring and distributing the internal-organization packs — not in the public source tree.
 
 ## Risks & Mitigations
 
@@ -290,8 +290,7 @@ test suite).
 - Proposal: `proposals/0007-importable-preset-packs.md`
 - Predecessor work: `proposals/0005-mcp-slice7-followup.md`; v0.7.0 release (`authenticated-mcps`)
 - Tangent: `proposals/0006-tool-picker-and-scope-aware-credentials.md`
-- Companion private repo: `obsidian-copilot-presets-internal` (PRIVATE)
+- Companion private repo: `<companion-private-repo>` (PRIVATE)
 - WorkflowContext: `.paw/work/preset-packs/WorkflowContext.md`
-
 
 

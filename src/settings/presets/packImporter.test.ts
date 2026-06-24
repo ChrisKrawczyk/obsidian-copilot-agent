@@ -17,7 +17,7 @@ function pack(id: string, overrides: Partial<Pack> = {}): Pack {
       {
         id: "p1",
         label: "Preset 1",
-        server: { name: "Preset 1", transport: "http", url: "https://example.com/mcp" },
+        server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
         credentials: { kind: "none" },
       },
     ],
@@ -129,7 +129,7 @@ describe("runPackImport", () => {
         {
           id: "p1",
           label: "Preset 1",
-          server: { name: "Preset 1", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
         },
       ],
@@ -139,13 +139,13 @@ describe("runPackImport", () => {
         {
           id: "p1",
           label: "Preset 1 v2",
-          server: { name: "Preset 1", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "Preset 1", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
         },
         {
           id: "p2",
           label: "Preset 2",
-          server: { name: "Preset 2", transport: "http", url: "https://example.com/p2" },
+          server: { name: "Preset 2", transport: "http", url: "https://example.org/p2" },
           credentials: { kind: "none" },
         },
       ],

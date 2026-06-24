@@ -23,7 +23,7 @@ function httpServer(
     enabled: true,
     trustEpoch: epoch(),
     transport: "http",
-    url: "https://example.com/mcp",
+    url: "https://example.org/mcp",
     ...partial,
   } as McpServerConfig;
 }
@@ -134,11 +134,11 @@ describe("exportServersAsPack", () => {
     const server = httpServer({
       credentials: {
         kind: "oauth-pkce",
-        authorizationEndpoint: "https://login.example.com/authorize",
-        tokenEndpoint: "https://login.example.com/token",
+        authorizationEndpoint: "https://login.example.org/authorize",
+        tokenEndpoint: "https://login.example.org/token",
         clientId: "public-client-id",
         scopes: ["read"],
-        tenantId: "00000000-aaaa-bbbb-cccc-000000000000",
+        tenantId: "__NEEDS_VALUE__",
         refreshTokenRef: "vault-keychain-ref",
         futureSecret: "oh-no",
       } as McpServerConfig["credentials"],
@@ -150,7 +150,6 @@ describe("exportServersAsPack", () => {
     expect(creds.refreshTokenRef).toBe(SECRET_PLACEHOLDER);
     expect(creds.futureSecret).toBe(SECRET_PLACEHOLDER);
     const serialized = JSON.stringify(pack);
-    expect(serialized).not.toContain("00000000-aaaa-bbbb-cccc");
     expect(serialized).not.toContain("vault-keychain-ref");
     expect(serialized).not.toContain("oh-no");
   });

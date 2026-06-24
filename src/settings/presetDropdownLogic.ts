@@ -127,9 +127,11 @@ export function applyEffectivePresetToForm(
   switch (creds.kind) {
     case "none":
       next.credentialKind = "none";
+      clearCredentialFields(next);
       break;
     case "static-bearer":
       next.credentialKind = "static-bearer";
+      clearCommandCredentialFields(next);
       if (creds.token === placeholder) {
         next.authorization = "";
         required.push("authorization");
@@ -142,6 +144,7 @@ export function applyEffectivePresetToForm(
       // verbatim. They are never templatized and never appear in
       // `requiredSecretFields`.
       next.credentialKind = "command-based";
+      next.authorization = "";
       next.credentialCommand = creds.command;
       next.credentialArgs = Array.isArray(creds.args) ? [...creds.args] : undefined;
       next.credentialTokenPath = creds.tokenPath;
@@ -149,10 +152,12 @@ export function applyEffectivePresetToForm(
       next.credentialRefreshBufferSeconds = creds.refreshBufferSeconds;
       break;
     case "oauth-pkce":
-      // Phase 4 does not yet surface oauth-pkce in the form UI; leave
-      // credentialKind unset and let the existing oauth-note path handle
-      // it. Still mark known secret-bearing fields as required so a
-      // future UI surface can read them.
+      // Phase 4 does not yet surface oauth-pkce in the form UI; clear
+      // visible credential fields so stale bearer/command data cannot
+      // survive a preset switch. Still mark known secret-bearing fields
+      // as required so a future UI surface can read them.
+      next.credentialKind = "none";
+      clearCredentialFields(next);
       if ((creds as Record<string, unknown>).refreshTokenRef === placeholder) {
         required.push("refreshTokenRef");
       }
@@ -176,4 +181,17 @@ export function applyEffectivePresetToForm(
   }
 
   return { form: next, requiredSecretFields: required };
+}
+
+function clearCredentialFields(form: McpServerFormInput): void {
+  form.authorization = "";
+  clearCommandCredentialFields(form);
+}
+
+function clearCommandCredentialFields(form: McpServerFormInput): void {
+  form.credentialCommand = "";
+  form.credentialArgs = undefined;
+  form.credentialTokenPath = "";
+  form.credentialExpiryPath = "";
+  form.credentialRefreshBufferSeconds = undefined;
 }

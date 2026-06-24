@@ -48,6 +48,41 @@ A pack is a strict-JSON document with a small schema:
 Packs are JSON only — JSONC (`//` and `/* */` comments) is rejected at
 parse time.
 
+### Editor integration
+
+Pack authors can point VS Code or another JSON-Schema-aware editor at
+the bundled schema for autocomplete and diagnostics:
+
+```json
+{
+  "$schema": "./schemas/preset-pack-v1.json",
+  "schemaVersion": 1,
+  "id": "example-corp-graph",
+  "label": "Example Corp Graph",
+  "version": "1.0.0",
+  "presets": [
+    {
+      "id": "internal-mcp-cli",
+      "label": "Internal MCP CLI",
+      "server": {
+        "name": "Internal MCP CLI",
+        "transport": "stdio",
+        "command": "internal-mcp-cli",
+        "args": ["--endpoint", "https://example.org/mcp"]
+      },
+      "credentials": { "kind": "none" }
+    }
+  ]
+}
+```
+
+Use a relative path that makes sense from your pack file, such as
+`../docs/schemas/preset-pack-v1.json` when authoring next to this repo.
+The plugin does not execute JSON Schema validation at runtime; import
+and export continue to use the hand-written validator, including parser
+limits, duplicate-id checks, URL host classification, and secret
+placeholder handling.
+
 ## Pack file format
 
 ### HTTP preset example
@@ -178,12 +213,15 @@ import — the confirm dialog adapts:
   timestamp. Existing servers configured from the pack are
   unaffected.
 - **Changed**: the dialog shows a structural diff of added,
-  removed, and changed preset ids; top-level metadata changes
-  (`label`, `version`) surface as an additional presentation aid.
+  removed, and changed preset ids. Changed presets include a short,
+  capped field-level summary such as `label changed` or
+  `server.command changed`; secret-bearing fields show only placeholder
+  state, never raw secret values. Top-level metadata changes (`label`,
+  `version`) surface as an additional presentation aid.
 
 The diff is **structural** over canonical JSON (keys normalized,
-whitespace collapsed, import metadata excluded). Semantic diff is
-not part of v1.
+whitespace collapsed, import metadata excluded) with semantic field
+annotations for changed presets.
 
 ## Remove a pack
 
@@ -207,6 +245,11 @@ sharing:
 4. Click **Export**. The plugin writes the pack to
    `<your-vault>/exported-packs/<slug>.pack.json` and surfaces a
    Notice with the absolute path.
+
+To export a single configured server, click **Export this server as
+pack…** on that server's row. The dialog is the same export pipeline
+without the checkbox list, defaults the pack id and label from the
+server name, and writes a one-preset pack.
 
 ### Secret-templating contract
 

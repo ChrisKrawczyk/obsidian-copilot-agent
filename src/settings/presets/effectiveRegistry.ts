@@ -41,13 +41,20 @@ export function buildEffectiveRegistry(
     (a, b) => a.importedAt - b.importedAt,
   );
 
-  // Build the multiset of preset ids across imported packs (NOT including
-  // the built-in pack — collisions with built-in are FR-013(a), handled
-  // separately so the built-in keeps its bare id.)
+  // Build the multiset of preset ids and derived namespaced ids across
+  // imported packs (NOT including the built-in pack — collisions with
+  // built-in are FR-013(a), handled separately so the built-in keeps its
+  // bare id.)
   const importedIdCounts = new Map<string, number>();
+  const importedDerivedIdCounts = new Map<string, number>();
   for (const rec of sortedImports) {
     for (const p of rec.pack.presets) {
       importedIdCounts.set(p.id, (importedIdCounts.get(p.id) ?? 0) + 1);
+      const derivedId = `${rec.pack.id}.${p.id}`;
+      importedDerivedIdCounts.set(
+        derivedId,
+        (importedDerivedIdCounts.get(derivedId) ?? 0) + 1,
+      );
     }
   }
 
@@ -66,15 +73,24 @@ export function buildEffectiveRegistry(
     });
   }
 
+  const usedEffectiveIds = new Set(out.map((entry) => entry.effectiveId));
+
   for (const rec of sortedImports) {
     for (const preset of rec.pack.presets) {
       const collidesWithBuiltin = builtinIds.has(preset.id);
       const collidesWithOtherImport =
         (importedIdCounts.get(preset.id) ?? 0) >= 2;
-      const namespaced = collidesWithBuiltin || collidesWithOtherImport;
-      const effectiveId = namespaced
-        ? `${rec.pack.id}.${preset.id}`
-        : preset.id;
+      const namespacedCandidate = `${rec.pack.id}.${preset.id}`;
+      const namespacedCandidateCollides =
+        usedEffectiveIds.has(namespacedCandidate) ||
+        (importedDerivedIdCounts.get(namespacedCandidate) ?? 0) >= 2;
+      const namespaced =
+        collidesWithBuiltin ||
+        collidesWithOtherImport ||
+        namespacedCandidateCollides;
+      const baseEffectiveId = namespaced ? namespacedCandidate : preset.id;
+      const effectiveId = uniquifyEffectiveId(baseEffectiveId, usedEffectiveIds);
+      usedEffectiveIds.add(effectiveId);
       out.push({
         effectiveId,
         sourcePackId: rec.pack.id,
@@ -89,6 +105,16 @@ export function buildEffectiveRegistry(
   }
 
   return out;
+}
+
+function uniquifyEffectiveId(
+  baseId: string,
+  usedEffectiveIds: ReadonlySet<string>,
+): string {
+  if (!usedEffectiveIds.has(baseId)) return baseId;
+  let suffix = 2;
+  while (usedEffectiveIds.has(`${baseId}-${suffix}`)) suffix += 1;
+  return `${baseId}-${suffix}`;
 }
 
 export function getEffectivePresetById(

@@ -93,7 +93,7 @@ function bearerPack(packId: string, presetId: string, label: string): Pack {
       {
         id: presetId,
         label,
-        server: { name: label, transport: "http", url: "https://api.example/mcp" },
+        server: { name: label, transport: "http", url: "https://example.org/api/mcp" },
         credentials: { kind: "static-bearer", token: SECRET_PLACEHOLDER },
       },
     ],
@@ -178,7 +178,7 @@ describe("McpServersSection preset dropdown (Phase 4)", () => {
     expect(childIds).not.toContain("svc");
   });
 
-  test("SC-006: opening dropdown / selecting pack preset does NOT invoke executableExists", async () => {
+  test("selecting pack preset without preflight does NOT invoke executableExists", async () => {
     const p = bearerPack("alpha", "svc", "Alpha Service");
     const ctx = await mount({ initialPacks: [p] });
     ctx.root.byAria("Add MCP server").click();
@@ -187,6 +187,32 @@ describe("McpServersSection preset dropdown (Phase 4)", () => {
     presetSelect.change();
     await flush();
     expect(ctx.executableExists).not.toHaveBeenCalled();
+  });
+
+  test("selecting pack preset with preflight renders install hint when binary is absent", async () => {
+    const p = bearerPack("alpha", "svc", "Alpha Service");
+    p.presets[0].credentials = { kind: "none" };
+    p.presets[0].preflight = {
+      type: "findOnPath",
+      command: "internal-mcp-cli",
+      installHint: "Install internal-mcp-cli",
+    };
+    const ctx = await mount({
+      initialPacks: [p],
+      commandExists: () => false,
+    });
+
+    ctx.root.byAria("Add MCP server").click();
+    const presetSelect = ctx.root.byAria("Preset");
+    presetSelect.value = "svc";
+    presetSelect.change();
+    await flush();
+
+    expect(ctx.executableExists).toHaveBeenCalledWith("internal-mcp-cli");
+    const hint = ctx.root.byAria("Preset preflight hint");
+    expect(hint.textContent).toContain("internal-mcp-cli");
+    expect(hint.textContent).toContain("Install with: Install internal-mcp-cli");
+    expect(hint.textContent).toContain("You can still save");
   });
 
   test("save fails until templatized field filled (FR-020 hard block)", async () => {

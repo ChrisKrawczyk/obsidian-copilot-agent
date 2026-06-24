@@ -20,14 +20,14 @@ describe("packCanonical", () => {
   test("array order is preserved (preset order is part of the pack)", () => {
     const a = canonicalizePack(
       pack([
-        { id: "x", label: "x", server: { name: "x", transport: "http", url: "https://x/" }, credentials: { kind: "none" } },
-        { id: "y", label: "y", server: { name: "y", transport: "http", url: "https://y/" }, credentials: { kind: "none" } },
+        { id: "x", label: "x", server: { name: "x", transport: "http", url: "https://example.org/x" }, credentials: { kind: "none" } },
+        { id: "y", label: "y", server: { name: "y", transport: "http", url: "https://example.org/y" }, credentials: { kind: "none" } },
       ]),
     );
     const b = canonicalizePack(
       pack([
-        { id: "y", label: "y", server: { name: "y", transport: "http", url: "https://y/" }, credentials: { kind: "none" } },
-        { id: "x", label: "x", server: { name: "x", transport: "http", url: "https://x/" }, credentials: { kind: "none" } },
+        { id: "y", label: "y", server: { name: "y", transport: "http", url: "https://example.org/y" }, credentials: { kind: "none" } },
+        { id: "x", label: "x", server: { name: "x", transport: "http", url: "https://example.org/x" }, credentials: { kind: "none" } },
       ]),
     );
     expect(a).not.toBe(b);

@@ -4,13 +4,14 @@ import {
   formatReimportDiffText,
   renderModelForPackList,
 } from "./packSettingsLogic";
+import type { PackPresetFieldDiff } from "./presets/packDiff";
 import type { ImportedPackRecord, Pack, PackPreset } from "./presets/packTypes";
 
 function pres(id: string, label = id.toUpperCase()): PackPreset {
   return {
     id,
     label,
-    server: { name: label, transport: "http", url: `https://example.com/${id}` },
+    server: { name: label, transport: "http", url: `https://example.org/${id}` },
     credentials: { kind: "none" },
   };
 }
@@ -110,7 +111,7 @@ describe("formatReimportDiffText", () => {
       diff: {
         added: [pres("p2", "Preset Two")],
         removed: [],
-        changed: [{ id: "p1", from: pres("p1"), to: pres("p1", "Preset One v2") }],
+        changed: [{ id: "p1", from: pres("p1"), to: pres("p1", "Preset One v2"), fields: [] }],
         metadataChanged: null,
       },
       metadataChanged: null,
@@ -119,6 +120,106 @@ describe("formatReimportDiffText", () => {
     expect(text).toContain("p2");
     expect(text).toMatch(/Changed \(1\)/);
     expect(text).toContain("p1");
+  });
+
+  test("changed presets render field annotations", () => {
+    const text = formatReimportDiffText({
+      kind: "confirmReimport",
+      pack: pack("vendor"),
+      sourcePath: "/v.json",
+      diff: {
+        added: [],
+        removed: [],
+        changed: [
+          {
+            id: "p1",
+            from: pres("p1", "Old"),
+            to: pres("p1", "New"),
+            fields: [
+              {
+                pointer: "/presets/0/label",
+                before: "Old",
+                after: "New",
+              },
+              {
+                pointer: "/presets/0/server/args/0",
+                before: "before",
+                after: "after",
+              },
+            ],
+          },
+        ],
+        metadataChanged: null,
+      },
+      metadataChanged: null,
+    });
+    expect(text).toContain("~ p1 — New");
+    expect(text).toContain('label changed: "Old" → "New"');
+    expect(text).toContain('server.args[0] changed: "before" → "after"');
+  });
+
+  test("secret field annotations never echo raw values", () => {
+    const text = formatReimportDiffText({
+      kind: "confirmReimport",
+      pack: pack("vendor"),
+      sourcePath: "/v.json",
+      diff: {
+        added: [],
+        removed: [],
+        changed: [
+          {
+            id: "p1",
+            from: pres("p1"),
+            to: pres("p1"),
+            fields: [
+              {
+                pointer: "/presets/0/credentials/token",
+                before: "__NEEDS_VALUE__",
+                after: "filled-value",
+                secret: true,
+                placeholderState: "placeholder-to-value",
+              },
+              {
+                pointer: "/presets/0/credentials/refreshTokenRef",
+                before: "filled-value",
+                after: "__NEEDS_VALUE__",
+                secret: true,
+                placeholderState: "value-to-placeholder",
+              },
+            ],
+          },
+        ],
+        metadataChanged: null,
+      },
+      metadataChanged: null,
+    });
+    expect(text).toContain("credentials.token: placeholder filled in");
+    expect(text).toContain("credentials.refreshTokenRef: now templatized (please supply a value)");
+    expect(text).not.toContain("filled-value");
+  });
+
+  test("field annotations are capped across all changed presets", () => {
+    const fields = Array.from({ length: 10 }, (_, i): PackPresetFieldDiff => ({
+      pointer: `/presets/0/server/env/KEY_${i}`,
+      before: "old",
+      after: "new",
+    }));
+    const text = formatReimportDiffText({
+      kind: "confirmReimport",
+      pack: pack("vendor"),
+      sourcePath: "/v.json",
+      diff: {
+        added: [],
+        removed: [],
+        changed: [{ id: "p1", from: pres("p1"), to: pres("p1"), fields }],
+        metadataChanged: null,
+      },
+      metadataChanged: null,
+    });
+    expect(text).toContain("server.env.KEY_0 changed");
+    expect(text).toContain("server.env.KEY_7 changed");
+    expect(text).not.toContain("server.env.KEY_8 changed");
+    expect(text).toContain("and 2 more changes");
   });
 
   test("metadataChanged renders label/version delta", () => {

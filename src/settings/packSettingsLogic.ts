@@ -10,6 +10,7 @@
 
 import type { ImportPackOutcome } from "./presets/packImporter";
 import type { ImportedPackRecord } from "./presets/packTypes";
+import type { PackPresetFieldDiff } from "./presets/packDiff";
 
 export interface PackListRow {
   recordId: string;
@@ -42,6 +43,7 @@ export function renderModelForPackList(
 
 const LARGE_PACK_NOTE =
   "Note: this is a large pack file. Import is allowed but you may notice a brief delay.";
+const MAX_REIMPORT_FIELD_LINES = 8;
 
 /**
  * Spec P1 acceptance (Spec.md:60-61): the import-confirm body must surface
@@ -98,10 +100,59 @@ export function formatReimportDiffText(
     }
     if (diff.changed.length > 0) {
       sections.push("", `Changed (${diff.changed.length}):`);
-      for (const c of diff.changed) sections.push(`  ~ ${c.id} — ${c.to.label}`);
+      let emittedFieldLines = 0;
+      const totalFieldLines = diff.changed.reduce((sum, c) => sum + (c.fields?.length ?? 0), 0);
+      for (const c of diff.changed) {
+        sections.push(`  ~ ${c.id} — ${c.to.label}`);
+        for (const field of c.fields ?? []) {
+          if (emittedFieldLines >= MAX_REIMPORT_FIELD_LINES) continue;
+          sections.push(`    ${formatFieldDiff(field)}`);
+          emittedFieldLines += 1;
+        }
+      }
+      if (totalFieldLines > emittedFieldLines) {
+        sections.push(`    and ${totalFieldLines - emittedFieldLines} more changes`);
+      }
     }
   }
 
   if (sizeWarning) sections.push("", LARGE_PACK_NOTE);
   return sections.join("\n");
+}
+
+function formatFieldDiff(field: PackPresetFieldDiff): string {
+  const label = pointerLabel(field.pointer);
+  if (field.secret) {
+    switch (field.placeholderState) {
+      case "placeholder-to-value":
+        return `${label}: placeholder filled in`;
+      case "value-to-placeholder":
+        return `${label}: now templatized (please supply a value)`;
+      case "value-to-value":
+        return `${label}: secret value changed`;
+      case "unchanged-placeholder":
+        return `${label}: still templatized`;
+      default:
+        return `${label}: secret-bearing value changed`;
+    }
+  }
+  return `${label} changed: ${formatValue(field.before)} → ${formatValue(field.after)}`;
+}
+
+function pointerLabel(pointer: string): string {
+  const parts = pointer.split("/").slice(3).map(unescapePointerSegment);
+  return parts.map((part) => (/^\d+$/.test(part) ? `[${part}]` : part)).reduce((acc, part) => {
+    if (part.startsWith("[")) return `${acc}${part}`;
+    return acc.length === 0 ? part : `${acc}.${part}`;
+  }, "");
+}
+
+function formatValue(value: unknown): string {
+  if (value === undefined) return "(missing)";
+  if (typeof value === "string") return JSON.stringify(value);
+  return JSON.stringify(value);
+}
+
+function unescapePointerSegment(segment: string): string {
+  return segment.replace(/~1/g, "/").replace(/~0/g, "~");
 }

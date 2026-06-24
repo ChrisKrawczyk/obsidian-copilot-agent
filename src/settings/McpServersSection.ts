@@ -22,7 +22,7 @@ import {
   type McpCredentialKindUiSelection,
   type McpServerFormInput,
 } from "./mcpServerFormLogic";
-import { getPresetById } from "./presets/McpServerPresets";
+import { getPresetById, type McpServerPresetPreflight } from "./presets/McpServerPresets";
 import { BUILT_IN_PACK, BUILTIN_PACK_ID } from "./presets/BuiltInPacks";
 import { buildEffectiveRegistry } from "./presets/effectiveRegistry";
 import {
@@ -33,6 +33,7 @@ import {
 import type { EffectivePreset } from "./presets/effectiveRegistry";
 import {
   buildExportFlowModel,
+  buildExportFlowModelForServer,
   runExport,
   suggestedFilename,
   toggleSelection,
@@ -244,6 +245,14 @@ export class McpServersSection {
     const remove = child(row, "button", { text: "Remove", attr: { "aria-label": `Remove ${server.name}` } });
     on(remove, "click", () => void this.remove(server));
 
+    if (this.options.packFileWriter) {
+      const exportServer = child(row, "button", {
+        text: "Export this server as pack…",
+        attr: { "aria-label": `Export ${server.name} as preset pack` },
+      });
+      on(exportServer, "click", () => this.openSingleServerExportDialog(this.root ?? row, server));
+    }
+
     if (server.transport === "http") {
       const test = child(row, "button", {
         text: "Test connection",
@@ -314,7 +323,7 @@ export class McpServersSection {
       hint: "Space-separated. Wrap arguments containing spaces or double-quotes in double-quotes.",
     });
     const url = input(modal, "URL", existing?.transport === "http" ? existing.url : "", {
-      placeholder: "https://mcp.example.com/",
+      placeholder: "https://mcp.example.org/",
       hint: "http only. Must be https unless the host is a loopback address.",
     });
     // SM-2 / FR-001: after Phase 1 canonicalization, the static-bearer
@@ -442,10 +451,9 @@ export class McpServersSection {
     // Phase 5 + Phase 4 (preset packs): preset dropdown (add-only).
     // Populates fields when selected. Built-in presets continue to use
     // their existing build()+preflight-hint path; imported-pack presets
-    // use the pure `applyEffectivePresetToForm` helper and render a
-    // "required" hint for templatized secret fields.
-    // FR-018 / SC-006: pack code paths invoke NO preflight; the existing
-    // form-level hint for built-ins is unchanged.
+    // use the pure `applyEffectivePresetToForm` helper, then render the
+    // same non-blocking preflight hint plus any templatized-secret hint.
+    // Import/render remains inert; dropdown selection may probe PATH.
     if (!existing) {
       const packsSnapshot = this.options.presetPacksStore?.snapshot() ?? [];
       const registry = buildEffectiveRegistry(BUILT_IN_PACK, packsSnapshot);
@@ -480,6 +488,7 @@ export class McpServersSection {
       });
       on(presetSelect, "change", () => {
         setText(presetHint, "");
+        authorization.removeAttribute("aria-required");
         formRequiredFields.length = 0;
         pendingCredentialArgs = undefined;
         const eff = effectiveById.get(presetSelect.value);
@@ -509,18 +518,11 @@ export class McpServersSection {
             );
             updateCredentialVisibility();
           }
-          const preflight = built.preflight;
-          if (preflight?.type === "findOnPath") {
-            const check = this.options.executableExists ?? this.options.pathExists;
-            if (check && !check(preflight.command)) {
-              setText(
-                presetHint,
-                `Heads up: \`${preflight.command}\` was not found on PATH. ` +
-                  (preflight.installHint ? `Install with: ${preflight.installHint}` : "") +
-                  " You can still save; the server will fail until the CLI is available.",
-              );
-            }
-          }
+          renderFindOnPathPreflightHint(
+            presetHint,
+            built.preflight,
+            this.options.executableExists ?? this.options.pathExists,
+          );
           return;
         }
         // Imported pack preset: pure pre-fill via applyEffectivePresetToForm.
@@ -548,34 +550,36 @@ export class McpServersSection {
         }
         if (applied.credentialKind) {
           credentialKind.value = applied.credentialKind;
-          if (applied.credentialKind === "command-based") {
-            credentialCommand.value = applied.credentialCommand ?? "";
-            pendingCredentialArgs = Array.isArray(applied.credentialArgs)
-              ? [...applied.credentialArgs]
-              : undefined;
-            credentialTokenPath.value = applied.credentialTokenPath ?? "";
-            credentialExpiryPath.value = applied.credentialExpiryPath ?? "";
-            credentialRefreshBuffer.value = String(
-              applied.credentialRefreshBufferSeconds ?? "",
-            );
-          } else if (applied.credentialKind === "static-bearer") {
-            authorization.value = applied.authorization ?? "";
-          }
+          authorization.value = applied.authorization ?? "";
+          credentialCommand.value = applied.credentialCommand ?? "";
+          pendingCredentialArgs = Array.isArray(applied.credentialArgs)
+            ? [...applied.credentialArgs]
+            : undefined;
+          credentialTokenPath.value = applied.credentialTokenPath ?? "";
+          credentialExpiryPath.value = applied.credentialExpiryPath ?? "";
+          credentialRefreshBuffer.value = String(
+            applied.credentialRefreshBufferSeconds ?? "",
+          );
           updateCredentialVisibility();
         }
         formRequiredFields.splice(0, formRequiredFields.length, ...requiredSecretFields);
+        renderFindOnPathPreflightHint(
+          presetHint,
+          eff.preset.preflight,
+          this.options.executableExists ?? this.options.pathExists,
+        );
         if (requiredSecretFields.length > 0) {
           // Mark the visible templatized inputs so the user sees the
           // required-affordance immediately (and assistive tech picks it up).
           for (const f of requiredSecretFields) {
             if (f === "authorization") authorization.setAttribute("aria-required", "true");
           }
-          setText(
-            presetHint,
+          const requiredHint =
             "Pack-templatized: please supply a value before saving (" +
-              requiredSecretFields.join(", ") +
-              ").",
-          );
+            requiredSecretFields.join(", ") +
+            ").";
+          const currentHint = presetHint.textContent ?? "";
+          setText(presetHint, currentHint ? `${currentHint}\n${requiredHint}` : requiredHint);
         }
       });
     }
@@ -784,6 +788,64 @@ export class McpServersSection {
             ? "Select at least one server to export."
             : `Export failed: ${result.message ?? "validation error"}`,
         );
+        return;
+      }
+      void writer
+        .saveTextToPath(suggestedFilename(meta), result.serialized)
+        .then((wr) => {
+          if (wr.ok) {
+            this.notify(`Exported pack to ${wr.path}`);
+            dialog.remove();
+          } else if (wr.reason === "cancelled") {
+            setText(message, "Export cancelled.");
+          } else {
+            setText(message, `Export failed: ${wr.message ?? "I/O error"}`);
+          }
+        });
+    });
+  }
+
+  private openSingleServerExportDialog(root: DomEl, server: McpServerConfig): void {
+    const writer = this.options.packFileWriter;
+    if (!writer) return;
+    const servers = this.options.store.snapshot();
+    const selectedServer = servers.find((s) => s.id === server.id) ?? server;
+    const exportServers = servers.some((s) => s.id === selectedServer.id) ? servers : [selectedServer];
+    const model = buildExportFlowModelForServer(selectedServer, exportServers);
+    const dialog = child(root, "div", {
+      cls: "copilot-agent-export-dialog",
+      attr: { role: "dialog", "aria-label": `Export ${selectedServer.name} as preset pack` },
+    });
+    child(dialog, "h4", { text: "Export this server as preset pack" });
+    child(dialog, "p", {
+      cls: "setting-item-description",
+      text: `Exporting ${selectedServer.name}. Secrets are replaced by __NEEDS_VALUE__ placeholders.`,
+    });
+    const idEl = input(dialog, "Pack id", model.defaultPackMeta.id);
+    const labelEl = input(dialog, "Pack label", model.defaultPackMeta.label);
+    const versionEl = input(dialog, "Version", model.defaultPackMeta.version);
+    const message = child(dialog, "div", {
+      cls: "copilot-agent-export-message",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    const actions = child(dialog, "div", { cls: "copilot-agent-export-actions" });
+    const cancelBtn = child(actions, "button", { text: "Cancel" });
+    const exportBtn = child(actions, "button", {
+      text: "Export",
+      attr: { "aria-label": `Export ${selectedServer.name}` },
+    });
+    on(cancelBtn, "click", () => {
+      dialog.remove();
+    });
+    on(exportBtn, "click", () => {
+      const meta = {
+        id: idEl.value.trim() || model.defaultPackMeta.id,
+        label: labelEl.value.trim() || model.defaultPackMeta.label,
+        version: versionEl.value.trim() || model.defaultPackMeta.version,
+      };
+      const result = runExport(model.rows, exportServers, meta);
+      if (!result.ok) {
+        setText(message, `Export failed: ${result.message ?? "validation error"}`);
         return;
       }
       void writer
@@ -1073,6 +1135,22 @@ function empty(el: DomEl): void {
 function setText(el: DomEl, text: string): void {
   if (el.setText) el.setText(text);
   else el.textContent = text;
+}
+
+function renderFindOnPathPreflightHint(
+  presetHint: DomEl,
+  preflight: McpServerPresetPreflight | undefined,
+  executableExists: ((command: string) => boolean) | undefined,
+): void {
+  if (preflight?.type !== "findOnPath") return;
+  if (executableExists && !executableExists(preflight.command)) {
+    setText(
+      presetHint,
+      `Heads up: \`${preflight.command}\` was not found on PATH. ` +
+        (preflight.installHint ? `Install with: ${preflight.installHint}` : "") +
+        " You can still save; the server will fail until the CLI is available.",
+    );
+  }
 }
 
 function setHidden(el: DomEl | null, hidden: boolean): void {

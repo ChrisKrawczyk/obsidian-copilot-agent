@@ -14,7 +14,7 @@ function preset(
   return {
     id,
     label,
-    server: { name: label, transport: "http", url: "https://example.com/mcp" },
+    server: { name: label, transport: "http", url: "https://example.org/mcp" },
     credentials: { kind: "none" },
   };
 }
@@ -73,6 +73,57 @@ describe("buildEffectiveRegistry — FR-013 namespacing", () => {
     expect(betaMail.effectiveId).toBe("beta.mail");
     expect(alphaMail.namespaced).toBe(true);
     expect(betaMail.namespaced).toBe(true);
+  });
+
+  test("built-in dotted id wins over imported derived id; import is suffixed", () => {
+    const builtins = pack(BUILT_IN_PACK.id, [
+      preset("foo.bar", "Built-in Dotted"),
+    ]);
+    const imported = pack("foo", [preset("bar", "Imported Bar")]);
+
+    const registry = buildEffectiveRegistry(builtins, [rec(imported, 1)]);
+
+    const builtin = registry.find((e) => e.sourcePackId === BUILT_IN_PACK.id)!;
+    const importedEntry = registry.find((e) => e.sourcePackId === "foo")!;
+    expect(builtin.effectiveId).toBe("foo.bar");
+    expect(builtin.namespaced).toBe(false);
+    expect(importedEntry.effectiveId).toBe("foo.bar-2");
+    expect(importedEntry.namespaced).toBe(true);
+  });
+
+  test("two imported packs sharing a derived effective id suffix the later import", () => {
+    const builtins = pack(BUILT_IN_PACK.id, []);
+    const first = pack("foo", [preset("bar", "First")], "Foo First");
+    const second = pack("foo", [preset("bar", "Second")], "Foo Second");
+
+    const registry = buildEffectiveRegistry(builtins, [
+      rec(second, 2),
+      rec(first, 1),
+    ]);
+
+    const importedEntries = registry.filter((e) => e.sourcePackId === "foo");
+    expect(importedEntries.map((e) => e.effectiveId)).toEqual([
+      "foo.bar",
+      "foo.bar-2",
+    ]);
+    expect(importedEntries.map((e) => e.preset.label)).toEqual([
+      "First",
+      "Second",
+    ]);
+  });
+
+  test("effective IDs are unique so UI Map lookups do not collapse presets", () => {
+    const builtins = pack(BUILT_IN_PACK.id, [
+      preset("foo.bar", "Built-in Dotted"),
+    ]);
+    const imported = pack("foo", [preset("bar", "Imported Bar")]);
+
+    const registry = buildEffectiveRegistry(builtins, [rec(imported, 1)]);
+    const byEffectiveId = new Map(registry.map((entry) => [entry.effectiveId, entry]));
+
+    expect(byEffectiveId.size).toBe(registry.length);
+    expect(byEffectiveId.get("foo.bar")?.sourcePackId).toBe(BUILT_IN_PACK.id);
+    expect(byEffectiveId.get("foo.bar-2")?.sourcePackId).toBe("foo");
   });
 
   test("determinism: same inputs → same output ordering across runs", () => {

@@ -74,14 +74,14 @@ describe("applyEffectivePresetToForm", () => {
       preset: {
         id: "x",
         label: "X",
-        server: { transport: "http", url: "https://api.example/" },
+        server: { transport: "http", url: "https://example.org/api/" },
         credentials: { kind: "static-bearer", token: SECRET_PLACEHOLDER },
       },
     });
     const { form, requiredSecretFields } = applyEffectivePresetToForm(eff, baseForm);
     expect(form.authorization).toBe("");
     expect(form.transport).toBe("http");
-    expect(form.url).toBe("https://api.example/");
+    expect(form.url).toBe("https://example.org/api/");
     expect(requiredSecretFields).toEqual(["authorization"]);
   });
 
@@ -92,7 +92,7 @@ describe("applyEffectivePresetToForm", () => {
       preset: {
         id: "x",
         label: "X",
-        server: { transport: "http", url: "https://api.example/" },
+        server: { transport: "http", url: "https://example.org/api/" },
         credentials: { kind: "static-bearer", token: "real-token" },
       },
     });
@@ -112,7 +112,7 @@ describe("applyEffectivePresetToForm", () => {
         credentials: {
           kind: "command-based",
           command: "az",
-          args: ["account", "get-access-token", "--scope", "https://example/.default"],
+          args: ["account", "get-access-token", "--scope", "https://example.org/.default"],
           tokenPath: "$.access",
           expiryPath: "$.exp",
           refreshBufferSeconds: 60,
@@ -126,7 +126,7 @@ describe("applyEffectivePresetToForm", () => {
       "account",
       "get-access-token",
       "--scope",
-      "https://example/.default",
+      "https://example.org/.default",
     ]);
     expect(form.credentialTokenPath).toBe("$.access");
     expect(form.credentialExpiryPath).toBe("$.exp");
@@ -174,6 +174,39 @@ describe("applyEffectivePresetToForm", () => {
     });
     const { form, requiredSecretFields } = applyEffectivePresetToForm(eff, baseForm);
     expect(form.credentialKind).toBe("none");
+    expect(requiredSecretFields).toEqual([]);
+  });
+
+  test("none credentials clear stale hidden credential fields", () => {
+    const eff = makeEffective({
+      effectiveId: "x",
+      sourcePackId: "p",
+      preset: {
+        id: "x",
+        label: "X",
+        server: { transport: "http", url: "https://example.org/api/" },
+        credentials: { kind: "none" },
+      },
+    });
+    const { form, requiredSecretFields } = applyEffectivePresetToForm(eff, {
+      ...baseForm,
+      transport: "http",
+      authorization: "Bearer stale-token",
+      credentialKind: "static-bearer",
+      credentialCommand: "internal-mcp-cli",
+      credentialArgs: ["token"],
+      credentialTokenPath: "accessToken",
+      credentialExpiryPath: "expiresOn",
+      credentialRefreshBufferSeconds: 300,
+    });
+
+    expect(form.credentialKind).toBe("none");
+    expect(form.authorization).toBe("");
+    expect(form.credentialCommand).toBe("");
+    expect(form.credentialArgs).toBeUndefined();
+    expect(form.credentialTokenPath).toBe("");
+    expect(form.credentialExpiryPath).toBe("");
+    expect(form.credentialRefreshBufferSeconds).toBeUndefined();
     expect(requiredSecretFields).toEqual([]);
   });
 

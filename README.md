@@ -6,11 +6,11 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 
 ## What's new in v0.8
 
-- **Importable preset packs.** Settings → MCP Servers → **Imported preset packs** → **Import pack…** picks a `.json` pack file and adds its presets to the Add Server dropdown under a per-pack group. Built-in presets always sort first. Import is inert: no process is spawned, no network call is made.
+- **Importable preset packs.** Settings → MCP Servers → **Imported preset packs** → **Import pack from file…** picks a `.json` pack file and adds its presets to the Add Server dropdown under a per-pack group. Built-in presets always sort first. Import is inert: no process is spawned, no network call is made.
 - **Re-import diff and remove.** Re-importing the same pack file shows a structural diff before applying. Removing a pack never touches MCP servers you already configured from it.
 - **Export servers as pack.** A new **Export servers as pack…** button in the MCP Servers header writes a JSON pack into `<vault>/exported-packs/` with every secret replaced by the literal placeholder `__NEEDS_VALUE__`. Re-importing the file surfaces the required fields in the Add Server form before Save is allowed.
 - **Grouped Add Server dropdown.** The preset dropdown is now grouped (built-in first, then one optgroup per imported pack). Collisions between pack ids are resolved with `<packId>.<presetId>` namespacing per FR-013.
-- **Full reference**: [`docs/preset-packs.md`](docs/preset-packs.md). Technical notes: [`.paw/work/preset-packs/Docs.md`](.paw/work/preset-packs/Docs.md). Smoke checklist: [`.paw/work/preset-packs/SmokeChecklist.md`](.paw/work/preset-packs/SmokeChecklist.md).
+- **Authoring and review aids.** v0.8 also includes JSON Schema editor assistance, per-row **Export this server as pack…**, and field-level re-import diff annotations; see [`docs/preset-packs.md`](docs/preset-packs.md). Technical notes: [`.paw/work/preset-packs/Docs.md`](.paw/work/preset-packs/Docs.md). Smoke checklist: [`.paw/work/preset-packs/SmokeChecklist.md`](.paw/work/preset-packs/SmokeChecklist.md).
 
 ## What's new in v0.7
 
@@ -62,7 +62,7 @@ Streamable HTTP servers must use an HTTPS URL unless they are loopback-local. Yo
   "id": "team-tools",
   "name": "Team tools",
   "transport": "http",
-  "url": "https://mcp.example.com/mcp",
+  "url": "https://mcp.example.org/mcp",
   "authorization": "Bearer <token>"
 }
 ```
@@ -206,7 +206,7 @@ After any approved built-in vault write, an **Undo** affordance appears on the t
 
 ### Read-tool exemption
 
-`view`, `read_file`, and `search_content` register with `skipPermission: true` and bypass the prompt. They are strictly read-only, vault-scoped, and use [`VaultPath`](src/domain/VaultPath.ts) to reject absolute paths, `..`, and symlink-escape. The "deny-by-default" invariant continues to apply to every mutating call. See the JSDoc at the top of `src/tools/ReadTools.ts` for the checklist future tool authors must satisfy before reusing this exemption.
+`view`, `read_file`, and `search_content` register with `skipPermission: true` and bypass the prompt. They are strictly read-only, vault-scoped, and use [`VaultPath`](src/tools/VaultPath.ts) to reject absolute paths, `..`, and symlink-escape. The "deny-by-default" invariant continues to apply to every mutating call. See the JSDoc at the top of `src/tools/ReadTools.ts` for the checklist future tool authors must satisfy before reusing this exemption.
 
 ## Token persistence (security note)
 

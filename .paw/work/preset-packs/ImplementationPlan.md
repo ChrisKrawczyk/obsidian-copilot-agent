@@ -33,7 +33,7 @@ This work spans **two repositories**. The public plugin repo
 (`obsidian-copilot-agent`) carries every code-bearing phase below as
 commits on `feature/preset-packs`, landing as a single final PR to
 `main` (Review Strategy: `local`). The companion private repo
-(`obsidian-copilot-presets-internal`) hosts the first internal pack
+(`<companion-private-repo>`) hosts the first internal pack
 JSONs (one per internal-CLI-exposed M365 product) as an out-of-band
 Phase 5 deliverable with no commits on the public repo. The public
 repo (source, tests, fixtures, snapshots, sample packs, docs,
@@ -242,19 +242,20 @@ deferrals:
 - [x] **Phase 2: Persistence** — `PresetPacksStore` with new `mcpPresetPacks` top-level key; sibling-key preservation; plugin onload integration.
 - [x] **Phase 3: Import flow + Settings UI** — File-IO abstraction, import orchestrator, "Imported preset packs" subsection in Settings → MCP servers with import / remove / re-import diff modals.
 - [x] **Phase 4: Add Server dropdown grouping + Export UI** — Optgroup-grouped dropdown with pack pre-fill and secret-placeholder handling; export multi-select dialog producing a pack file.
-- [ ] **Phase 5 (out-of-band, no public-repo commits): Author internal packs in `obsidian-copilot-presets-internal`** — One pack JSON per internal-CLI-exposed M365 product; manual end-to-end smoke.
+- [ ] **Phase 5 (out-of-band, no public-repo commits): Author internal packs in `<companion-private-repo>`** — One pack JSON per internal-CLI-exposed M365 product; manual end-to-end smoke.
 - [x] **Phase 6: Documentation** — `docs\preset-packs.md`, README "What's new", CHANGELOG, PAW `Docs.md`, `SmokeChecklist.md`.
+- [x] **Phase 7: Promoted candidate features** — JSON Schema editor export, per-row single-server export shortcut, and rich semantic re-import diff. Single local-strategy commit.
 
 ## Phase Candidates
 
-- [ ] **URL-based pack import via `requestUrl`.** Deferred; awaits a checksum/trust-model decision (`proposals\0007-importable-preset-packs.md:144-149`).
-- [ ] **Auto-update / re-fetch of imported packs from `sourcePath`.** Deferred.
-- [ ] **Drag-and-drop pack-file import onto the settings tab.** Convenience; out of scope for v1.
-- [ ] **Pack-authoring UI inside the plugin.** Out of scope per Spec.
-- [ ] **Optional `platforms` per-preset filter.** Out of scope per Spec.
-- [ ] **Compiled JSON Schema export under `docs/schemas/preset-pack-v1.json`.** Considered for tooling/IDE assistance but adds a maintained surface; deferred until v2 when external authoring grows.
-- [ ] **Per-row "Export this server" shortcut on the configured-server list.** Considered for Phase 9 but adds DOM complexity; the multi-select path subsumes it.
-- [ ] **Rich semantic diff** beyond id-level added/removed/changed.
+- [x] [deferred] **URL-based pack import via `requestUrl`.** Deferred; awaits a checksum/trust-model decision (`proposals\0007-importable-preset-packs.md:144-149`).
+- [x] [deferred] **Auto-update / re-fetch of imported packs from `sourcePath`.** Deferred.
+- [x] [deferred] **Drag-and-drop pack-file import onto the settings tab.** Convenience; out of scope for v1.
+- [x] [deferred] **Pack-authoring UI inside the plugin.** Out of scope per Spec.
+- [x] [deferred] **Optional `platforms` per-preset filter.** Out of scope per Spec.
+- [x] [promoted] **Compiled JSON Schema export under `docs/schemas/preset-pack-v1.json`.** Considered for tooling/IDE assistance but adds a maintained surface; deferred until v2 when external authoring grows.
+- [x] [promoted] **Per-row "Export this server" shortcut on the configured-server list.** Considered for Phase 9 but adds DOM complexity; the multi-select path subsumes it.
+- [x] [promoted] **Rich semantic diff** beyond id-level added/removed/changed.
 
 ---
 
@@ -321,7 +322,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   | `command-based` | (none, when `command` is a bare CLI token — see rationale) | `kind`, `command`, `args`, `tokenPath`, `expiryPath`, `refreshBufferSeconds` |
   | `oauth-pkce` | `refreshTokenRef`, `tenantId`, **all unknown future keys** (defensive default — Spec Risks last bullet) | `kind`, `clientId`, `authorizationEndpoint`, `tokenEndpoint`, `scopes`, `redirectUri`, `pkceMethod` |
 
-  Rationale for `command-based`: per Spec FR-020 (revised), the CLI invocation itself is structural — the M365 built-in's `copilot` command is a public binary name, the secret resolution happens inside the CLI's own process, and SC-009 + P4 Independent Test require round-trip without user re-entry. Authors who place literal secret values inside `args` (e.g. `--api-key <literal>`) are responsible for redacting before export; the system does not content-scan. (Earlier draft templatized `command`/`args` based on FR-020's pre-revision wording; the spec revision authorized this carve-out.)
+  Rationale for `command-based`: per Spec FR-020 (revised), the CLI invocation itself is structural — the M365 built-in's `internal-mcp-cli` command is a public binary name, the secret resolution happens inside the CLI's own process, and SC-009 + P4 Independent Test require round-trip without user re-entry. Authors who place literal secret values inside `args` (e.g. `--api-key <literal>`) are responsible for redacting before export; the system does not content-scan. (Earlier draft templatized `command`/`args` based on FR-020's pre-revision wording; the spec revision authorized this carve-out.)
 
   Rationale for `oauth-pkce` placement: `clientId` is a public OAuth identifier (not secret); `tenantId` is an organization identifier and the Spec privacy NFR (`.paw\work\preset-packs\Spec.md:208-213`) explicitly lists "tenant identifiers" as forbidden in public artifacts and shareable packs — templating it is required for cross-org pack sharing.
 
@@ -343,7 +344,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Runtime fields stripped (FR-011, SC-002).
   - Stdio with denylisted env value (e.g. `MCP_SECRET_TOKEN`) → value templatized to `SECRET_PLACEHOLDER`; non-denylisted env value (e.g. `PATH`, `LOG_LEVEL`) → preserved verbatim (FR-020, SC-002 non-secret round-trip).
   - HTTP `static-bearer` token replaced with `SECRET_PLACEHOLDER`; assert via substring search on `JSON.stringify(pack)` that the original token never appears.
-  - HTTP `command-based`: `command` and `args` PRESERVED verbatim (revised per Spec FR-020 carve-out and SC-009); `tokenPath` / `expiryPath` / `refreshBufferSeconds` preserved verbatim. Test asserts the round-trip pre-fill is byte-equal on every field of a representative M365-style `copilot --mcp ...` config.
+  - HTTP `command-based`: `command` and `args` PRESERVED verbatim (revised per Spec FR-020 carve-out and SC-009); `tokenPath` / `expiryPath` / `refreshBufferSeconds` preserved verbatim. Test asserts the round-trip pre-fill is byte-equal on every field of a representative M365-style `internal-mcp-cli --mcp ...` config.
   - `oauth-pkce` with an unknown future key: future key templatized (defensive default); `tenantId` templatized; `clientId` preserved.
   - Legacy HTTP `authorization` migrates to `{ kind: "static-bearer", token: SECRET_PLACEHOLDER }`.
   - Multiple servers with the same `name` get deduped preset ids.
@@ -528,7 +529,7 @@ This phase establishes every pure module the later phases compose, with full Vit
   - Two packs → three groups in correct order; effective ids and display labels per FR-013.
   - `applyEffectivePresetToForm` for a stdio preset writes `transport: "stdio"`, `command`, `args`.
   - Secret placeholder detection: `static-bearer` whose `token === SECRET_PLACEHOLDER` → empty `authorization` and `requiredSecretFields: ["authorization"]`.
-  - **`command-based` preset (per revised FR-020) → `command` / `args` round-trip verbatim (NOT marked as required secret field). Test asserts: source preset `{ kind: "command-based", command: "copilot", args: ["--mcp"], tokenPath: "/tmp/t", expiryPath: "/tmp/e" }` → form state has identical command/args, and `requiredSecretFields` is empty.**
+  - **`command-based` preset (per revised FR-020) → `command` / `args` round-trip verbatim (NOT marked as required secret field). Test asserts: source preset `{ kind: "command-based", command: "internal-mcp-cli", args: ["--mcp"], tokenPath: "__NEEDS_VALUE__", expiryPath: "__NEEDS_VALUE__" }` → form state has identical command/args, and `requiredSecretFields` is empty.**
 - **`mcpServerFormLogic.credentials.test.ts`**: extend — `requiredSecretFields` non-empty AND corresponding field empty → validation fails; field filled → succeeds.
 - **`McpServersSection.packDropdown.test.ts`** (new, FakeElement):
   - Zero packs → dropdown contents unchanged from today.
@@ -565,7 +566,7 @@ This phase establishes every pure module the later phases compose, with full Vit
 
 ---
 
-## Phase 5 (out-of-band, no public-repo commits): Author internal packs in `obsidian-copilot-presets-internal`
+## Phase 5 (out-of-band, no public-repo commits): Author internal packs in `<companion-private-repo>`
 
 **Covers:** FR-019; SC-005.
 
@@ -632,12 +633,155 @@ This phase establishes every pure module the later phases compose, with full Vit
 - [ ] CHANGELOG entry reads cleanly with no leaked internal identifiers.
 - [ ] **Settings performance NFR (`Spec.md:213`)**: On the developer's reference workstation (record CPU / RAM / OS in `SmokeChecklist.md` alongside the measurement), use the browser/Electron devtools Performance panel to time settings-tab open and a save round-trip in two states: (a) no imported packs (baseline), (b) five 100 KB packs imported and one 1 MB pack imported. The delta MUST be ≤ 200 ms for both open and save. Record both numbers in `SmokeChecklist.md` and reference them from the Final PR description. If the delta exceeds 200 ms, treat as a regression and open a follow-up issue before merging.
 
+
+## Phase 7: Promoted candidate features
+
+**Covers:** Promoted Candidate A (compiled JSON Schema export), Candidate B (per-row "Export this server" shortcut), and Candidate C (rich semantic re-import diff). This is a single-commit phase on the local-strategy `feature/preset-packs` branch: all three promoted candidates land together, with no runtime validation switch to JSON Schema and no new runtime dependencies.
+
+### Cross-cutting decisions
+
+- **No new runtime dependencies.** The JSON Schema is a maintained editor/documentation artifact only; import/export enforcement remains the hand-written `validatePack` path (`src\settings\presets\packValidator.ts:53-121`, `src\settings\presets\packExporter.ts:84-90`). No JSON-schema library is added.
+- **Schema dialect:** Use JSON Schema draft-07 for broad VS Code/editor compatibility; restrict the schema to common keywords (`type`, `required`, `properties`, `additionalProperties`, `const`, `enum`, `oneOf`, `not`, `pattern`, `minLength`, `items`).
+- **Settings-performance NFR:** Keep normal settings open/save work within the existing O(N) row render path. Schema checks run only under scripts/tests, and rich semantic diff runs only during re-import after file selection, not on settings open (`.paw\work\preset-packs\CodeResearch-Phase7.md:119-124`).
+- **Privacy NFR:** Every new fixture, schema example, and docs snippet uses generic placeholders only: `internal-mcp-cli`, `example.org`, `example-corp-graph`, and `__NEEDS_VALUE__`. No internal product, host, tenant, or URL strings are introduced.
+- **Test discipline:** All new tests remain pure-node Vitest. UI tests use the existing FakeElement harness; do not add jsdom/happy-dom.
+
+### Sub-phase 7A — Compiled JSON Schema export
+
+#### Changes Required:
+
+- **`docs\schemas\preset-pack-v1.json`** (new): Hand-authored JSON Schema mirroring the runtime validator for editor autocomplete and authoring assistance.
+  - Top-level pack object:
+    - `$schema` set to draft-07 and `$id` stable for docs references.
+    - `required`: `schemaVersion`, `id`, `label`, `version`, `presets`.
+    - `schemaVersion` constrained with `const: 1` (or an equivalent single-value enum) to mirror `schemaVersion === 1` (`src\settings\presets\packValidator.ts:59-60`).
+    - `id`: non-empty string (`src\settings\presets\packValidator.ts:62-64`) and `not: { const: "builtin" }` for the reserved built-in namespace (`src\settings\presets\packValidator.ts:13-18`, `src\settings\presets\packValidator.ts:65-70`). Do **not** invent a stricter pack-id regex unless the runtime validator is changed in the same commit; the current validator has no pack-id regex beyond non-empty/reserved-id checks. The schema `description` may recommend slug-like ids for pack authors.
+    - `label` and `version`: non-empty strings (`src\settings\presets\packValidator.ts:71-75`); `description`: optional string (`src\settings\presets\packValidator.ts:77-79`).
+    - `presets`: non-empty array (`src\settings\presets\packValidator.ts:80-85`). Duplicate preset-id rejection is validator-only and must be documented because draft-07 cannot express unique-by-property without custom keywords (`src\settings\presets\packValidator.ts:95-109`).
+    - `additionalProperties: true` at the top level to match warn-and-accept behavior (`src\settings\presets\packValidator.ts:20-27`, `src\settings\presets\packValidator.ts:87-93`).
+  - Preset object:
+    - `required`: `id`, `label`, `server`, `credentials`.
+    - `id`: non-empty string matching `^[a-z0-9][a-z0-9._-]*$` with case-insensitive authoring guidance; because JSON Schema draft-07 patterns are case-sensitive, encode `[A-Za-z0-9]` ranges or document the case-insensitive runtime rule (`src\settings\presets\packValidator.ts:148-156`).
+    - `label`: non-empty string; `description`: optional string (`src\settings\presets\packValidator.ts:157-165`).
+    - `additionalProperties: false` to mirror unknown preset-level rejection (`src\settings\presets\packValidator.ts:29-36`, `src\settings\presets\packValidator.ts:136-145`).
+  - `server` union:
+    - `oneOf` HTTP and stdio branches keyed by `transport` (`src\settings\presets\packValidator.ts:211-315`).
+    - Common `name`: non-empty string and no-control-character pattern matching the runtime guard (`src\settings\presets\packValidator.ts:216-224`).
+    - HTTP: `transport: "http"`, required `url` string; document validator-only URL host/scheme classification (`validateMcpHttpUrl(..., { allowPrivateNetwork: true })`) including loopback/private-network behavior (`src\settings\presets\packValidator.ts:225-245`, `src\mcp\httpPolicy.ts:26-45`, `src\mcp\httpPolicy.ts:84-104`).
+    - Stdio: `transport: "stdio"`, required non-empty `command` with no-control-character pattern; optional `args` array of strings with the same pattern; optional `env` object with string values; optional string `cwd` (`src\settings\presets\packValidator.ts:247-310`).
+  - `credentials` union:
+    - `oneOf` branches discriminated by `kind` for `none`, `static-bearer`, `command-based`, and `oauth-pkce` (`src\settings\parseServerCredentials.ts:38-137`).
+    - `none`: `kind: "none"` (`src\settings\parseServerCredentials.ts:38-41`).
+    - `static-bearer`: required non-empty string `token` (`src\settings\parseServerCredentials.ts:42-50`).
+    - `command-based`: required non-empty string `command`; optional string-array `args`; optional string `tokenPath` / `expiryPath`; optional non-negative number `refreshBufferSeconds` (`src\settings\parseServerCredentials.ts:52-90`).
+    - `oauth-pkce`: required string `authorizationEndpoint`, `tokenEndpoint`, `clientId`; required string-array `scopes`; optional string `tenantId`, `redirectUri`, `refreshTokenRef`, `pkceMethod`; preserve unknown future keys with `additionalProperties: true` (`src\settings\parseServerCredentials.ts:92-135`).
+  - `preflight`: optional object with `type: "findOnPath"`, required non-empty `command`, optional string `installHint` (`src\settings\presets\packValidator.ts:324-367`).
+  - Parser/runtime-only limitations documented in schema `description` or `$comment`: strict JSON, BOM stripping, JSONC rejection, 1 MB hard cap, 100 KB warning, duplicate preset ids, full URL host classification, and any control-character nuance not safely represented in draft-07 (`src\settings\presets\packParser.ts:3-11`, `src\settings\presets\packParser.ts:20-88`).
+- **`scripts\check-pack-schema.mjs`** (new): No-dependency Node script that parses `docs\schemas\preset-pack-v1.json` and asserts drift-sensitive structural invariants: expected `$schema`, top-level required array, `schemaVersion` const/enum, top-level `additionalProperties: true`, preset `additionalProperties: false`, transport `oneOf` branch names, credential `kind` branch names, required arrays, and limitation comments for validator-only rules.
+- **`src\settings\presets\packSchema.test.ts`** (new): Vitest drift gate that imports the schema JSON and the same representative fixture families covered by `packValidator.test.ts` (`src\settings\presets\packValidator.test.ts:26-243`). Exact comparison strategy:
+  1. For each accepted fixture, assert `validatePack(fixture).ok === true`, then assert the schema contains a matching structural path for every used construct (top-level fields, transport branch, credential branch, preflight shape).
+  2. For each rejected fixture whose rule is expressible structurally (missing required field, wrong `schemaVersion`, reserved `builtin`, bad preset id pattern, unknown preset-level field, bad credential kind), assert `validatePack(fixture).ok === false` and assert the corresponding schema invariant exists.
+  3. For each rejected fixture whose rule is validator/parser-only (duplicate preset ids, URL host classification, JSONC/size/BOM behavior, subtle control-character behavior if not encoded), assert `validatePack(fixture).ok === false` and assert the schema documents the limitation in `$comment`/`description` rather than pretending to validate it.
+  4. Do **not** execute JSON Schema validation in tests; the schema is inspected structurally so no schema-validation dependency is introduced. For every fixture, the test records the same outcome category as runtime validation: accepted, rejected by a schema-expressible invariant, or rejected by a documented runtime-only limitation.
+- **`package.json`**: Add `schema:check` (`node scripts/check-pack-schema.mjs`). Keep `npm test` as the primary Vitest gate; optionally call `schema:check` from local/release verification, not from runtime code.
+- **`docs\preset-packs.md`**: Add an "Editor integration" subsection showing how pack authors can add `"$schema": "./schemas/preset-pack-v1.json"` or a relative path to get VS Code autocomplete, and explicitly state that plugin import still uses the runtime validator.
+- **`README.md`**: Add a short pointer only if the existing v0.8 "What's new" section needs to advertise schema-assisted pack authoring; otherwise keep the detailed guidance in `docs\preset-packs.md`.
+
+#### Tests:
+
+- **`src\settings\presets\packSchema.test.ts`**: At least 8 assertions: schema parses; required arrays; top-level/preset additionalProperties behavior; schemaVersion constraint; pack-id reserved rule; preset-id pattern; transport branches; credential branches; validator-only limitations documented.
+- **`scripts\check-pack-schema.mjs`**: Exercised via `npm run schema:check` in local verification.
+
+### Sub-phase 7B — Per-row "Export this server" shortcut
+
+#### Changes Required:
+
+- **`src\settings\packExportFlow.ts`**: Add a pure single-server model helper (or an options parameter on `buildExportFlowModel`) that returns one selected row for the requested server while preserving `runExport` as the only export execution path. Defaults for the row shortcut:
+  - pack id = slug derived from the server name;
+  - pack label = server name;
+  - version = `"1.0.0"`;
+  - if two configured servers slug to the same default id, append a deterministic `-2`, `-3`, ... suffix for the later row so the default metadata is stable and collision-resistant.
+- **`src\settings\McpServersSection.ts`**: Add a row-scoped **Export this server as pack…** button next to the existing Edit / Enable-Disable / Reconnect / Remove / Test connection row actions (`src\settings\McpServersSection.ts:170-253`). Gate it behind `this.options.packFileWriter`, matching the header Export button (`src\settings\McpServersSection.ts:152-158`).
+  - Handler opens a streamlined dialog, per research recommendation, with pack id / label / version fields, static text naming the single server, and Cancel / Export buttons; no checkbox list.
+  - On Export, call `runExport` with the single selected row and the full server list (or a one-server list if the helper owns filtering), then reuse `suggestedFilename`, the injected writer, existing success/error status behavior, and the same serialized pack format as the multi-select flow (`src\settings\packExportFlow.ts:57-87`, `src\settings\McpServersSection.ts:724-802`).
+  - Make the button available for both HTTP and stdio servers; do not inherit the HTTP-only Test connection condition (`src\settings\McpServersSection.ts:247-253`).
+  - Aria/keyboard behavior: use the same native `<button>` pattern, focus order, title/label style, and click handler conventions as Edit, Remove, and Test connection so keyboard activation and screen-reader naming remain consistent.
+- **`src\settings\McpServersSection.packRowExport.test.ts`** (new; FakeElement-based): Dedicated row shortcut coverage rather than overloading the existing multi-select export tests.
+- **`src\settings\packExportFlow.test.ts`**: Add pure helper coverage for one-server defaults, slug generation, slug-collision suffixing, and `runExport` receiving exactly one selected server.
+- **`src\settings\McpServersSection.packExport.test.ts`**: Keep existing header/multi-select tests green; update shared helpers only if the row-export button changes query counts.
+
+#### Tests:
+
+- Success path: clicking a row export button opens the minimal dialog, accepting writes a one-preset pack via the injected writer, and the serialized JSON omits all other configured servers.
+- Cancel path: Cancel closes the dialog and writer is not called.
+- Slug-collision suffix: duplicate/similar server names produce stable suffixed default pack ids.
+- Stdio case: a stdio server row exposes the shortcut and exports successfully.
+- No-writer gate: row shortcut is absent when `packFileWriter` is not wired, matching the header behavior.
+
+### Sub-phase 7C — Rich semantic re-import diff
+
+#### Changes Required:
+
+- **`src\settings\presets\packDiff.ts`**: Extend the changed-preset shape while preserving existing fields for callers:
+  - Add `export interface PackPresetFieldDiff { pointer: string; before: unknown; after: unknown; secret?: boolean; placeholderState?: "unchanged-placeholder" | "placeholder-to-value" | "value-to-placeholder" | "value-to-value" }`.
+  - Change `changed` entries to `{ id: string; from: PackPreset; to: PackPreset; fields: PackPresetFieldDiff[] }`.
+  - Match presets by id as today, then canonicalize both `PackPreset` objects using the existing `packCanonical` ordering before walking fields (`src\settings\presets\packCanonical.ts:4-49`, `src\settings\presets\packDiff.ts:27-49`). Reorder-only canonical equality continues to produce no changed entry.
+  - Walk object fields recursively and arrays by index. Emit pointers against the incoming pack's preset index, e.g. `/presets/<idx>/label`, `/presets/<idx>/server/command`, `/presets/<idx>/credentials/token`.
+  - Secret-templating awareness: import `SECRET_PLACEHOLDER` from `packSecretPolicy`. If `before` and `after` are both `SECRET_PLACEHOLDER`, suppress that field from `fields` because it is still templatized. If placeholder status changes in either direction, emit a high-signal field diff without requiring the formatter to print raw secret values.
+  - Identify secret-bearing paths using the existing export secret policy where possible: `credentials.token`, `credentials.refreshTokenRef`, `credentials.tenantId`, oauth-pkce unknown fields, and denylisted stdio `server.env` values. Prefer conservative `secret: true` for unknown credential-field changes.
+- **`src\settings\presets\packDiff.test.ts`**: Extend current coverage for label-only, server command/args/env changes, credential kind/token placeholder changes, preflight changes, reorder-only no diff, metadata-only no preset field diff, and both-placeholders-suppressed behavior.
+- **`src\settings\packSettingsLogic.ts`**: Extend `formatReimportDiffText` to render field annotations beneath each `~ id — label` changed preset line.
+  - Render concise user-facing labels such as `label changed: "Old" → "New"`, `server.command unchanged/changed`, `credentials.kind changed`, and `credentials.token placeholder status changed`.
+  - Do not echo raw secret-bearing values. For secret fields, render placeholder/value state only (for example, `credentials.token changed: placeholder → value` or `value → placeholder`).
+  - Cap field-level output at **N = 8** lines across the entire confirm body. Add `and K more changes` when capped so the plain `window.confirm` body remains short.
+  - Preserve existing metadata, added, removed, and changed headings so current exact-text expectations can be updated surgically (`src\settings\packSettingsLogic.ts:65-107`).
+- **`src\settings\packSettingsLogic.test.ts`**: Extend exact-text tests for rich annotations, cap behavior, metadata formatting, and no secret-value leakage.
+- **`src\settings\McpServersSection.ts`**: Minor render/confirm plumbing only: continue passing the formatter's plain string to `askConfirm`; do not introduce a new modal framework (`src\settings\McpServersSection.ts:909-918`, `src\settings\McpServersSection.ts:938-945`).
+- **`src\settings\McpServersSection.packs.test.ts`**: Reinforce the FakeElement re-import flow so confirm text includes field-level annotations and cancel/confirm behavior remains unchanged.
+
+#### Tests:
+
+- Field walker emits `/presets/<idx>/...` pointers for label, server, credentials, and preflight changes.
+- Canonical key-order differences and preset reorder-only inputs remain no-op diffs.
+- `SECRET_PLACEHOLDER` to `SECRET_PLACEHOLDER` is suppressed; placeholder-to-value and value-to-placeholder produce safe annotations without raw secret values.
+- Confirm formatter caps at 8 field lines and appends `and K more changes`.
+- Existing re-import confirm/cancel behavior remains unchanged apart from richer body text.
+
+### Success Criteria (Phase 7):
+
+#### Cross-cutting Automated Verification:
+
+- [ ] Schema drift gate passes: `npm run schema:check`
+- [ ] Tests pass: `npm test`
+- [ ] Typecheck: `npm run typecheck`
+- [ ] Build: `npm run build`
+- [ ] New/extended test count target: at least 20 new assertions across `packSchema.test.ts`, `packExportFlow.test.ts`, `McpServersSection.packRowExport.test.ts`, `packDiff.test.ts`, `packSettingsLogic.test.ts`, and `McpServersSection.packs.test.ts`.
+- [ ] No new runtime dependencies in `package.json`; if a dev-only tool is proposed, the implementing commit must justify it against `CodeResearch-Phase7.md` and prefer hand-written checks first.
+- [ ] Privacy grep/review of new fixtures/docs/schema examples finds only generic placeholders (`internal-mcp-cli`, `example.org`, `example-corp-graph`) and no internal identifiers.
+- [ ] Settings-performance NFR remains credible: no schema code runs in settings render, per-row export adds only one gated row button per server, and semantic field diff runs only in re-import. If manual timing from Phase 6 is repeated, delta remains ≤ 200 ms.
+- [ ] Phase Candidates markers are already resolved before implementation (5 deferred + 3 promoted); no additional candidate checkboxes remain open.
+
+#### Manual Verification:
+
+- [ ] In VS Code, open a generic pack JSON with a `$schema` reference to `docs\schemas\preset-pack-v1.json`; verify autocomplete/diagnostics for `schemaVersion`, transport branches, credential kinds, and preset fields.
+- [ ] In Obsidian after `npm run deploy` and plugin reload, click **Export this server as pack…** on an HTTP configured-server row, accept defaults or override metadata, and verify a one-preset pack file is written.
+- [ ] Repeat row export on a stdio server using generic `internal-mcp-cli` data; verify command/args structure is preserved and secret placeholders are used.
+- [ ] Re-import a pack with only a preset label changed; verify the confirmation text names the changed preset and shows the label field-level annotation.
+- [ ] Re-import a pack where a secret placeholder changes state; verify the confirmation text describes placeholder status without printing raw secret values.
+- [ ] Spot-check settings open/save responsiveness with several configured servers and imported packs; no visible regression and any measured delta remains within the ≤ 200 ms NFR.
+
+#### Candidate-linked Success Criteria:
+
+- [ ] **Candidate A:** `docs\schemas\preset-pack-v1.json` is committed, documented, no-dependency drift-gated, and explicitly mirrors or documents every runtime validator/parser constraint.
+- [ ] **Candidate B:** Every configured-server row with a writer available has an accessible single-server export shortcut that reuses `packExportFlow.runExport` and writes exactly one selected server.
+- [ ] **Candidate C:** Re-import confirmation includes capped, field-level semantic annotations for changed presets, while preserving existing added/removed/metadata behavior and never leaking secret values.
+
 ---
 
 ## References
 
 - Spec: `.paw\work\preset-packs\Spec.md`
-- Research: `.paw\work\preset-packs\CodeResearch.md`
+- Research: `.paw\work\preset-packs\CodeResearch.md` (Phases 1-4/6), `.paw\work\preset-packs\CodeResearch-Phase7.md` (Phase 7)
 - Per-model planning drafts: `.paw\work\preset-packs\planning\PLAN-gpt-5.4.md`, `.paw\work\preset-packs\planning\PLAN-claude-opus-4.7.md`
 - Workflow context: `.paw\work\preset-packs\WorkflowContext.md`
 - Proposal grounding: `proposals\0007-importable-preset-packs.md`

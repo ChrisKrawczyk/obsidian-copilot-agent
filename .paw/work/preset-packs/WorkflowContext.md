@@ -41,7 +41,7 @@ Custom Workflow Instructions: |
      docs, and the PAW workflow artifacts live here. The Final PR
      against `main` targets this repo.
 
-  2. obsidian-copilot-presets-internal (sibling repo at
+  2. <companion-private-repo> (sibling repo at
      <companion-private-repo>, PRIVATE) — hosts the
      internal M365 MCP preset packs that the new plugin
      feature is designed to consume. Pack content authored there is
@@ -54,12 +54,12 @@ Custom Workflow Instructions: |
   Planning should treat the two repos as separate deliverables:
   - Plugin feature phases drive the PRs in obsidian-copilot-agent
   - The starter internal-organization pack is a deliverable in
-    obsidian-copilot-presets-internal but ships outside the PAW PR flow
+    <companion-private-repo> but ships outside the PAW PR flow
 
   Round-trip testing must validate end-to-end: pack authored in the
   private repo, imported via the plugin, registered MCP servers spawn
   and resolve credentials correctly.
-Initial Prompt: Implement proposals/0007-importable-preset-packs.md (importable preset packs for the plugin) AND author a starter internal M365 preset pack in a new sibling private repo (obsidian-copilot-presets-internal) that exercises the new feature end-to-end.
+Initial Prompt: Implement proposals/0007-importable-preset-packs.md (importable preset packs for the plugin) AND author a starter internal M365 preset pack in a new sibling private repo (<companion-private-repo>) that exercises the new feature end-to-end.
 Issue URL: none
 Remote: origin
 Artifact Lifecycle: commit-and-clean

@@ -5,8 +5,12 @@
  *   The desktop implementation creates a transient off-DOM
  *   `<input type="file" accept=".json,application/json">`, programmatically
  *   `.click()`s it, and reads the selected `File` via `await file.text()`.
- *   `sourcePath` (FR-006) comes from Electron's `file.path` property exposed
- *   on the browser `File` object in Obsidian Desktop's Electron runtime.
+ *   `sourcePath` (FR-006) is resolved in this order: (1) Electron 33+'s
+ *   `webUtils.getPathForFile(file)`; (2) the legacy `file.path` property
+ *   on older Electron; (3) `file.name` as a last-resort display label
+ *   when neither is available (re-import matching is by pack id, so a
+ *   non-absolute label still works — only the displayed source path
+ *   degrades).
  *   Size cap (FR-023) is enforced from `file.size` BEFORE reading bytes.
  *
  * - **Writer** (export): not used by Phase 3 (Phase 4B). Exported as an
@@ -61,10 +65,37 @@ interface ElectronFile extends File {
   path?: string;
 }
 
+interface ElectronWebUtils {
+  getPathForFile?: (file: File) => string;
+}
+
+interface ElectronRequireResult {
+  webUtils?: ElectronWebUtils;
+}
+
+function resolveFileSourcePath(file: File): string {
+  const fromLegacy = (file as ElectronFile).path;
+  if (typeof fromLegacy === "string" && fromLegacy.length > 0) return fromLegacy;
+  try {
+    const w = window as unknown as {
+      require?: (id: string) => ElectronRequireResult;
+    };
+    const electron = w.require?.("electron");
+    const fromWebUtils = electron?.webUtils?.getPathForFile?.(file);
+    if (typeof fromWebUtils === "string" && fromWebUtils.length > 0) {
+      return fromWebUtils;
+    }
+  } catch {
+    // electron not reachable from renderer (mobile / sandboxed) — fall through
+  }
+  return file.name;
+}
+
 /**
  * Desktop reader: triggers a native file picker via an off-DOM `<input>`,
- * enforces the byte cap before reading, and surfaces Electron's `file.path`
- * as the `sourcePath`.
+ * enforces the byte cap before reading, and resolves `sourcePath` via
+ * `webUtils.getPathForFile` (Electron 33+) with fallbacks to `file.path`
+ * and `file.name`.
  *
  * Mobile / non-Electron gating: if the host runtime isn't Electron, the
  * reader returns `io` with the desktop-only message — consistent with the
@@ -90,7 +121,6 @@ export function createDesktopPackFileReader(): PackFileReader {
         const settle = (result: PackFileReadResult) => {
           if (settled) return;
           settled = true;
-          window.removeEventListener("focus", onFocus);
           input.remove();
           resolve(result);
         };
@@ -109,15 +139,7 @@ export function createDesktopPackFileReader(): PackFileReader {
             });
             return;
           }
-          const sourcePath = (file as ElectronFile).path;
-          if (!sourcePath) {
-            settle({
-              ok: false,
-              reason: "io",
-              message: "Selected file lacks an absolute path (Electron runtime required).",
-            });
-            return;
-          }
+          const sourcePath = resolveFileSourcePath(file);
           try {
             const text = await file.text();
             settle({ ok: true, text, sourcePath, byteLength: file.size });
@@ -130,19 +152,16 @@ export function createDesktopPackFileReader(): PackFileReader {
           }
         };
 
-        // Browsers fire `focus` on `window` when the picker is dismissed
-        // without a selection. Use a microtask delay to give `change` a
-        // chance to fire first when a file WAS selected.
-        const onFocus = () => {
-          setTimeout(() => {
-            if (!settled) settle({ ok: false, reason: "cancelled" });
-          }, 200);
-        };
-
+        // Modern Chromium fires `cancel` on the input when the picker is
+        // dismissed without a selection. This avoids the race that a
+        // window-`focus` heuristic introduces (focus can fire before
+        // `change` lands for large files, silently dropping the import).
         input.addEventListener("change", () => {
           void onChange();
         });
-        window.addEventListener("focus", onFocus, { once: true });
+        input.addEventListener("cancel", () => {
+          settle({ ok: false, reason: "cancelled" });
+        });
         document.body.appendChild(input);
         input.click();
       });

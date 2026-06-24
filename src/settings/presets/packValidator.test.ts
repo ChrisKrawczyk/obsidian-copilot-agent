@@ -14,7 +14,7 @@ function minimalPack(overrides: Record<string, unknown> = {}): Record<string, un
         server: {
           name: "Preset 1",
           transport: "http",
-          url: "https://example.com/mcp",
+          url: "https://example.org/mcp",
         },
         credentials: { kind: "none" },
       },
@@ -62,7 +62,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
           server: {
             name: "p",
             transport: "http",
-            url: "https://example.com/mcp",
+            url: "https://example.org/mcp",
           },
           credentials: { kind: "none" },
           rogue: 1,
@@ -88,13 +88,13 @@ describe("validatePack — single-error contract (SC-003)", () => {
         {
           id: "dup",
           label: "a",
-          server: { name: "a", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "a", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
         },
         {
           id: "dup",
           label: "b",
-          server: { name: "b", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "b", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
         },
       ],
@@ -117,8 +117,8 @@ describe("validatePack — single-error contract (SC-003)", () => {
       { kind: "command-based", command: "azd token" },
       {
         kind: "oauth-pkce",
-        authorizationEndpoint: "https://example.com/a",
-        tokenEndpoint: "https://example.com/t",
+        authorizationEndpoint: "https://example.org/a",
+        tokenEndpoint: "https://example.org/t",
         clientId: "cid",
         scopes: ["s"],
       },
@@ -129,7 +129,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
           {
             id: "p",
             label: "p",
-            server: { name: "p", transport: "http", url: "https://example.com/mcp" },
+            server: { name: "p", transport: "http", url: "https://example.org/mcp" },
             credentials,
           },
         ],
@@ -145,7 +145,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
         {
           id: "p",
           label: "p",
-          server: { name: "p", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "p", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "static-bearer", token: "" },
         },
       ],
@@ -161,7 +161,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
         {
           id: "p",
           label: "p",
-          server: { name: "p", transport: "http", url: "http://example.com/mcp" },
+          server: { name: "p", transport: "http", url: "http://example.org/mcp" },
           credentials: { kind: "none" },
         },
       ],
@@ -193,7 +193,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
         {
           id: "p",
           label: "p",
-          server: { name: "p", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "p", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
           preflight: { type: "rogue", command: "x" },
         },
@@ -229,7 +229,7 @@ describe("validatePack — single-error contract (SC-003)", () => {
         {
           id: "p",
           label: "p",
-          server: { name: "p", transport: "http", url: "https://example.com/mcp" },
+          server: { name: "p", transport: "http", url: "https://example.org/mcp" },
           credentials: { kind: "none" },
           ["a/b~c"]: 1,
         },

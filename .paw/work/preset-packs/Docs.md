@@ -77,11 +77,38 @@ The pack feature is layered top-down as:
    - Add Server preset dropdown built from the effective registry,
      with the built-in branch invoking `preset.build()` + preflight
      hint unchanged and the pack-preset branch using
-     `applyEffectivePresetToForm` and rendering the required-fields
-     hint.
-   - Export servers as pack dialog.
+     `applyEffectivePresetToForm`, rendering the same preflight hint
+     for pack-declared `findOnPath`, and rendering the
+     required-fields hint.
+   - Header export dialog plus per-row **Export this server as pack…**
+     shortcuts.
    - `SettingsTab` wires `createDesktopPackFileReader()` and
      `createDesktopPackFileWriter(this.app)`.
+
+### Phase 7 architecture
+
+- **Editor schema and drift gate.** `docs/schemas/preset-pack-v1.json`
+  is editor assistance for pack authors, not a runtime validator.
+  `scripts/check-pack-schema.mjs` is wired as `npm run schema:check`
+  and asserts no-dependency schema invariants (schema version, `$id`,
+  required fields, credential and preflight shapes) so the checked-in
+  schema does not drift from v1 expectations.
+- **Schema tests without a validation dependency.** `packSchema.test.ts`
+  parses the schema as plain JSON and performs structural assertions
+  against definitions and examples. This preserves the "no new schema
+  library" NFR while still giving CI coverage for editor-facing drift.
+- **Per-row export.** `buildExportFlowModelForServer` reuses the same
+  pure export model as the header dialog, but scopes the initial
+  selection to one configured server. `McpServersSection` wires each
+  server row's **Export this server as pack…** button to that model and
+  then calls the same `runExport` / `PackFileWriter` path.
+- **Field-level re-import diff.** `PackPresetFieldDiff` records
+  pointer, field label, before/after summaries, and whether a value was
+  secret-redacted. `packDiff.ts` emits these semantic annotations for
+  preset-level changes; `packSettingsLogic.ts` renders at most 8 lines
+  in the confirmation text. Secret-bearing values are never displayed:
+  placeholders and redacted summaries describe the change without
+  exposing token-like content.
 
 ### Design Decisions
 
@@ -188,9 +215,9 @@ to it.
   rejected this: the pattern list itself would constitute a leak.
   Leak prevention is enforced by code review and developer
   discipline.
-- **Semantic re-import diff**. v1 ships structural diff (preset-id
-  add/remove/change). A semantic diff ("label changed, command
-  unchanged" highlighted separately) is deferred to v2.
+- **Re-import diff UI depth**. v1 ships field-level structural diff
+  annotations with secret-aware summaries capped at 8 lines. Richer
+  custom-rendered diff UI beyond text confirmation is deferred.
 - **Internal-pack smoke evidence**. Lives ONLY in the private repo's
   README per SC-005. The public `SmokeChecklist.md` may include at
   most a one-line pointer.
@@ -205,6 +232,7 @@ to it.
 | Export | `src/settings/presets/packExporter.ts`, `src/settings/packExportFlow.ts` |
 | Import | `src/settings/presets/packImporter.ts` |
 | File I/O | `src/settings/presets/packFileIO.ts` |
+| Editor schema | `docs/schemas/preset-pack-v1.json`, `scripts/check-pack-schema.mjs` |
 | Persistence | `src/settings/PresetPacksStore.ts` |
 | UI logic (pure) | `src/settings/packSettingsLogic.ts`, `src/settings/presetDropdownLogic.ts`, `src/settings/packExportFlow.ts` |
 | DOM wiring | `src/settings/McpServersSection.ts`, `src/settings/SettingsTab.ts` |
@@ -231,9 +259,14 @@ Notable suites added by this work:
   env/cwd flow), `packExportFlow.test.ts` (incl. SC-002 1/5/20
   round-trip + SC-009 secret-vs-none), `mcpServerFormLogic.test.ts`
   extensions (`requiredSecretFields`, `credentialArgs`),
-  `McpServersSection.packDropdown.test.ts` (incl. SC-006
-  `executableExists` never invoked + requiredSecretFields no-leak
-  regression), `McpServersSection.packExport.test.ts` — Phase 4.
+  `McpServersSection.packDropdown.test.ts` (incl. import-side SC-006
+  no-preflight invariant, dropdown-selection preflight hint, and
+  requiredSecretFields no-leak regression),
+  `McpServersSection.packExport.test.ts` — Phase 4.
+- `packSchema.test.ts`, `McpServersSection.packRowExport.test.ts`,
+  `packSettingsLogic.test.ts`, and `packDiff.test.ts` cover Phase 7
+  schema drift, per-row export wiring, and capped field-level re-import
+  annotations.
 
 Manual verification lives in
 [`SmokeChecklist.md`](./SmokeChecklist.md) (public repo) and the

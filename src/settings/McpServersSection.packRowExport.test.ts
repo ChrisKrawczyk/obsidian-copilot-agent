@@ -41,7 +41,6 @@ class FakeElement {
     this.listeners.set(name, [...(this.listeners.get(name) ?? []), fn]);
   }
   click(): void { for (const fn of this.listeners.get("click") ?? []) fn({ target: this }); }
-  change(): void { for (const fn of this.listeners.get("change") ?? []) fn({ target: this }); }
   toggleAttribute(key: string, force?: boolean): void {
     if (force === false) this.attributes.delete(key);
     else this.attributes.set(key, "");
@@ -82,7 +81,6 @@ function manager() {
     remove: vi.fn(async () => undefined),
     statusSnapshot: () => [],
     subscribe: (fn: () => void) => { listeners.add(fn); return () => listeners.delete(fn); },
-    listenerCount: () => listeners.size,
   };
 }
 
@@ -98,105 +96,116 @@ function httpServer(id: string, name: string, authorization?: string): McpServer
   return { ...base, trustEpoch: computeTrustEpoch(base) };
 }
 
+function stdioServer(id: string, name: string): McpServerConfig {
+  const base = {
+    id: normalizeServerId(id),
+    name,
+    enabled: true,
+    transport: "stdio" as const,
+    command: "internal-mcp-cli",
+    args: ["--endpoint", "https://example.org/mcp"],
+    env: { MCP_LOG_LEVEL: "info" },
+  };
+  return { ...base, trustEpoch: computeTrustEpoch(base) };
+}
+
 async function flush(): Promise<void> {
   for (let i = 0; i < 10; i += 1) await Promise.resolve();
 }
 
 async function mount(opts: {
   servers?: McpServerConfig[];
-  writer?: { saveTextToPath: (name: string, text: string) => Promise<PackFileWriteResult> };
+  writer?: { saveTextToPath: (name: string, text: string) => Promise<PackFileWriteResult> } | null;
 } = {}) {
   const io = memoryIo({ mcpServers: opts.servers ?? [] });
   const settings = new McpSettingsStore(io);
   await settings.load();
-  const mgr = manager();
-  const safety = { revokeGrantsForServer: vi.fn(async () => undefined) };
-  const notices: string[] = [];
   const root = new FakeElement();
   const writeCalls: Array<{ name: string; text: string }> = [];
-  const defaultWriter = {
-    saveTextToPath: vi.fn(async (name: string, text: string) => {
-      writeCalls.push({ name, text });
-      return { ok: true, path: `C:/vault/exported-packs/${name}` } as PackFileWriteResult;
-    }),
-  };
-  const writer = opts.writer ?? defaultWriter;
+  const writer = opts.writer === undefined
+    ? {
+        saveTextToPath: vi.fn(async (name: string, text: string) => {
+          writeCalls.push({ name, text });
+          return { ok: true, path: `C:/vault/exported-packs/${name}` } as PackFileWriteResult;
+        }),
+      }
+    : opts.writer;
+  const notices: string[] = [];
   const section = new McpServersSection({
     store: settings,
-    manager: mgr as never,
-    safetyStore: safety,
+    manager: manager() as never,
+    safetyStore: { revokeGrantsForServer: vi.fn(async () => undefined) },
     vaultRoot: "C:\\vault",
     pathExists: () => false,
     notify: (m) => notices.push(m),
-    packFileWriter: writer as never,
+    ...(writer ? { packFileWriter: writer as never } : {}),
   });
   section.mount(root as never);
-  return { root, section, settings, notices, writer, writeCalls };
+  return { root, writeCalls, notices };
 }
 
-describe("McpServersSection — Export servers as pack (Phase 4)", () => {
-  test("Export button is not rendered when no packFileWriter is wired", async () => {
-    const io = memoryIo({ mcpServers: [] });
-    const settings = new McpSettingsStore(io);
-    await settings.load();
-    const root = new FakeElement();
-    const section = new McpServersSection({
-      store: settings,
-      manager: manager() as never,
-      safetyStore: { revokeGrantsForServer: vi.fn(async () => undefined) },
-      vaultRoot: "C:\\vault",
-      pathExists: () => false,
-    });
-    section.mount(root as never);
-    expect(() => root.byAria("Export servers as preset pack")).toThrow();
-  });
-
-  test("notifies when there are no servers to export", async () => {
-    const ctx = await mount();
-    ctx.root.byAria("Export servers as preset pack").click();
-    await flush();
-    expect(ctx.notices.some((n) => /No MCP servers/.test(n))).toBe(true);
-  });
-
-  test("opens dialog, selects, exports, and invokes writer with sanitized filename + serialized JSON", async () => {
+describe("McpServersSection — per-row pack export", () => {
+  test("row shortcut writes a one-preset pack and omits other servers", async () => {
     const ctx = await mount({
-      servers: [httpServer("alpha", "Alpha Service", "Bearer secret-token")],
+      servers: [
+        httpServer("alpha", "Example Corp Graph", "Bearer generic-token"),
+        httpServer("beta", "Other Server"),
+      ],
     });
-    ctx.root.byAria("Export servers as preset pack").click();
+    ctx.root.byAria("Export Example Corp Graph as preset pack").click();
     await flush();
-    // Toggle the only server checkbox
-    const checkboxes = ctx.root.queryAll((e) => e.tagName === "input" && e.type === "checkbox");
-    expect(checkboxes.length).toBeGreaterThan(0);
-    checkboxes[0].checked = true;
-    checkboxes[0].change();
-    // Update pack label
-    ctx.root.byAria("Pack label").value = "My Servers";
-    ctx.root.byAria("Export selected servers").click();
+    ctx.root.byAria("Export Example Corp Graph").click();
+    await flush();
+
+    expect(ctx.writeCalls).toHaveLength(1);
+    const pack = JSON.parse(ctx.writeCalls[0].text) as { id: string; presets: Array<{ label: string }> };
+    expect(pack.id).toBe("example-corp-graph");
+    expect(pack.presets).toHaveLength(1);
+    expect(pack.presets[0].label).toBe("Example Corp Graph");
+    expect(ctx.writeCalls[0].text).not.toContain("Other Server");
+    expect(ctx.writeCalls[0].text).not.toContain("generic-token");
+    expect(ctx.writeCalls[0].text).toContain("__NEEDS_VALUE__");
+  });
+
+  test("cancel closes the row dialog without writing", async () => {
+    const ctx = await mount({ servers: [httpServer("alpha", "Example Corp Graph")] });
+    ctx.root.byAria("Export Example Corp Graph as preset pack").click();
+    await flush();
+    const cancel = ctx.root.queryAll((e) => e.tagName === "button" && e.textContent === "Cancel")[0];
+    cancel.click();
+    await flush();
+    expect(ctx.writeCalls).toHaveLength(0);
+    expect(ctx.root.byAriaAll("Export Example Corp Graph as preset pack")).toHaveLength(1);
+  });
+
+  test("duplicate server-name slugs get stable default pack ids", async () => {
+    const ctx = await mount({
+      servers: [
+        httpServer("first", "Example Graph"),
+        httpServer("second", "Example---Graph"),
+      ],
+    });
+    ctx.root.byAria("Export Example---Graph as preset pack").click();
+    await flush();
+    expect(ctx.root.byAria("Pack id").value).toBe("example-graph-2");
+  });
+
+  test("stdio rows expose the shortcut and export successfully", async () => {
+    const ctx = await mount({ servers: [stdioServer("stdio", "internal-mcp-cli")] });
+    ctx.root.byAria("Export internal-mcp-cli as preset pack").click();
+    await flush();
+    ctx.root.byAria("Export internal-mcp-cli").click();
     await flush();
     expect(ctx.writeCalls).toHaveLength(1);
-    expect(ctx.writeCalls[0].name).toBe("my-servers.pack.json");
-    expect(ctx.writeCalls[0].text).toContain("__NEEDS_VALUE__");
-    expect(ctx.writeCalls[0].text).not.toContain("secret-token");
-    expect(ctx.notices.some((n) => /Exported pack/.test(n))).toBe(true);
+    expect(ctx.writeCalls[0].text).toContain('"transport": "stdio"');
+    expect(ctx.writeCalls[0].text).toContain('"command": "internal-mcp-cli"');
   });
 
-  test("Export with no selection surfaces inline error and does not call writer", async () => {
-    const ctx = await mount({ servers: [httpServer("alpha", "Alpha")] });
-    ctx.root.byAria("Export servers as preset pack").click();
-    await flush();
-    ctx.root.byAria("Export selected servers").click();
-    await flush();
-    expect(ctx.writeCalls).toHaveLength(0);
-  });
-
-  test("Cancel closes the dialog without writing", async () => {
-    const ctx = await mount({ servers: [httpServer("alpha", "Alpha")] });
-    ctx.root.byAria("Export servers as preset pack").click();
-    await flush();
-    const cancelBtns = ctx.root.queryAll((e) => e.tagName === "button" && e.textContent === "Cancel");
-    expect(cancelBtns.length).toBeGreaterThan(0);
-    cancelBtns[0].click();
-    await flush();
-    expect(ctx.writeCalls).toHaveLength(0);
+  test("row shortcut is absent when no writer is wired", async () => {
+    const ctx = await mount({
+      servers: [httpServer("alpha", "Example Corp Graph")],
+      writer: null,
+    });
+    expect(() => ctx.root.byAria("Export Example Corp Graph as preset pack")).toThrow();
   });
 });
