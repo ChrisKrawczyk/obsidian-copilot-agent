@@ -5,7 +5,7 @@ import { redactSensitive } from "../mcp/redactSensitive";
 import type { SafetySettingsStore } from "./SafetySettingsStore";
 import type { McpSettingsStore, McpSettingsMutationResult } from "./McpSettingsStore";
 import type { PresetPacksStore } from "./PresetPacksStore";
-import type { PackFileReader } from "./presets/packFileIO";
+import type { PackFileReader, PackFileWriter } from "./presets/packFileIO";
 import { applyConfirmedImport, runImportFromReaderResult } from "./presets/packImporter";
 import {
   formatImportConfirmText,
@@ -22,7 +22,21 @@ import {
   type McpCredentialKindUiSelection,
   type McpServerFormInput,
 } from "./mcpServerFormLogic";
-import { BUILT_IN_PRESETS, getPresetById } from "./presets/McpServerPresets";
+import { getPresetById } from "./presets/McpServerPresets";
+import { BUILT_IN_PACK, BUILTIN_PACK_ID } from "./presets/BuiltInPacks";
+import { buildEffectiveRegistry } from "./presets/effectiveRegistry";
+import {
+  applyEffectivePresetToForm,
+  buildPresetDropdownModel,
+  type PresetDropdownModel,
+} from "./presetDropdownLogic";
+import type { EffectivePreset } from "./presets/effectiveRegistry";
+import {
+  buildExportFlowModel,
+  runExport,
+  suggestedFilename,
+  toggleSelection,
+} from "./packExportFlow";
 
 export interface McpServersSectionOptions {
   store: McpSettingsStore;
@@ -53,6 +67,12 @@ export interface McpServersSectionOptions {
    * `window.confirm`, mirroring the existing Remove-server pattern.
    */
   confirmPackAction?: (title: string, body: string) => boolean | Promise<boolean>;
+  /**
+   * Phase 4 (preset packs): writer for "Export servers as pack…".
+   * Injected so tests can drive export without a real save dialog or fs.
+   * Production wiring uses `createDesktopPackFileWriter(app)`.
+   */
+  packFileWriter?: PackFileWriter;
 }
 
 type DomEl = HTMLElement & {
@@ -129,6 +149,13 @@ export class McpServersSection {
     });
     const addButton = child(root, "button", { text: "Add server", attr: { "aria-label": "Add MCP server" } });
     on(addButton, "click", () => this.openForm());
+    if (this.options.packFileWriter) {
+      const exportButton = child(root, "button", {
+        text: "Export servers as pack…",
+        attr: { "aria-label": "Export servers as preset pack" },
+      });
+      on(exportButton, "click", () => this.openExportDialog(root));
+    }
 
     const list = child(root, "div", { attr: { role: "list", "aria-label": "Configured MCP servers" } });
     const servers = this.options.store.snapshot();
@@ -402,62 +429,153 @@ export class McpServersSection {
     on(credentialKind, "change", updateCredentialVisibility);
     updateCredentialVisibility();
 
-    // Phase 5: preset dropdown (add-only). Populates fields when selected and
-    // optionally shows a non-blocking preflight hint when the required CLI
-    // (e.g. `az`) is missing from PATH. FR-018: preflight never blocks save.
+    // Phase 4 (preset packs): per-form state captured by both the preset
+    // change handler (writes) and the Save click handler (reads). Lives
+    // in openForm's closure so each form invocation gets a fresh array —
+    // never leaks across edit sessions.
+    const formRequiredFields: string[] = [];
+    let pendingCredentialArgs: string[] | undefined =
+      existingHttpCreds?.kind === "command-based" && Array.isArray(existingHttpCreds.args)
+        ? [...existingHttpCreds.args]
+        : undefined;
+
+    // Phase 5 + Phase 4 (preset packs): preset dropdown (add-only).
+    // Populates fields when selected. Built-in presets continue to use
+    // their existing build()+preflight-hint path; imported-pack presets
+    // use the pure `applyEffectivePresetToForm` helper and render a
+    // "required" hint for templatized secret fields.
+    // FR-018 / SC-006: pack code paths invoke NO preflight; the existing
+    // form-level hint for built-ins is unchanged.
     if (!existing) {
-      const presetIds = BUILT_IN_PRESETS.map((p) => p.id);
-      const presetSelect = select(modal, "Preset", ["", ...presetIds], "", {
+      const packsSnapshot = this.options.presetPacksStore?.snapshot() ?? [];
+      const registry = buildEffectiveRegistry(BUILT_IN_PACK, packsSnapshot);
+      const dropdownModel = buildPresetDropdownModel(registry);
+      const effectiveById = new Map(registry.map((r) => [r.effectiveId, r]));
+      const presetIds = [
+        dropdownModel.emptyOption.value,
+        ...dropdownModel.groups.flatMap((g) => g.options.map((o) => o.value)),
+      ];
+      const presetSelect = select(modal, "Preset", presetIds, "", {
         hint: "Optional. Pre-fills the form for a known MCP service.",
       });
-      // Rewrite option text where supported (real DOM only; FakeElement test
-      // harness has no `.options` API so this is best-effort).
+      // Rewrite option text where supported (real DOM). For real-DOM
+      // builds we also re-arrange options into <optgroup> elements so
+      // imported packs visually cluster under their pack label. The
+      // FakeElement test harness has no `.options` API, so this is
+      // skipped there and tests assert on the dropdown model instead.
       const opts = (presetSelect as unknown as { options?: ArrayLike<HTMLOptionElement> }).options;
       if (opts && opts.length > 0) {
         const blank = opts[0];
-        if (blank) blank.textContent = "— none —";
+        if (blank) blank.textContent = dropdownModel.emptyOption.text;
         for (let i = 0; i < opts.length; i++) {
           const opt = opts[i];
-          const preset = getPresetById(opt.value);
-          if (preset) opt.textContent = preset.label;
+          const eff = effectiveById.get(opt.value);
+          if (eff) opt.textContent = eff.displayLabel;
         }
+        applyOptgroupsToSelect(presetSelect, dropdownModel, effectiveById);
       }
       const presetHint = child(modal, "div", {
         cls: "copilot-agent-mcp-preset-hint",
         attr: { role: "status", "aria-label": "Preset preflight hint" },
       });
       on(presetSelect, "change", () => {
-        const preset = getPresetById(presetSelect.value);
         setText(presetHint, "");
-        if (!preset) return;
-        const built = preset.build();
-        if (!id.value) id.value = preset.id;
-        name.value = built.server.name;
-        transport.value = built.server.transport;
-        if (built.server.transport === "http") {
-          url.value = built.server.url;
+        formRequiredFields.length = 0;
+        pendingCredentialArgs = undefined;
+        const eff = effectiveById.get(presetSelect.value);
+        if (!eff) return;
+        if (eff.sourcePackId === BUILTIN_PACK_ID) {
+          // Built-in: preserve the exact pre-Phase-4 behavior (build()
+          // + form-level preflight hint).
+          const preset = getPresetById(eff.preset.id);
+          if (!preset) return;
+          const built = preset.build();
+          if (!id.value) id.value = preset.id;
+          name.value = built.server.name;
+          transport.value = built.server.transport;
+          if (built.server.transport === "http") {
+            url.value = built.server.url;
+          }
+          if (built.credentials.kind === "command-based") {
+            credentialKind.value = "command-based";
+            credentialCommand.value = built.credentials.command;
+            pendingCredentialArgs = Array.isArray(built.credentials.args)
+              ? [...built.credentials.args]
+              : undefined;
+            credentialTokenPath.value = built.credentials.tokenPath ?? "";
+            credentialExpiryPath.value = built.credentials.expiryPath ?? "";
+            credentialRefreshBuffer.value = String(
+              built.credentials.refreshBufferSeconds ?? "",
+            );
+            updateCredentialVisibility();
+          }
+          const preflight = built.preflight;
+          if (preflight?.type === "findOnPath") {
+            const check = this.options.executableExists ?? this.options.pathExists;
+            if (check && !check(preflight.command)) {
+              setText(
+                presetHint,
+                `Heads up: \`${preflight.command}\` was not found on PATH. ` +
+                  (preflight.installHint ? `Install with: ${preflight.installHint}` : "") +
+                  " You can still save; the server will fail until the CLI is available.",
+              );
+            }
+          }
+          return;
         }
-        if (built.credentials.kind === "command-based") {
-          credentialKind.value = "command-based";
-          credentialCommand.value = built.credentials.command;
-          credentialTokenPath.value = built.credentials.tokenPath ?? "";
-          credentialExpiryPath.value = built.credentials.expiryPath ?? "";
-          credentialRefreshBuffer.value = String(
-            built.credentials.refreshBufferSeconds ?? "",
-          );
+        // Imported pack preset: pure pre-fill via applyEffectivePresetToForm.
+        const baseForm: McpServerFormInput = {
+          id: id.value,
+          name: name.value,
+          transport: transport.value === "http" ? "http" : "stdio",
+        };
+        const { form: applied, requiredSecretFields } = applyEffectivePresetToForm(eff, baseForm);
+        if (!id.value && applied.id) id.value = applied.id;
+        if (applied.name) name.value = applied.name;
+        transport.value = applied.transport;
+        if (applied.transport === "http" && typeof applied.url === "string") {
+          url.value = applied.url;
+        }
+        if (applied.transport === "stdio") {
+          if (typeof applied.command === "string") command.value = applied.command;
+          if (Array.isArray(applied.args)) args.value = formatArgs(applied.args);
+          // Phase 4: stdio env/cwd from the pack preset flow into the
+          // visible form fields so the user can see (and edit) them
+          // before saving. Templatized env values surface as empty
+          // strings + `env.<KEY>` required entries.
+          if (applied.env) env.value = envToText(applied.env);
+          if (typeof applied.cwd === "string") cwd.value = applied.cwd;
+        }
+        if (applied.credentialKind) {
+          credentialKind.value = applied.credentialKind;
+          if (applied.credentialKind === "command-based") {
+            credentialCommand.value = applied.credentialCommand ?? "";
+            pendingCredentialArgs = Array.isArray(applied.credentialArgs)
+              ? [...applied.credentialArgs]
+              : undefined;
+            credentialTokenPath.value = applied.credentialTokenPath ?? "";
+            credentialExpiryPath.value = applied.credentialExpiryPath ?? "";
+            credentialRefreshBuffer.value = String(
+              applied.credentialRefreshBufferSeconds ?? "",
+            );
+          } else if (applied.credentialKind === "static-bearer") {
+            authorization.value = applied.authorization ?? "";
+          }
           updateCredentialVisibility();
         }
-        const preflight = built.preflight;
-        if (preflight?.type === "findOnPath") {
-          const check = this.options.executableExists ?? this.options.pathExists;
-          if (check && !check(preflight.command)) {
-            setText(
-              presetHint,
-              `Heads up: \`${preflight.command}\` was not found on PATH. ` +
-                (preflight.installHint ? `Install with: ${preflight.installHint}` : "") +
-                " You can still save; the server will fail until the CLI is available.",
-            );
+        formRequiredFields.splice(0, formRequiredFields.length, ...requiredSecretFields);
+        if (requiredSecretFields.length > 0) {
+          // Mark the visible templatized inputs so the user sees the
+          // required-affordance immediately (and assistive tech picks it up).
+          for (const f of requiredSecretFields) {
+            if (f === "authorization") authorization.setAttribute("aria-required", "true");
           }
+          setText(
+            presetHint,
+            "Pack-templatized: please supply a value before saving (" +
+              requiredSecretFields.join(", ") +
+              ").",
+          );
         }
       });
     }
@@ -501,6 +619,8 @@ export class McpServersSection {
         credentialRefreshBufferSeconds: credentialRefreshBuffer.value === ""
           ? undefined
           : Number(credentialRefreshBuffer.value),
+        credentialArgs: pendingCredentialArgs,
+        requiredSecretFields: formRequiredFields.length > 0 ? [...formRequiredFields] : undefined,
       };
       const result = validateMcpServerForm(form, {
         existingIds: this.options.store.snapshot().map((server) => server.id),
@@ -599,6 +719,86 @@ export class McpServersSection {
 
   private noticeError(err: unknown): void {
     this.notify(`[Copilot Agent] MCP server operation failed: ${redactSensitive(err instanceof Error ? err.message : String(err))}`);
+  }
+
+  private openExportDialog(root: DomEl): void {
+    const writer = this.options.packFileWriter;
+    if (!writer) return;
+    const servers = this.options.store.snapshot();
+    if (servers.length === 0) {
+      this.notify("No MCP servers configured to export.");
+      return;
+    }
+    let model = buildExportFlowModel(servers);
+    const dialog = child(root, "div", {
+      cls: "copilot-agent-export-dialog",
+      attr: { role: "dialog", "aria-label": "Export servers as preset pack" },
+    });
+    child(dialog, "h4", { text: "Export servers as preset pack" });
+    child(dialog, "p", {
+      cls: "setting-item-description",
+      text: "Selected servers are exported with secrets replaced by __NEEDS_VALUE__ placeholders.",
+    });
+    const idEl = input(dialog, "Pack id", model.defaultPackMeta.id);
+    const labelEl = input(dialog, "Pack label", model.defaultPackMeta.label);
+    const versionEl = input(dialog, "Version", model.defaultPackMeta.version);
+    const listEl = child(dialog, "div", {
+      cls: "copilot-agent-export-list",
+      attr: { role: "list", "aria-label": "Servers to export" },
+    });
+    const renderList = (): void => {
+      empty(listEl);
+      for (const row of model.rows) {
+        const rowEl = child(listEl, "div", { cls: "copilot-agent-export-row" });
+        const cb = checkbox(rowEl, `${row.name} (${row.transport})`, row.selected);
+        on(cb, "change", () => {
+          model = { ...model, rows: toggleSelection(model.rows, row.id) };
+        });
+      }
+    };
+    renderList();
+    const message = child(dialog, "div", {
+      cls: "copilot-agent-export-message",
+      attr: { role: "status", "aria-live": "polite" },
+    });
+    const actions = child(dialog, "div", { cls: "copilot-agent-export-actions" });
+    const cancelBtn = child(actions, "button", { text: "Cancel" });
+    const exportBtn = child(actions, "button", {
+      text: "Export",
+      attr: { "aria-label": "Export selected servers" },
+    });
+    on(cancelBtn, "click", () => {
+      dialog.remove();
+    });
+    on(exportBtn, "click", () => {
+      const meta = {
+        id: idEl.value.trim() || model.defaultPackMeta.id,
+        label: labelEl.value.trim() || model.defaultPackMeta.label,
+        version: versionEl.value.trim() || model.defaultPackMeta.version,
+      };
+      const result = runExport(model.rows, servers, meta);
+      if (!result.ok) {
+        setText(
+          message,
+          result.reason === "no-selection"
+            ? "Select at least one server to export."
+            : `Export failed: ${result.message ?? "validation error"}`,
+        );
+        return;
+      }
+      void writer
+        .saveTextToPath(suggestedFilename(meta), result.serialized)
+        .then((wr) => {
+          if (wr.ok) {
+            this.notify(`Exported pack to ${wr.path}`);
+            dialog.remove();
+          } else if (wr.reason === "cancelled") {
+            setText(message, "Export cancelled.");
+          } else {
+            setText(message, `Export failed: ${wr.message ?? "I/O error"}`);
+          }
+        });
+    });
   }
 
   private renderPacksSubsection(root: DomEl): void {
@@ -947,4 +1147,28 @@ export function credentialsChanged(prev: McpServerConfig, next: McpServerConfig)
   const prevKey = JSON.stringify({ a: prev.authorization ?? null, c: prev.credentials ?? null });
   const nextKey = JSON.stringify({ a: next.authorization ?? null, c: next.credentials ?? null });
   return prevKey !== nextKey;
+}
+
+function applyOptgroupsToSelect(
+  select: HTMLSelectElement,
+  model: PresetDropdownModel,
+  effectiveById: Map<string, EffectivePreset>,
+): void {
+  const doc = (select as unknown as { ownerDocument?: Document }).ownerDocument;
+  if (!doc || typeof doc.createElement !== "function") return;
+  const blank = select.options[0];
+  while (select.firstChild) select.removeChild(select.firstChild);
+  if (blank) select.appendChild(blank);
+  for (const group of model.groups) {
+    const og = doc.createElement("optgroup");
+    og.label = group.label;
+    for (const opt of group.options) {
+      const o = doc.createElement("option");
+      o.value = opt.value;
+      const eff = effectiveById.get(opt.value);
+      o.textContent = eff ? eff.displayLabel : opt.text;
+      og.appendChild(o);
+    }
+    select.appendChild(og);
+  }
 }

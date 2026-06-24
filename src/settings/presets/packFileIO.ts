@@ -154,3 +154,48 @@ function isElectronRuntime(): boolean {
   const w = window as unknown as { process?: { versions?: { electron?: string } } };
   return Boolean(w.process?.versions?.electron);
 }
+
+/**
+ * Desktop writer (Phase 4B fallback path).
+ *
+ * The pure-Electron `dialog.showSaveDialog` path requires running inside
+ * Obsidian and is unverifiable from automated tooling, so the production
+ * writer falls back to the vault adapter: writes
+ * `<vaultRoot>/exported-packs/<filename>` and returns the path so the UI
+ * can surface a Notice. Tests inject a fake writer and never exercise
+ * this factory.
+ */
+export function createDesktopPackFileWriter(app: {
+  vault: {
+    adapter: {
+      write: (path: string, data: string) => Promise<void>;
+      mkdir?: (path: string) => Promise<void>;
+      exists?: (path: string) => Promise<boolean>;
+    };
+  };
+}): PackFileWriter {
+  return {
+    async saveTextToPath(
+      suggestedFilename: string,
+      text: string,
+    ): Promise<PackFileWriteResult> {
+      try {
+        const dir = "exported-packs";
+        const path = `${dir}/${suggestedFilename}`;
+        const adapter = app.vault.adapter;
+        if (adapter.mkdir && adapter.exists) {
+          const exists = await adapter.exists(dir);
+          if (!exists) await adapter.mkdir(dir);
+        }
+        await adapter.write(path, text);
+        return { ok: true, path };
+      } catch (err) {
+        return {
+          ok: false,
+          reason: "io",
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  };
+}

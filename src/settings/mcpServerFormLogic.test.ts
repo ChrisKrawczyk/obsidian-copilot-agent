@@ -167,3 +167,114 @@ describe("mcpServerFormLogic", () => {
     expect(result.errors.join(" ")).toContain("Working directory does not exist: C:\\missing");
   });
 });
+
+describe("mcpServerFormLogic requiredSecretFields (Phase 4)", () => {
+  const ctx = { vaultRoot: "C:\\vault", pathExists: (path: string) => path === "C:\\vault" };
+
+  test("fails validation when authorization is empty and required by pack", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "http",
+        url: "https://api.example/",
+        authorization: "",
+        requiredSecretFields: ["authorization"],
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/Required field authorization from imported pack/);
+    expect(result.requiredSecretFields).toEqual(["authorization"]);
+  });
+
+  test("passes when required field is filled", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "http",
+        url: "https://api.example/",
+        authorization: "Bearer real-token",
+        requiredSecretFields: ["authorization"],
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  test("fails when env.<KEY> is required but missing", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "stdio",
+        command: "node",
+        env: { API_KEY: "" },
+        requiredSecretFields: ["env.API_KEY"],
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/Required field env\.API_KEY/);
+  });
+
+  test("passes when env.<KEY> required field is filled", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "stdio",
+        command: "node",
+        env: { API_KEY: "value-123" },
+        requiredSecretFields: ["env.API_KEY"],
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  test("requiredSecretFields defaults to [] when omitted", () => {
+    const result = validateMcpServerForm(
+      { id: "srv", transport: "stdio", command: "node" },
+      ctx,
+    );
+    expect(result.requiredSecretFields).toEqual([]);
+  });
+});
+
+describe("mcpServerFormLogic credentialArgs round-trip (Phase 4)", () => {
+  const ctx = { vaultRoot: "C:\\vault", pathExists: (p: string) => p === "C:\\vault" };
+
+  test("command-based credentials preserve args from form input through to config", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "http",
+        url: "https://api.example/",
+        credentialKind: "command-based",
+        credentialCommand: "az",
+        credentialArgs: ["account", "get-access-token", "--scope", "x"],
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.config?.credentials).toMatchObject({
+      kind: "command-based",
+      command: "az",
+      args: ["account", "get-access-token", "--scope", "x"],
+    });
+  });
+
+  test("omits args key when credentialArgs is empty or undefined", () => {
+    const result = validateMcpServerForm(
+      {
+        id: "srv",
+        transport: "http",
+        url: "https://api.example/",
+        credentialKind: "command-based",
+        credentialCommand: "az",
+      },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    const creds = result.config?.credentials as { args?: unknown };
+    expect(creds.args).toBeUndefined();
+  });
+});

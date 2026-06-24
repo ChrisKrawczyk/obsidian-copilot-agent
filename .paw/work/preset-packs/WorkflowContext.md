@@ -66,3 +66,22 @@ Artifact Lifecycle: commit-and-clean
 Artifact Paths: auto-derived
 Additional Inputs: none
 
+
+## Phase 4B Save-Dialog Spike (recorded 2025 — Phase 4 impl review)
+
+Plan line 499 mandates verifying `@electron/remote.dialog` or
+`electron.remote.dialog` before committing Phase 4B code. The spike
+cannot be executed from automated tooling — it requires running inside
+Obsidian Desktop with a live Electron renderer process.
+
+**Outcome:** spike deferred. Phase 4B ships with the plan's documented
+fallback: `createDesktopPackFileWriter(app)` writes the serialized pack
+via `app.vault.adapter.write` to `<vaultRoot>/exported-packs/<filename>`
+and surfaces the absolute path via `Notice`. The writer is injected via
+`PackFileWriter`, so tests substitute a fake and end-to-end behavior is
+covered without an Electron dialog.
+
+If a future iteration wants a native save dialog, replace the
+adapter-based writer with one that calls `require("@electron/remote").dialog`
+behind a runtime detection check. The interface (`saveTextToPath`) was
+designed to accommodate either implementation.

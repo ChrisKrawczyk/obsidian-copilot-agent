@@ -43,9 +43,22 @@ export interface McpServerFormInput {
   credentialKind?: McpCredentialKindUiSelection;
   /** Phase 5: command-based variant fields. */
   credentialCommand?: string;
+  /** Phase 4 (preset packs / FR-020): structural args for command-based creds. */
+  credentialArgs?: string[];
   credentialTokenPath?: string;
   credentialExpiryPath?: string;
   credentialRefreshBufferSeconds?: number;
+  /**
+   * Phase 4 (preset packs / FR-020): form-field names that were sourced
+   * from an imported pack with templatized secret values. The validator
+   * fails the submit when any listed field is empty so the user is
+   * forced to supply the missing secret. Encoded as:
+   *   - "authorization"        — HTTP static-bearer token
+   *   - "env.<KEY>"            — stdio env value templated by exporter
+   *   - "refreshTokenRef"      — oauth-pkce refresh-token reference
+   * Anything not in this enumeration is ignored.
+   */
+  requiredSecretFields?: string[];
 }
 
 export interface McpServerFormContext {
@@ -76,6 +89,9 @@ export interface McpServerFormValidationResult {
   toolsListPageTimeoutSeconds: number;
   headerDisplay: McpHeaderDisplay[];
   sensitiveFields: { authorizationRedacted: boolean; authorizationDisplay: string };
+  /** Phase 4 (preset packs / FR-020): echo of the required-secret-field
+   *  names that were checked. Populated even when validation passes. */
+  requiredSecretFields: string[];
 }
 
 export function validateMcpServerForm(
@@ -188,6 +204,16 @@ export function validateMcpServerForm(
 
   const denylistEnvWarnings =
     input.transport === "stdio" ? collectDenylistWarningsShared(input.env, context.platform) : [];
+  const requiredSecretFields = Array.isArray(input.requiredSecretFields)
+    ? [...input.requiredSecretFields]
+    : [];
+  for (const field of requiredSecretFields) {
+    if (isRequiredSecretFieldEmpty(field, input, authorization)) {
+      errors.push(
+        `Required field ${field} from imported pack must be filled in before saving.`,
+      );
+    }
+  }
   if (errors.length > 0 || !config) config = undefined;
 
   return {
@@ -211,7 +237,38 @@ export function validateMcpServerForm(
           : redactAuthorizationValue(authorization)
         : "",
     },
+    requiredSecretFields,
   };
+}
+
+/**
+ * FR-020 / Phase 4: returns true when a pack-required field is empty in
+ * the form, blocking save. Supported field names:
+ *   - "authorization": HTTP static-bearer token (also matches an
+ *     Authorization header passed via `headers`).
+ *   - "env.<KEY>": stdio env value templated by the exporter.
+ *   - "refreshTokenRef": oauth-pkce refresh-token reference (parked for
+ *     when oauth-pkce surfaces in the form UI).
+ * Unknown field names are ignored (treated as already-satisfied).
+ */
+function isRequiredSecretFieldEmpty(
+  field: string,
+  input: McpServerFormInput,
+  authorization: string | undefined,
+): boolean {
+  if (field === "authorization") {
+    return !authorization || authorization.length === 0;
+  }
+  if (field.startsWith("env.")) {
+    const key = field.slice(4);
+    const value = input.env?.[key];
+    return !value || value.length === 0;
+  }
+  if (field === "refreshTokenRef") {
+    // Form does not surface this yet; defer to future UI.
+    return false;
+  }
+  return false;
 }
 
 export function buildHeaderDisplay(input: Pick<McpServerFormInput, "authorization" | "headers">, reveal = false): McpHeaderDisplay[] {
@@ -310,9 +367,13 @@ function resolveCredentialsFromForm(
       }
       const tokenPath = input.credentialTokenPath?.trim();
       const expiryPath = input.credentialExpiryPath?.trim();
+      const credArgs = Array.isArray(input.credentialArgs) && input.credentialArgs.length > 0
+        ? [...input.credentialArgs]
+        : undefined;
       return {
         kind: "command-based",
         command,
+        ...(credArgs ? { args: credArgs } : {}),
         ...(tokenPath ? { tokenPath } : {}),
         ...(expiryPath ? { expiryPath } : {}),
         ...(refreshBuffer != null ? { refreshBufferSeconds: refreshBuffer } : {}),
