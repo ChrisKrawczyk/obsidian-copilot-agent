@@ -781,16 +781,37 @@ export class CopilotAgentSession implements AgentSession {
             (c) => c.id === d.toolCallId,
           );
           const errorText = typeof d.error?.message === "string" ? d.error.message : "";
-          const outcome: "completed" | "errored" | "cancelled" = d.success
+          let outcome: "completed" | "errored" | "cancelled" = d.success
             ? "completed"
             : isAbortError(d.error) || /cancel/i.test(errorText)
               ? "cancelled"
               : "errored";
-          const resultContent = sanitizeMcpMaybe(
+          let resultContent = sanitizeMcpMaybe(
             existing?.source,
             d.result?.detailedContent ?? d.result?.content ?? undefined,
           );
-          const errorMessage = sanitizeMcpMaybe(existing?.source, d.error?.message);
+          let errorMessage = sanitizeMcpMaybe(existing?.source, d.error?.message);
+          // Phase 8: `McpToolBridge` now returns MCP tool-execution errors as
+          // tool-result content (industry pattern from bastani/atomic, kimchi,
+          // inkeep) so the message reaches chat even when the SDK's error
+          // pipeline drops it. But that means the SDK marks the call
+          // `success: true`, which paints a green "completed" pill on a call
+          // that actually failed. Detect the sentinel prefix here and
+          // re-classify: outcome → errored, content → detail, status pill
+          // becomes red, body renders the "Error" section. Only applies when
+          // source is mcp so we don't misclassify legitimate results that
+          // happen to start with "Error:".
+          if (
+            existing?.source === "mcp" &&
+            outcome === "completed" &&
+            typeof resultContent === "string" &&
+            (resultContent.startsWith("Error: MCP tool reported error:") ||
+              resultContent.startsWith("Error: MCP JSON-RPC error:"))
+          ) {
+            outcome = "errored";
+            errorMessage = resultContent;
+            resultContent = undefined;
+          }
           if (existing?.source === "mcp") this.unregisterActiveMcpCall(d.toolCallId);
           if (existing) {
             existing.outcome = outcome;

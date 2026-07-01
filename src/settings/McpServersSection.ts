@@ -733,16 +733,26 @@ export class McpServersSection {
    * for automatic reconciles or plugin-startup reconnects, which are noisy.
    * Tracks fired serverIds so a user rapidly toggling off/on doesn't get
    * spammed within a session.
+   *
+   * Rendered as a sticky Notice (duration 0) so the user can read it fully;
+   * the standard 8s auto-dismiss is too short for a two-sentence diagnostic.
+   * Falls back through the injected `notify` callback (used by tests) with a
+   * best-effort long message; production path uses `new Notice(msg, 0)`.
    */
   private notifyStdioStartupIfNew(config: Pick<McpServerConfig, "id" | "name" | "transport">): void {
     if (config.transport !== "stdio") return;
     if (this.stdioStartupNoticeShown.has(config.id)) return;
     this.stdioStartupNoticeShown.add(config.id);
-    this.notify(
+    const message =
       `Starting MCP server "${config.name}". If this is a first-time launch, ` +
-        "a browser tab may open for authentication — please check for a tab behind Obsidian. " +
-        "After authorizing (or if no browser tab appears), start a fresh chat so tools become available.",
-    );
+      "a browser tab may open for authentication — please check for a tab behind Obsidian. " +
+      "After authorizing (or if no browser tab appears), start a fresh chat so tools become available.";
+    if (this.options.notify) {
+      this.options.notify(message);
+    } else {
+      // Sticky notice (0 = until dismissed) so the message is readable.
+      new Notice(message, 0);
+    }
   }
 
   private noticeError(err: unknown): void {

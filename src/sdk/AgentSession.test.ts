@@ -900,6 +900,172 @@ describe("CopilotAgentSession", () => {
     await agent.dispose();
   });
 
+  test("Phase 8: MCP tool result starting with 'Error: MCP ...' sentinel is reclassified to errored", async () => {
+    // McpToolBridge (Phase 8) returns MCP tool-execution errors as
+    // tool-result content so the message reaches chat even when the SDK
+    // error pipeline drops it. The SDK marks such calls success:true,
+    // which would paint a green completed pill on a call that actually
+    // failed. AgentSession detects the sentinel prefix and re-classifies
+    // the outcome to "errored" with the content moved into the error slot
+    // so the chat renders a red pill and an "Error" body section.
+    const h = makeFakeSdk();
+    type ToolStartHandler = (event: {
+      type: "tool.execution_start";
+      data: {
+        toolCallId: string;
+        toolName: string;
+        arguments?: Record<string, unknown>;
+        mcpServerName?: string;
+      };
+    }) => void;
+    type ToolCompleteHandler = (event: {
+      type: "tool.execution_complete";
+      data: {
+        toolCallId: string;
+        success: boolean;
+        result?: { content?: string };
+        error?: { message: string };
+      };
+    }) => void;
+    let toolStart: ToolStartHandler | null = null;
+    let toolComplete: ToolCompleteHandler | null = null;
+    h.session.on = (eventType, handler) => {
+      if (eventType === "tool.execution_start")
+        toolStart = handler as ToolStartHandler;
+      if (eventType === "tool.execution_complete")
+        toolComplete = handler as ToolCompleteHandler;
+      return () => {};
+    };
+    let resolveSend!: (resp: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+
+    const iter = agent
+      .sendMessageStreaming("call mcp tool that will error")
+      [Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+
+    toolStart!({
+      type: "tool.execution_start",
+      data: {
+        toolCallId: "call-err",
+        toolName: formatSyntheticId(mcpServerId, "search"),
+        mcpServerName: "agency-mail",
+        arguments: { q: "bad" },
+      },
+    });
+    // Simulate McpToolBridge returning an isError result as content.
+    toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "call-err",
+        success: true,
+        result: { content: "Error: MCP tool reported error: Graph rejected NotARealField" },
+      },
+    });
+
+    // First yields the start; second yields the complete after reclass.
+    await firstP;
+    const second = await iter.next();
+    expect(second.value).toMatchObject({
+      type: "tool_call_complete",
+      id: "call-err",
+      outcome: "errored",
+      content: undefined,
+      errorMessage: "Error: MCP tool reported error: Graph rejected NotARealField",
+    });
+
+    resolveSend({ data: { content: "ok" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
+  test("Phase 8: non-MCP tool with content starting 'Error:' is NOT reclassified", async () => {
+    // The reclassification only fires when source === "mcp" AND the
+    // content matches the exact McpToolBridge sentinel prefixes. A
+    // custom tool that legitimately returns text starting with "Error:"
+    // must stay classified as completed.
+    const h = makeFakeSdk();
+    type ToolStartHandler = (event: {
+      type: "tool.execution_start";
+      data: { toolCallId: string; toolName: string; arguments?: Record<string, unknown> };
+    }) => void;
+    type ToolCompleteHandler = (event: {
+      type: "tool.execution_complete";
+      data: { toolCallId: string; success: boolean; result?: { content?: string } };
+    }) => void;
+    let toolStart: ToolStartHandler | null = null;
+    let toolComplete: ToolCompleteHandler | null = null;
+    h.session.on = (eventType, handler) => {
+      if (eventType === "tool.execution_start")
+        toolStart = handler as ToolStartHandler;
+      if (eventType === "tool.execution_complete")
+        toolComplete = handler as ToolCompleteHandler;
+      return () => {};
+    };
+    let resolveSend!: (resp: unknown) => void;
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const iter = agent.sendMessageStreaming("read")[Symbol.asyncIterator]();
+    const firstP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    toolStart!({
+      type: "tool.execution_start",
+      data: { toolCallId: "call-2", toolName: "read_file", arguments: { path: "notes.md" } },
+    });
+    toolComplete!({
+      type: "tool.execution_complete",
+      data: {
+        toolCallId: "call-2",
+        success: true,
+        result: { content: "Error: file not found (this is legitimate content)" },
+      },
+    });
+    await firstP;
+    const second = await iter.next();
+    expect(second.value).toMatchObject({
+      type: "tool_call_complete",
+      id: "call-2",
+      outcome: "completed",
+      content: "Error: file not found (this is legitimate content)",
+    });
+    resolveSend({ data: { content: "done" } });
+    await iter.next();
+    await agent.dispose();
+  });
+
   test("denied permission request emits live tool_call_start + tool_call_complete during streaming", async () => {
     const h = makeFakeSdk();
     h.session.on = () => () => {};
