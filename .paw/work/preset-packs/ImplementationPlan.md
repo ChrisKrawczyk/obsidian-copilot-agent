@@ -786,3 +786,25 @@ This phase establishes every pure module the later phases compose, with full Vit
 - Workflow context: `.paw\work\preset-packs\WorkflowContext.md`
 - Proposal grounding: `proposals\0007-importable-preset-packs.md`
 - Predecessor phasing reference: `.paw\work\authenticated-mcps\ImplementationPlan.md`
+
+## Phase 8: MCP tool-call error UX (post-final-review scope addition)
+
+**Origin:** Phase 5 smoke testing revealed two plugin UX defects that block a good user experience for imported preset packs (and for any stdio MCP server generally): tool-call failures showed the SDK's generic `Tool execution failed'' fallback with no diagnostic text, and stdio servers requiring first-run interactive OAuth opened browser tabs behind Obsidian with no user notice. Both are pre-existing issues, but preset-packs makes them visible to more users, so they are in-scope before shipping.
+
+### Changes Required
+
+- **`src\mcp\McpToolBridge.ts`** — Change tool-execution error path from `throw` to `return `Error: <details>`. Matches industry pattern (Model Context Protocol spec 2025-06-18 error handling; bastani/atomic, kimchi, inkeep MCP adapters). Guarantees the error text is rendered in chat (tool return values always render) and lets the LLM read the diagnostic. Hard invocation failures (server disabled, cancelled, timed out) remain thrown. Empty-content isError responses get a descriptive fallback (`no error details returned by the server`).
+- **`src\mcp\McpToolBridge.test.ts`** — Existing `isError and JSON-RPC error surface distinctly` test updated to expect `resolves` (returned content) not `rejects`. New test for empty-content isError fallback.
+- **`src\settings\McpServersSection.ts`** — On user-triggered enable of an stdio server (server add/save with `enabled: true`, or manual Enable toggle), fire a Notice: `Starting MCP server `X''. If this is a first-time launch, a browser tab may open for authentication — please check for a tab behind Obsidian.'' Tracked via `stdioStartupNoticeShown: Set<string>` field so repeated toggles do not re-notify.
+- **`src\settings\McpServersSection.test.ts`** — Two new tests: stdio startup notice fires once (not on re-enable), and does not fire for HTTP servers.
+- **`proposals\0008-mcp-server-stderr-log-file.md`** (new) — Follow-up proposal for persistent per-server stderr log files with rotation. Deferred from Phase 8 to keep scope tight; in-memory 64KB stderr tail already surfaces in connection-failure Notices via `McpServerRuntime.setError` (line 481).
+
+### Test Impact
+
+Baseline: 1495 tests. New tests: +3 (McpToolBridge empty-content, stdio startup notice fires-once, stdio startup notice HTTP-negative). New total: 1498, all passing. Build passes, typecheck passes.
+
+### Deferred / Out of Scope
+
+- Persistent stderr log files with rotation → proposal 0008.
+- Structured tool-error rendering in chat UI (e.g. red-tinted tool output for isError content) → future UI polish.
+- Pattern-matched detection of stderr auth prompts and richer surfacing → too brittle across MCP servers; startup notice + in-memory stderr in error notices covers 90% of value.

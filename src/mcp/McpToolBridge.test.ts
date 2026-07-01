@@ -29,11 +29,22 @@ describe("McpToolBridge", () => {
     expect("undoId" in (tool as object)).toBe(false);
   });
 
-  test("isError and JSON-RPC error surface distinctly", async () => {
+  test("isError and JSON-RPC error surface as tool-result content (not thrown)", async () => {
+    // Industry pattern: return errors as content so LLM/UI always see the message.
+    // Hard invocation failures (unavailable, cancelled, timed out) still throw — see other tests.
     const mcpErr = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "tool failed" }] })) } as never })[0];
-    await expect((mcpErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/MCP tool reported error: tool failed/);
+    await expect((mcpErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).resolves.toBe("Error: MCP tool reported error: tool failed");
     const rpcErr = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(async () => ({ error: { message: "rpc failed" } })) } as never })[0];
-    await expect((rpcErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).rejects.toThrow(/MCP JSON-RPC error:[\s\S]*rpc failed/);
+    await expect((rpcErr as never as { handler: (args: unknown) => Promise<unknown> }).handler({})).resolves.toMatch(/^Error: MCP JSON-RPC error:[\s\S]*rpc failed/);
+  });
+
+  test("empty-content tool error still surfaces a non-empty message", async () => {
+    // Regression: prior code returned "" for `{isError: true, content: []}`, causing the
+    // SDK to render the useless generic "Tool execution failed" fallback. Now we always
+    // include a fallback description so the user knows the tool errored.
+    const [tool] = createMcpSdkTools(snapshot(), { manager: { callTool: vi.fn(async () => ({ isError: true, content: [] })) } as never });
+    const result = await (tool as never as { handler: (args: unknown) => Promise<unknown> }).handler({});
+    expect(result).toBe("Error: MCP tool reported error: (no error details returned by the server)");
   });
 
   test("60s default timeout finalizes a failed call", async () => {

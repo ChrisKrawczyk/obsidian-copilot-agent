@@ -92,6 +92,7 @@ export class McpServersSection {
   private domCleanups: Array<() => void> = [];
   private lastGrantNoticeEpochByServer = new Map<string, string>();
   private formOpen = false;
+  private stdioStartupNoticeShown = new Set<string>();
   private renderQueuedWhileFormOpen = false;
   /**
    * SM-3 / Phase 5 minimum: per-server last Test-connection result, so the
@@ -680,14 +681,17 @@ export class McpServersSection {
       this.options.manager.onCredentialConfigChanged?.(config.id);
     }
     if (config.enabled) {
+      this.notifyStdioStartupIfNew(config);
       void this.options.manager.enable(config.id).catch((err: unknown) => this.noticeError(err));
     }
   }
 
   private async setEnabled(server: McpServerConfig, enabled: boolean): Promise<void> {
     await this.options.store.setEnabled(server.id, enabled);
-    if (enabled) await this.options.manager.enable(server.id);
-    else await this.options.manager.disable(server.id);
+    if (enabled) {
+      this.notifyStdioStartupIfNew(server);
+      await this.options.manager.enable(server.id);
+    } else await this.options.manager.disable(server.id);
     // The SDK locks the tool list at session creation; mid-session toggles
     // don't refresh it. Prompt the user to start a new conversation so the
     // model sees the updated tool roster.
@@ -719,6 +723,26 @@ export class McpServersSection {
   private notify(message: string): void {
     if (this.options.notify) this.options.notify(message);
     else new Notice(message, 8000);
+  }
+
+  /**
+   * Phase 8: When a user explicitly enables (or first-imports) an stdio MCP
+   * server, warn them that some stdio MCPs perform interactive OAuth on first
+   * launch and may open a browser tab BEHIND Obsidian. Fired only for
+   * user-triggered actions (server add/edit save, manual enable toggle) — not
+   * for automatic reconciles or plugin-startup reconnects, which are noisy.
+   * Tracks fired serverIds so a user rapidly toggling off/on doesn't get
+   * spammed within a session.
+   */
+  private notifyStdioStartupIfNew(config: Pick<McpServerConfig, "id" | "name" | "transport">): void {
+    if (config.transport !== "stdio") return;
+    if (this.stdioStartupNoticeShown.has(config.id)) return;
+    this.stdioStartupNoticeShown.add(config.id);
+    this.notify(
+      `Starting MCP server "${config.name}". If this is a first-time launch, ` +
+        "a browser tab may open for authentication — please check for a tab behind Obsidian. " +
+        "After authorizing (or if no browser tab appears), start a fresh chat so tools become available.",
+    );
   }
 
   private noticeError(err: unknown): void {
