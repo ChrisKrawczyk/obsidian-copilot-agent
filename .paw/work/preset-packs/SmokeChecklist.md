@@ -172,12 +172,40 @@ delay.
 
 ## SC-005 — Private-pack end-to-end smoke
 
-Recorded out-of-band.
+Recorded during Phase 5/8/9 smoke run (2026-07-01, plugin SHA `833a1ba` on
+`feature/preset-packs`):
+
+- Imported `agency-mail.pack.json` (Microsoft Graph MCP server via
+  `agency-proxy`, stdio transport, first-run interactive OAuth).
+- Sticky Notice fired: `Starting MCP server "agency-mail"...` explaining
+  the auth flow and to check for a browser tab behind Obsidian (Phase 8).
+- After startup, invoked `SearchMessagesQueryParameters` with a safe
+  future-date filter; server returned an empty result set correctly.
+- Invoked with a deliberately malformed filter (`?$filter=NotARealField
+  eq 'x'`); tool call chip rendered a **red "errored"** pill with the
+  Graph rejection text (`Could not find a property named 'NotARealField'
+  on type 'microsoft.graph.message'`) in the expanded body "Error"
+  section, and the assistant reasoned over the error message correctly
+  (Phase 8 return-as-content + Phase 8c reclassification).
+- Reloaded Obsidian, reopened the same conversation, re-issued the
+  deliberate error query. Tool call succeeded (same error surfaced),
+  confirming the Phase 9 MCP readiness gate preserved the tool
+  inventory in the rehydrated SDK session without requiring a new
+  conversation.
+- Imported `agency-calendar.pack.json` after `agency-mail` was already
+  running. Prompted to start a new conversation to see the new tools;
+  after switching, composer accepted typing immediately (Phase 8b focus
+  fix + Phase 9 readiness gate).
+
+Also validated during the same run:
+- All 13 private M365 agency packs from `obsidian-copilot-presets-internal`
+  populate under **My private packs** with sub-second dropdown-render.
+- Enable/disable/remove of imported servers is idempotent.
 
 ## Sign-off
 
 - [ ] All public SCs above pass.
 - [ ] Settings-performance NFR measured and within budget.
-- [ ] Private-pack smoke (SC-005) recorded out-of-band.
+- [x] Private-pack smoke (SC-005) recorded above.
 
-Tester: __________________  Date: __________  Plugin SHA: ____________
+Tester: chkraw            Date: 2026-07-01  Plugin SHA: 833a1ba

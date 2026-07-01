@@ -808,3 +808,58 @@ Baseline: 1495 tests. New tests: +3 (McpToolBridge empty-content, stdio startup 
 - Persistent stderr log files with rotation → proposal 0008.
 - Structured tool-error rendering in chat UI (e.g. red-tinted tool output for isError content) → future UI polish.
 - Pattern-matched detection of stderr auth prompts and richer surfacing → too brittle across MCP servers; startup notice + in-memory stderr in error notices covers 90% of value.
+
+
+## Phase 8b: Composer auto-focus after conversation switch (smoke-test follow-up)
+
+**Origin:** Smoke testing on Phase 8 build. After importing a new pack MCP (agency-calendar), user was prompted to start a new conversation to see the tools; on switching, the composer textarea was un-selectable — a click on the Send button restored focus, at which point typing worked. Symptom of a focus race after the manager subscription re-rendered the conversation state without restoring focus to the input element.
+
+### Changes Required
+
+- **`src\ui\ChatView.ts`** — In the manager subscription handler, when the bound conversation id changes (i.e. we just switched active conversation or created a new one), queue a `queueMicrotask` focus of the composer textarea, guarded on `!this.inputEl.disabled` so we do not steal focus from a legitimately-gated control (auth non-connected, busy setBusy).
+
+### Test Impact
+
+No new tests added (headless environment cannot reliably assert DOM focus timing). Manual validation via smoke test.
+
+### Retro Note
+
+Phase 9 (MCP readiness gate) later revealed that some of the "un-selectable input" reports were actually the SDK session waiting on a tool snapshot it could not yet complete. Phase 8b remains as defense-in-depth against pure DOM focus races after a manager re-render, but the primary UX regression is fixed by Phase 9.
+
+
+## Phase 8c: MCP error reclassification for tool-call chip status
+
+**Origin:** Phase 8's return-as-content pattern surfaced error text in chat body successfully, but the tool-call chip status pill rendered green "completed" for calls that had actually failed. The SDK sees a successful string return value and marks the call `success: true`; the chip renderer reads that flag verbatim.
+
+### Changes Required
+
+- **`src\sdk\AgentSession.ts`** — In the `tool.execution_complete` event handler, after the initial success/cancelled/errored triage, detect the McpToolBridge sentinel prefixes (`Error: MCP tool reported error:` / `Error: MCP JSON-RPC error:`) on MCP-source calls that came in as "completed". Reclassify: outcome → errored, resultContent → errorMessage, resultContent cleared. Chip pill turns red, body renders the "Error" section.
+- **`src\sdk\AgentSession.test.ts`** — Two new tests: reclassification path fires for MCP source, and does NOT fire for custom-source tools that legitimately return text starting with `Error:`.
+- **`src\settings\McpServersSection.ts`** — Small follow-up on Phase 8 startup notice: promote to sticky `new Notice(msg, 0)` so users can read the two-sentence diagnostic in production; test-injected notify path unchanged.
+
+### Test Impact
+
+Baseline: 1498. New tests: +2. New total: 1500, all passing.
+
+
+## Phase 9: MCP readiness gate before SDK session creation
+
+**Origin:** Reload-with-existing-conversation smoke test. After Obsidian reload, existing conversations could not call any MCP tool until the user created a new conversation. Root cause discovered via reader review of `AgentSession.toolsForSession()`: the Copilot SDK freezes `tools[]` at `createSession()` time and provides no `updateTools()` API (verified in `node_modules\@github\copilot-sdk\dist\session.d.ts`). On plugin reload, `init()` fires lazily on first user message; if enabled stdio MCP servers are still spawning their child processes, their tools are missing from the snapshot and stay missing for the life of that session.
+
+### Changes Required
+
+- **`src\mcp\McpManager.ts`** — Add `waitUntilEnabledReady(timeoutMs)` method. Subscribes to the existing status-change stream via `subscribe()`. Treats `connected` / `error` / `crashloop` / `disabled` as terminal; `connecting` / `reconnecting` block resolution. Servers whose runtime does not yet exist (getOrCreate not yet fired) also count as non-terminal so early init does not race the lifecycle enable() call. Never rejects — on timeout, resolves anyway.
+- **`src\sdk\AgentSession.ts`** — Add optional `mcpReadinessGate?: () => Promise<void>` option and private `awaitMcpReadinessGate()` helper (swallows throws). Called at all three `createSession()` sites: normal `init()` path, `resetConversation()`, and deferred-catalog recovery.
+- **`src\main.ts`** — Wire `mcpReadinessGate: () => mcpManager.waitUntilEnabledReady(15_000)` into the AgentSession construction inside `runtimeFactory`. 15s ceiling generous for stdio auth flows but bounded.
+- **`src\mcp\McpManager.test.ts`** — 4 new tests: empty-servers immediate resolve, servers becoming ready mid-wait resolves the gate, hanging servers time out gracefully, HTTP servers in `error` state count as terminal.
+- **`src\sdk\AgentSession.test.ts`** — 2 new tests: gate awaited before createSession, gate that throws does not wedge init.
+
+### Test Impact
+
+Baseline: 1500. New tests: +6. New total: 1506, all passing.
+
+### Deferred / Out of Scope
+
+- SDK-level `updateTools()` support to remove the need for the gate entirely — depends on upstream SDK.
+- Session-level warning banner when a specific enabled MCP server errored out during startup, telling the user which tools are unavailable in that session — future UI polish.
+
