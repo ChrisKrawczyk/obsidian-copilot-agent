@@ -625,6 +625,14 @@ export default class CopilotAgentPlugin extends Plugin {
         tools: vaultTools,
         mcpTools: () =>
           createMcpSdkTools(mcpSnapshot(), { manager: mcpManager }) as unknown as import("./sdk/AgentSession").SdkTool[],
+        // Phase 9: block createSession until enabled MCP servers reach a
+        // terminal runtime status so their tools are in the frozen tool
+        // snapshot passed to the SDK. Without this gate, plugin-reload
+        // races with MCP stdio child spawn produce sessions that can
+        // never call any MCP tool. 15s is generous for stdio auth flows;
+        // the gate never rejects, so a slow server just degrades to a
+        // partial tool list rather than hanging the agent.
+        mcpReadinessGate: () => mcpManager.waitUntilEnabledReady(15_000),
         safety: {
           config: () => {
             const snap = safetySettingsStore.snapshot();

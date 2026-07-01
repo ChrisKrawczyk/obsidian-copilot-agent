@@ -1066,6 +1066,69 @@ describe("CopilotAgentSession", () => {
     await agent.dispose();
   });
 
+  test("Phase 9: init awaits mcpReadinessGate before creating SDK session", async () => {
+    // The plugin passes McpManager.waitUntilEnabledReady() as this
+    // callback so stdio MCP servers finish spawning before the tool
+    // snapshot is frozen into the SDK session.
+    const h = makeFakeSdk();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    let gateAwaitedBeforeCreateSession = false;
+    let sessionCreated = false;
+    const originalCreateSession = h.client.createSession;
+    h.client.createSession = async (opts) => {
+      sessionCreated = true;
+      return originalCreateSession(opts);
+    };
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => {
+          gateAwaitedBeforeCreateSession = !sessionCreated;
+          await gate;
+        },
+      },
+      async () => h.sdk,
+    );
+    const initP = agent.init();
+    // Yield the event loop so init() reaches the gate. createSession
+    // must not have fired yet.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sessionCreated).toBe(false);
+    resolveGate();
+    await initP;
+    expect(sessionCreated).toBe(true);
+    expect(gateAwaitedBeforeCreateSession).toBe(true);
+    await agent.dispose();
+  });
+
+  test("Phase 9: mcpReadinessGate that throws does NOT wedge init", async () => {
+    // The gate should be best-effort: a broken gate must not block
+    // session creation forever.
+    const h = makeFakeSdk();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => {
+          throw new Error("gate crashed");
+        },
+      },
+      async () => h.sdk,
+    );
+    await expect(agent.init()).resolves.toBeUndefined();
+    await agent.dispose();
+  });
+
   test("denied permission request emits live tool_call_start + tool_call_complete during streaming", async () => {
     const h = makeFakeSdk();
     h.session.on = () => () => {};

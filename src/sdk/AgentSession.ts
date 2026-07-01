@@ -131,6 +131,25 @@ export interface AgentSessionOptions {
   /** MCP custom-tool snapshot producer. Read only at SDK session boundaries. */
   mcpTools?: () => readonly SdkTool[] | McpToolRegistrySnapshot | undefined;
   /**
+   * Phase 9 (MCP readiness gate): optional promise-returning callback
+   * awaited once inside `init()` before `client.createSession()` fires.
+   * Lets the plugin block session creation until enabled MCP servers
+   * have reached a terminal runtime status (connected / error / etc)
+   * so their tools are present in the `toolsForSession()` snapshot.
+   *
+   * Without this gate, on plugin reload the SDK session is created with
+   * an empty MCP tool list because stdio child processes are still
+   * spawning; the tool list is frozen for the lifetime of that session
+   * (there is no `updateTools()` API in the SDK). The user then can't
+   * call any MCP tool from that conversation until they start a new
+   * one, which is a surprising UX regression.
+   *
+   * The callback should never reject — failures inside it are swallowed
+   * so a broken gate can't wedge session init. It should also enforce
+   * its own timeout: `init()` awaits it verbatim.
+   */
+  mcpReadinessGate?: () => Promise<void>;
+  /**
    * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
    * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
    * init() and on each `resetConversation()`). Its return value is
@@ -1121,6 +1140,25 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   /**
+   * Phase 9 (MCP readiness gate): awaits the injected `mcpReadinessGate`
+   * callback exactly once per SDK session creation. Swallows throws so a
+   * broken gate can't wedge session init. Called at every createSession
+   * site so `resetConversation` and deferred-catalog recovery also
+   * benefit from the up-to-date MCP inventory.
+   *
+   * The gate itself owns its timeout (see `McpManager.waitUntilEnabledReady`).
+   */
+  private async awaitMcpReadinessGate(): Promise<void> {
+    const gate = this.opts.mcpReadinessGate;
+    if (!gate) return;
+    try {
+      await gate();
+    } catch (e) {
+      console.warn("[AgentSession] mcpReadinessGate threw; proceeding without wait", e);
+    }
+  }
+
+  /**
    * Test probe — returns the text most recently handed to
    * `session.sendAndWait` for the first send and the most recent
    * follow-up send. Lets unit tests assert preamble injection without
@@ -1155,6 +1193,7 @@ export class CopilotAgentSession implements AgentSession {
     if (!this.selectedModel) {
       this.selectedModel = await this.pickModel(this.client, this.preferredModelOverride ?? this.opts.preferredModel);
     }
+    await this.awaitMcpReadinessGate();
     const fresh = await this.client.createSession({
       model: this.selectedModel,
       availableTools: ["builtin:*", "custom:*", "mcp:*"],
@@ -1339,6 +1378,7 @@ export class CopilotAgentSession implements AgentSession {
       await bailIfStale();
       this.selectedModel = model;
 
+      await this.awaitMcpReadinessGate();
       const session = await client.createSession({
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
@@ -1410,6 +1450,7 @@ export class CopilotAgentSession implements AgentSession {
     if (this.disposed || this.initEpoch !== epoch) return;
     let session: SdkSession;
     try {
+      await this.awaitMcpReadinessGate();
       session = await client.createSession({
         model,
         availableTools: ["builtin:*", "custom:*", "mcp:*"],
