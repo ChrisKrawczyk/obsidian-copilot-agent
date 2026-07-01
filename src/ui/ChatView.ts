@@ -467,6 +467,17 @@ export class ChatView extends ItemView {
           this.unsubState?.();
           this.unsubState = this.state.subscribe(() => this.syncList());
           this.syncList();
+          // Phase 8b: after switching or creating a conversation the
+          // ConversationPicker retains keyboard focus (it was just
+          // clicked), so typing goes nowhere until the user clicks
+          // into the composer. Explicitly re-focus the textarea so a
+          // fresh conversation is immediately usable. Queue via
+          // microtask so any pending DOM/render work settles first.
+          // Skip if the input is disabled — auth-gated or mid-send —
+          // to avoid stealing focus from a disabled control.
+          queueMicrotask(() => {
+            if (!this.inputEl.disabled) this.inputEl.focus();
+          });
         }
       }
       if (ev.kind === "auto-archived") {
