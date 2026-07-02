@@ -98,7 +98,7 @@ server scenarios documented in Spec.md P1/P2/P3.
 ## Phase Status
 
 - [x] **Phase 1: MCP status watcher (pure module)** — Depends on: nothing. Coalescing, per-server debounce, subscribe/unsubscribe surface for Phase 2 and Phase 3 to consume.
-- [ ] **Phase 2: Readiness indicator in ChatView** — Depends on: Phase 1. Inline pill, fast-path guard, gate-lifecycle state machine, event bridge from `AgentSession` to `ChatView`.
+- [x] **Phase 2: Readiness indicator in ChatView** — Depends on: Phase 1. Inline pill, fast-path guard, gate-lifecycle state machine, event bridge from `AgentSession` to `ChatView`.
 - [ ] **Phase 3: Plugin refresh flow with SDK-feature-detect fallback** — Depends on: Phase 1. Broadcast to all live runtimes, turn-boundary queueing (last-write-wins), Notice toast, strict no-op path.
 - [ ] **Phase 4: Upstream SDK contribution** — Depends on: nothing in this repo (external). PR to `github/copilot-sdk` adding a live tool-list update primitive plus docs.
 - [ ] **Phase 5: SDK adoption in plugin** — Depends on: Phase 4 published to npm. Bump `@github/copilot-sdk`, wire the real primitive in the refresh method, remove the no-op branch (or leave it behind a version guard).

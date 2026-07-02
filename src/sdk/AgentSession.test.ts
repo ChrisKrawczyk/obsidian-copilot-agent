@@ -1129,6 +1129,165 @@ describe("CopilotAgentSession", () => {
     await agent.dispose();
   });
 
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent fires start then resolved once per init", async () => {
+    const h = makeFakeSdk();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: () => gate,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    const initP = agent.init();
+    // Yield so the gate is awaited and `start` fires.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual(["start"]);
+    expect(agent.isReadinessGateWaiting()).toBe(true);
+    resolveGate();
+    await initP;
+    expect(events).toEqual(["start", "resolved"]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent always emits resolved even when gate throws", async () => {
+    const h = makeFakeSdk();
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => {
+          throw new Error("gate crashed");
+        },
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(events).toEqual(["start", "resolved"]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: isReadinessGateWaiting is false before init and after dispose", async () => {
+    const h = makeFakeSdk();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+      },
+      async () => h.sdk,
+    );
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.init();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent listener that throws does not wedge gate", async () => {
+    // Regression: a bad listener must not stall the gate. The
+    // internal emit helper swallows listener throws.
+    const h = makeFakeSdk();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: () => {
+          throw new Error("bad listener");
+        },
+      },
+      async () => h.sdk,
+    );
+    await expect(agent.init()).resolves.toBeUndefined();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent fires start/resolved on each resetConversation", async () => {
+    // Every gate-awaiting entry point (init, resetConversation, and
+    // the deferred-catalog recovery in send) must emit its own
+    // start/resolved pair. This test covers the resetConversation
+    // path so the pill flips again when the user clears the
+    // conversation and a fresh createSession runs.
+    const h = makeFakeSdk();
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(events).toEqual(["start", "resolved"]);
+    events.length = 0;
+    await agent.resetConversation();
+    expect(events).toEqual(["start", "resolved"]);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: dispose clears isReadinessGateWaiting even if gate is still parked", async () => {
+    // Plan requirement (§isReadinessGateWaiting): the flag must
+    // read false after dispose returns, even if an
+    // awaitMcpReadinessGate was still awaiting its inner promise
+    // when dispose was invoked. Otherwise a late-bound ChatView
+    // calling the getter after dispose would render a phantom pill.
+    const h = makeFakeSdk();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: () => gate,
+      },
+      async () => h.sdk,
+    );
+    const initP = agent.init();
+    // Yield so the gate is entered and the flag flips to true.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(agent.isReadinessGateWaiting()).toBe(true);
+    // Kick off dispose. It will race-with-timeout the initPromise;
+    // resolve the gate concurrently so initPromise settles quickly.
+    const disposeP = agent.dispose();
+    resolveGate();
+    await Promise.all([disposeP, initP.catch(() => undefined)]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+  });
+
   test("denied permission request emits live tool_call_start + tool_call_complete during streaming", async () => {
     const h = makeFakeSdk();
     h.session.on = () => () => {};
@@ -2227,6 +2386,57 @@ describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
     h.setSendResponse({ data: { content: "hello" } });
     const reply = await agent.sendMessage("ping");
     expect(reply.content).toBe("hello");
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: tryRecoverDeferred emits start/resolved when catalog transitions to ready", async () => {
+    // Deferred-init flow (`ImplementationPlan.md:297-304`): init()
+    // returns without calling the gate (createSession is deferred
+    // because catalog is non-ready). Later, when the catalog
+    // recovers, `tryRecoverDeferred` fires — and IT calls the gate.
+    // The pill must therefore see start/resolved on this path too,
+    // not only on init/resetConversation.
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    let catalogModelsFn: () => Promise<Array<{ id: string }>> = async () => {
+      throw new Error("catalog down");
+    };
+    const catalogClient = {
+      createSession: () => Promise.reject(new Error("x")),
+      listModels: () => catalogModelsFn(),
+    } as unknown as SdkClient;
+    const catalog = new ModelCatalog(() => catalogClient);
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        catalog,
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    // Init deferred — gate NOT called yet.
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(events).toEqual([]);
+    // Catalog recovers → tryRecoverDeferred fires → gate is called.
+    catalogModelsFn = async () => [{ id: "gpt-4o" }];
+    await catalog.refresh();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(agent.hasDeferredSession()).toBe(false);
+    // start/resolved must have fired exactly once during recovery.
+    expect(events).toEqual(["start", "resolved"]);
     await agent.dispose();
   });
 

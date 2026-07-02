@@ -150,6 +150,18 @@ export interface AgentSessionOptions {
    */
   mcpReadinessGate?: () => Promise<void>;
   /**
+   * Phase 2 (MCP Readiness UX): callback invoked at the boundaries of
+   * every `awaitMcpReadinessGate()` cycle. Fires `start` immediately
+   * before awaiting the gate and `resolved` after the gate promise
+   * fulfills (both the "all connected" and the "timed out" outcomes
+   * surface as `resolved` — `McpManager.waitUntilEnabledReady` already
+   * encapsulates the ceiling and resolves silently in either case).
+   *
+   * The callback should never reject — failures inside it are logged
+   * and swallowed so a broken listener can't wedge session init.
+   */
+  onReadinessGateEvent?: (evt: "start" | "resolved") => void;
+  /**
    * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
    * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
    * init() and on each `resetConversation()`). Its return value is
@@ -304,6 +316,13 @@ export interface AgentSession {
    */
   swapModel(newModelId: string): Promise<void>;
   /**
+   * Phase 2 (MCP Readiness UX): synchronous read of readiness-gate
+   * state. Returns `true` while an `awaitMcpReadinessGate()` cycle
+   * is in flight, `false` otherwise. Used by `ChatView.bindActiveRuntime`
+   * to seed the readiness pill on late binds (planning-docs review S2).
+   */
+  isReadinessGateWaiting(): boolean;
+  /**
    * Phase 6: resolve a pending approval prompt with the user's choice.
    * Called by the chat view when the user clicks an approval button.
    * No-op if no approval is pending for this tool-call id (e.g. the
@@ -393,6 +412,12 @@ export class CopilotAgentSession implements AgentSession {
   private client: SdkClient | null = null;
   private session: SdkSession | null = null;
   private selectedModel: string | undefined;
+  /**
+   * Phase 2 (MCP Readiness UX): `true` while `awaitMcpReadinessGate()`
+   * is in flight. Exposed via `isReadinessGateWaiting()` so ChatView
+   * can seed the readiness pill on late binds (planning-docs review S2).
+   */
+  private readinessGateWaiting = false;
   /**
    * v0.4 FR-005: per-instance override of `opts.preferredModel`. Set by
    * `swapModel()` (mid-life model change) so that subsequent
@@ -1147,15 +1172,48 @@ export class CopilotAgentSession implements AgentSession {
    * benefit from the up-to-date MCP inventory.
    *
    * The gate itself owns its timeout (see `McpManager.waitUntilEnabledReady`).
+   *
+   * Phase 2 (MCP Readiness UX) additions:
+   *  - Emits `start`/`resolved` via `opts.onReadinessGateEvent` so the
+   *    UI can render/hide a "Preparing MCP tools…" pill.
+   *  - Sets `readinessGateWaiting = true` for the duration of the wait
+   *    so `isReadinessGateWaiting()` reflects reality synchronously
+   *    (used by ChatView.bindActiveRuntime on conversation switch).
    */
   private async awaitMcpReadinessGate(): Promise<void> {
     const gate = this.opts.mcpReadinessGate;
     if (!gate) return;
+    this.readinessGateWaiting = true;
+    this.emitReadinessGateEvent("start");
     try {
       await gate();
     } catch (e) {
       console.warn("[AgentSession] mcpReadinessGate threw; proceeding without wait", e);
+    } finally {
+      this.readinessGateWaiting = false;
+      this.emitReadinessGateEvent("resolved");
     }
+  }
+
+  private emitReadinessGateEvent(kind: "start" | "resolved"): void {
+    const cb = this.opts.onReadinessGateEvent;
+    if (!cb) return;
+    try {
+      cb(kind);
+    } catch (e) {
+      console.warn("[AgentSession] onReadinessGateEvent listener threw", e);
+    }
+  }
+
+  /**
+   * Returns `true` while an `awaitMcpReadinessGate()` cycle is in
+   * flight. ChatView reads this synchronously on
+   * `bindActiveRuntime()` to seed the readiness pill when activating
+   * a conversation whose gate is already in progress — bus `start`
+   * events would otherwise have been missed by late-bound observers.
+   */
+  isReadinessGateWaiting(): boolean {
+    return this.readinessGateWaiting;
   }
 
   /**
@@ -1209,6 +1267,16 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // MCP Readiness UX Phase 2: clear the readiness-gate flag on
+    // dispose so `isReadinessGateWaiting()` reflects the disposed
+    // state truthfully even if an in-flight `awaitMcpReadinessGate`
+    // is still parked in its `await`. The awaiting doInit() will
+    // observe `disposed = true` immediately after and bail without
+    // creating a session, so the finally-block still emits
+    // `resolved` and resets the flag — but doing it here too makes
+    // the observable state consistent from the moment dispose
+    // returns, per plan Phase 2 spec §isReadinessGateWaiting.
+    this.readinessGateWaiting = false;
     if (this.unsubCatalog) {
       try {
         this.unsubCatalog();
