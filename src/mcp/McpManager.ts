@@ -1,4 +1,5 @@
 import type {
+  McpRuntimeStatus,
   McpServerConfig,
   McpServerId,
   McpServerRuntimeSnapshot,
@@ -235,6 +236,80 @@ export class McpManager {
         inventory.tools.map((tool) => Object.freeze({ ...tool })),
       ),
     );
+  }
+
+  /**
+   * Phase 9 (MCP readiness gate): resolves when every currently-enabled
+   * MCP server has reached a terminal runtime status — `connected`,
+   * `error`, `crashloop`, or `disabled`. `connecting` and `reconnecting`
+   * are transient and block resolution until they settle.
+   *
+   * Used by `CopilotAgentSession.init()` to delay `client.createSession()`
+   * until MCP tool inventories are populated for enabled servers. Without
+   * this gate, on plugin reload the SDK session is created with an empty
+   * MCP tool list because stdio child processes are still spawning; the
+   * tool list is then frozen for the lifetime of that session (there is
+   * no `updateTools()` API in the current SDK version).
+   *
+   * Semantics:
+   *  - Servers whose runtime does not yet exist (getOrCreate hasn't fired
+   *    for them yet) are treated as "not ready", so we wait for the
+   *    lifecycle to have at least attempted them.
+   *  - `error` / `crashloop` are terminal for this gate: a broken server
+   *    should not block the whole session forever. The user will still
+   *    see the error in settings; missing tools from that specific server
+   *    are the acceptable outcome.
+   *  - On timeout, resolves with whatever tools are ready. Degrading
+   *    gracefully is better than hanging the agent.
+   *  - If no servers are enabled, resolves immediately.
+   *
+   * Never rejects.
+   */
+  async waitUntilEnabledReady(timeoutMs: number): Promise<void> {
+    const isTerminal = (status: McpRuntimeStatus): boolean =>
+      status === "connected" ||
+      status === "error" ||
+      status === "crashloop" ||
+      status === "disabled";
+    const enabledIds = (): Set<McpServerId> =>
+      new Set(
+        this.options
+          .serversProvider()
+          .filter((c) => c.enabled)
+          .map((c) => c.id),
+      );
+    const allReady = (): boolean => {
+      const ids = enabledIds();
+      if (ids.size === 0) return true;
+      const statusById = new Map(
+        this.statusSnapshot().map((s) => [s.id, s.status] as const),
+      );
+      for (const id of ids) {
+        const status = statusById.get(id);
+        if (!status) return false; // runtime not yet created
+        if (!isTerminal(status)) return false;
+      }
+      return true;
+    };
+    if (allReady()) return;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        try {
+          unsub();
+        } catch {
+          /* ignore */
+        }
+        clearTimeout(timer);
+        resolve();
+      };
+      const unsub = this.subscribe(() => {
+        if (allReady()) finish();
+      });
+      const timer = setTimeout(finish, Math.max(0, timeoutMs));
+    });
   }
 
   async callTool(serverId: McpServerId, toolName: string, args: Record<string, unknown>, options: { signal?: AbortSignal } = {}): Promise<unknown> {

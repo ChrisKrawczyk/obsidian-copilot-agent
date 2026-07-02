@@ -304,4 +304,39 @@ describe("McpServersSection", () => {
     const ctx = await mount([http()], [{ id: normalizeServerId("http"), status: "reconnecting", toolCount: 0 }]);
     expect(ctx.root.byText("↻ reconnecting")).toBeTruthy();
   });
+
+  test("stdio startup Notice fires once per session on user-initiated enable", async () => {
+    // Phase 8: warn users that stdio MCP servers may open a browser tab behind
+    // Obsidian for first-run interactive OAuth. Fires exactly once per server
+    // per session — repeated toggles do not re-notify.
+    const ctx = await mount();
+    ctx.root.byAria("Add MCP server").click();
+    ctx.root.byAria("Server ID").value = "stdio-svc";
+    ctx.root.byAria("Display name").value = "Stdio Service";
+    ctx.root.byAria("Command").value = "node";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    const startupNotices = ctx.notices.filter((n) => n.includes("Starting MCP server"));
+    expect(startupNotices).toHaveLength(1);
+    expect(startupNotices[0]).toContain("browser tab may open");
+    expect(startupNotices[0]).toContain("Stdio Service");
+    // Disable then re-enable — must NOT re-notify (avoid spam on toggles).
+    ctx.root.byAria("Disable Stdio Service").click();
+    await flush();
+    ctx.root.byAria("Enable Stdio Service").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n.includes("Starting MCP server"))).toHaveLength(1);
+  });
+
+  test("stdio startup Notice does not fire for HTTP servers", async () => {
+    const ctx = await mount();
+    ctx.root.byAria("Add MCP server").click();
+    ctx.root.byAria("Server ID").value = "http-svc";
+    ctx.root.byAria("Display name").value = "Http Service";
+    ctx.root.byAria("Transport").value = "http";
+    ctx.root.byAria("URL").value = "https://example.com/mcp";
+    ctx.root.byAria("Save MCP server").click();
+    await flush();
+    expect(ctx.notices.filter((n) => n.includes("Starting MCP server"))).toHaveLength(0);
+  });
 });

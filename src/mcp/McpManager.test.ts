@@ -106,6 +106,91 @@ describe("McpManager", () => {
     await manager.manualReconnect(server.id);
     expect(seen).toEqual(["node", "python"]);
   });
+
+  describe("waitUntilEnabledReady (Phase 9)", () => {
+    test("resolves immediately when no servers are enabled", async () => {
+      const manager = new McpManager({
+        vaultRoot: "C:\\vault",
+        serversProvider: () => [],
+        runtimeFactory: () => fakeRuntime(config("x"), []),
+      });
+      await expect(manager.waitUntilEnabledReady(1000)).resolves.toBeUndefined();
+    });
+
+    test("resolves after all enabled servers reach terminal status", async () => {
+      const server = config("s1");
+      const manager = new McpManager({
+        vaultRoot: "C:\\vault",
+        serversProvider: () => [server],
+        runtimeFactory: () => fakeRuntime(server, [tool(server, "a")]),
+      });
+      // Not-yet-enabled: no runtime exists, so gate should not resolve.
+      const started = manager.waitUntilEnabledReady(5000);
+      let resolved = false;
+      void started.then(() => {
+        resolved = true;
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(resolved).toBe(false);
+      // Enabling causes runtime creation + connect() success → status
+      // becomes "connected" (terminal). Gate should resolve.
+      await manager.enable(server.id);
+      await started;
+      expect(resolved).toBe(true);
+    });
+
+    test("resolves after timeout even if a server never becomes ready", async () => {
+      const server = config("slow");
+      // Runtime that hangs on connect: gate falls back to timeout.
+      const hangingRuntime = () =>
+        ({
+          connect: () => new Promise(() => undefined),
+          reconnect: () => new Promise(() => undefined),
+          snapshot: () => ({ id: server.id, status: "connecting", toolCount: 0 }),
+          disable: async () => undefined,
+          unload: async () => undefined,
+        }) as never;
+      const manager = new McpManager({
+        vaultRoot: "C:\\vault",
+        serversProvider: () => [server],
+        runtimeFactory: hangingRuntime,
+      });
+      // Kick off enable in the background (never resolves).
+      void manager.enable(server.id).catch(() => undefined);
+      const t0 = Date.now();
+      await manager.waitUntilEnabledReady(100);
+      const elapsed = Date.now() - t0;
+      expect(elapsed).toBeGreaterThanOrEqual(90);
+      expect(elapsed).toBeLessThan(500);
+    });
+
+    test("error status counts as terminal (broken server doesn't block gate)", async () => {
+      // Use HTTP transport so `enableInternal` does not push the
+      // reconnect policy into "reconnecting" on failure (that override
+      // would mask the "error" snapshot in statusSnapshot()).
+      const server = httpConfig("https://example.invalid");
+      const failingRuntime = () =>
+        ({
+          connect: async () => {
+            throw new Error("boom");
+          },
+          reconnect: async () => {
+            throw new Error("boom");
+          },
+          snapshot: () => ({ id: server.id, status: "error", toolCount: 0 }),
+          disable: async () => undefined,
+          unload: async () => undefined,
+          clearVolatileSession: () => undefined,
+        }) as never;
+      const manager = new McpManager({
+        vaultRoot: "C:\\vault",
+        serversProvider: () => [server],
+        runtimeFactory: failingRuntime,
+      });
+      await manager.enable(server.id).catch(() => undefined);
+      await expect(manager.waitUntilEnabledReady(5000)).resolves.toBeUndefined();
+    });
+  });
 });
 
 function config(id: string): McpServerConfig {

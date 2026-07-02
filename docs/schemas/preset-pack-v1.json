@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ChrisKrawczyk/obsidian-copilot-agent/schemas/preset-pack-v1.json",
+  "title": "Obsidian Copilot Agent preset pack v1",
+  "description": "Editor-assistance schema for preset pack JSON. Plugin import/export still uses the runtime validator.",
+  "$comment": "Validator/parser-only rules: strict JSON is required; JSONC comments are rejected; a leading UTF-8 BOM is stripped before parse; files over 1 MB are rejected and files over 100 KB show a warning; duplicate preset ids are rejected; HTTP URL scheme/host classification, including loopback/private-network and metadata-host handling, is enforced by runtime code; control-character checks are mirrored with a broad pattern where practical.",
+  "type": "object",
+  "required": ["schemaVersion", "id", "label", "version", "presets"],
+  "additionalProperties": true,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor hint; ignored by the plugin runtime validator."
+    },
+    "schemaVersion": { "const": 1 },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "const": "builtin" },
+      "description": "Pack id. The runtime validator requires a non-empty string and reserves builtin; slug-like ids are recommended."
+    },
+    "label": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "presets": {
+      "type": "array",
+      "minItems": 1,
+      "$comment": "Duplicate preset ids are rejected by the runtime validator; draft-07 cannot express unique-by-property without custom keywords.",
+      "items": { "$ref": "#/definitions/preset" }
+    }
+  },
+  "definitions": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "noControlString": {
+      "type": "string",
+      "pattern": "^[^\\u0000-\\u001F\\u007F]*$",
+      "$comment": "Runtime uses the shared control-character guard."
+    },
+    "stringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "preset": {
+      "type": "object",
+      "required": ["id", "label", "server", "credentials"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "description": "Preset id; runtime matching is case-insensitive for this character class."
+        },
+        "label": { "$ref": "#/definitions/nonEmptyString" },
+        "description": { "type": "string" },
+        "server": { "$ref": "#/definitions/server" },
+        "credentials": { "$ref": "#/definitions/credentials" },
+        "preflight": { "$ref": "#/definitions/preflight" }
+      }
+    },
+    "server": {
+      "oneOf": [
+        { "$ref": "#/definitions/httpServer" },
+        { "$ref": "#/definitions/stdioServer" }
+      ]
+    },
+    "httpServer": {
+      "type": "object",
+      "required": ["name", "transport", "url"],
+      "additionalProperties": true,
+      "$comment": "Runtime validates URL syntax, scheme, metadata hosts, loopback, and private-network policy with validateMcpHttpUrl(..., { allowPrivateNetwork: true }).",
+      "properties": {
+        "name": {
+          "allOf": [
+            { "$ref": "#/definitions/nonEmptyString" },
+            { "$ref": "#/definitions/noControlString" }
+          ]
+        },
+        "transport": { "const": "http" },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime validates HTTPS/public-host and loopback/private-network policy."
+        }
+      }
+    },
+    "stdioServer": {
+      "type": "object",
+      "required": ["name", "transport", "command"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "allOf": [
+            { "$ref": "#/definitions/nonEmptyString" },
+            { "$ref": "#/definitions/noControlString" }
+          ]
+        },
+        "transport": { "const": "stdio" },
+        "command": {
+          "allOf": [
+            { "$ref": "#/definitions/nonEmptyString" },
+            { "$ref": "#/definitions/noControlString" }
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/noControlString" }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "$comment": "Runtime export templatizes denylisted env keys with __NEEDS_VALUE__; non-denylisted env values are preserved."
+        },
+        "cwd": { "type": "string" }
+      }
+    },
+    "credentials": {
+      "oneOf": [
+        { "$ref": "#/definitions/credentialsNone" },
+        { "$ref": "#/definitions/credentialsStaticBearer" },
+        { "$ref": "#/definitions/credentialsCommandBased" },
+        { "$ref": "#/definitions/credentialsOauthPkce" }
+      ]
+    },
+    "credentialsNone": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": { "kind": { "const": "none" } }
+    },
+    "credentialsStaticBearer": {
+      "type": "object",
+      "required": ["kind", "token"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "const": "static-bearer" },
+        "token": { "$ref": "#/definitions/nonEmptyString" }
+      }
+    },
+    "credentialsCommandBased": {
+      "type": "object",
+      "required": ["kind", "command"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "const": "command-based" },
+        "command": { "$ref": "#/definitions/nonEmptyString" },
+        "args": { "$ref": "#/definitions/stringArray" },
+        "tokenPath": { "type": "string" },
+        "expiryPath": { "type": "string" },
+        "refreshBufferSeconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "credentialsOauthPkce": {
+      "type": "object",
+      "required": ["kind", "authorizationEndpoint", "tokenEndpoint", "clientId", "scopes"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "const": "oauth-pkce" },
+        "authorizationEndpoint": { "type": "string" },
+        "tokenEndpoint": { "type": "string" },
+        "clientId": { "type": "string" },
+        "scopes": { "$ref": "#/definitions/stringArray" },
+        "tenantId": { "type": "string" },
+        "redirectUri": { "type": "string" },
+        "refreshTokenRef": { "type": "string" },
+        "pkceMethod": { "type": "string" }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "required": ["type", "command"],
+      "additionalProperties": true,
+      "properties": {
+        "type": { "const": "findOnPath" },
+        "command": { "$ref": "#/definitions/nonEmptyString" },
+        "installHint": { "type": "string" }
+      }
+    }
+  }
+}

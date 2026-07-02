@@ -36,6 +36,7 @@ import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
 import { McpSettingsStore } from "./settings/McpSettingsStore";
+import { PresetPacksStore } from "./settings/PresetPacksStore";
 import { McpManager } from "./mcp/McpManager";
 import { CredentialResolver } from "./mcp/credentials/CredentialResolver";
 import { SpawnCommandRunner } from "./mcp/credentials/SpawnCommandRunner";
@@ -109,6 +110,7 @@ export default class CopilotAgentPlugin extends Plugin {
    *  catalog. Safe to call multiple times; idempotent. */
   private disposeSharedSdkClient: (() => Promise<void>) | null = null;
   mcpSettingsStore: McpSettingsStore | null = null;
+  presetPacksStore: PresetPacksStore | null = null;
   mcpManager: McpManager | null = null;
   /** v0.6 Phase 2: most-recent BinaryFetcher failure, surfaced by the
    *  Settings tab's CliBinarySection so the user can see why startup
@@ -265,6 +267,11 @@ export default class CopilotAgentPlugin extends Plugin {
       saveData: (data) => this.saveData(data),
     });
     this.mcpSettingsStore = mcpSettingsStore;
+    const presetPacksStore = new PresetPacksStore({
+      loadData: () => this.loadData(),
+      saveData: (data) => this.saveData(data),
+    });
+    this.presetPacksStore = presetPacksStore;
 
     // v0.3 Phase 3: ConversationsStore. Owns its own top-level
     // `conversations`/`activeConversationId`/`schemaVersion` keys but
@@ -307,6 +314,11 @@ export default class CopilotAgentPlugin extends Plugin {
       await mcpSettingsStore.load();
     } catch (e) {
       console.error("[copilot-agent] MCP settings load failed", e);
+    }
+    try {
+      await presetPacksStore.load();
+    } catch (e) {
+      console.error("[copilot-agent] preset packs load failed", e);
     }
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;
@@ -613,6 +625,14 @@ export default class CopilotAgentPlugin extends Plugin {
         tools: vaultTools,
         mcpTools: () =>
           createMcpSdkTools(mcpSnapshot(), { manager: mcpManager }) as unknown as import("./sdk/AgentSession").SdkTool[],
+        // Phase 9: block createSession until enabled MCP servers reach a
+        // terminal runtime status so their tools are in the frozen tool
+        // snapshot passed to the SDK. Without this gate, plugin-reload
+        // races with MCP stdio child spawn produce sessions that can
+        // never call any MCP tool. 15s is generous for stdio auth flows;
+        // the gate never rejects, so a slow server just degrades to a
+        // partial tool list rather than hanging the agent.
+        mcpReadinessGate: () => mcpManager.waitUntilEnabledReady(15_000),
         safety: {
           config: () => {
             const snap = safetySettingsStore.snapshot();
@@ -894,6 +914,7 @@ export default class CopilotAgentPlugin extends Plugin {
         modelCatalog,
         mcpSettingsStore,
         mcpManager,
+        presetPacksStore,
       });
     }
 
@@ -960,6 +981,7 @@ export default class CopilotAgentPlugin extends Plugin {
     this.conversationsStore = null;
     this.disposeSharedSdkClient = null;
     this.mcpSettingsStore = null;
+    this.presetPacksStore = null;
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.

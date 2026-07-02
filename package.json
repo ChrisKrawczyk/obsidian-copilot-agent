@@ -10,6 +10,7 @@
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "schema:check": "node scripts/check-pack-schema.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs",
     "deploy:no-build": "node scripts/deploy.mjs",
     "version-bump": "tsx scripts/version-bump.mjs",

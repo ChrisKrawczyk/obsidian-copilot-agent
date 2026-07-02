@@ -1,8 +1,14 @@
 import { normalizeServerId } from "../mcp/McpIdentity";
 import type { McpServerConfig, McpServerId } from "../mcp/McpTypes";
 import { assertNoTlsBypassOptions, validateMcpHttpUrl, type HostClass } from "../mcp/httpPolicy";
-import { matchDenylist, type ExplicitDenylistOverrideWarning } from "../mcp/stdioEnv";
+import type { ExplicitDenylistOverrideWarning } from "../mcp/stdioEnv";
 import { redactSensitive } from "../mcp/redactSensitive";
+import {
+  collectDenylistWarnings as collectDenylistWarningsShared,
+  findTlsBypassKey as findTlsBypassKeyShared,
+  hasControlCharacter as hasControlCharacterShared,
+  parseArgsString,
+} from "./mcpServerFormLogic.shared";
 
 export const MCP_INITIALIZE_TIMEOUT_SECONDS = 10;
 export const MCP_TOOLS_LIST_PAGE_TIMEOUT_SECONDS = 10;
@@ -11,8 +17,6 @@ export const MCP_CALL_TIMEOUT_DEFAULT_SECONDS = 60;
 export const PRIVATE_NETWORK_CONFIRMATION_COPY = "This server is on a private network. Continue?";
 export const AUTHORIZATION_STORAGE_NOTICE =
   "Authorization headers are stored in plain text in data.json. If your vault is synced (Obsidian Sync, iCloud, Dropbox, etc.) this credential will sync too.";
-
-const TLS_BYPASS_KEYS = ["rejectUnauthorized", "insecure", "skipTls"] as const;
 
 export type McpCredentialKindUiSelection = "none" | "static-bearer" | "command-based";
 
@@ -39,9 +43,22 @@ export interface McpServerFormInput {
   credentialKind?: McpCredentialKindUiSelection;
   /** Phase 5: command-based variant fields. */
   credentialCommand?: string;
+  /** Phase 4 (preset packs / FR-020): structural args for command-based creds. */
+  credentialArgs?: string[];
   credentialTokenPath?: string;
   credentialExpiryPath?: string;
   credentialRefreshBufferSeconds?: number;
+  /**
+   * Phase 4 (preset packs / FR-020): form-field names that were sourced
+   * from an imported pack with templatized secret values. The validator
+   * fails the submit when any listed field is empty so the user is
+   * forced to supply the missing secret. Encoded as:
+   *   - "authorization"        — HTTP static-bearer token
+   *   - "env.<KEY>"            — stdio env value templated by exporter
+   *   - "refreshTokenRef"      — oauth-pkce refresh-token reference
+   * Anything not in this enumeration is ignored.
+   */
+  requiredSecretFields?: string[];
 }
 
 export interface McpServerFormContext {
@@ -72,6 +89,9 @@ export interface McpServerFormValidationResult {
   toolsListPageTimeoutSeconds: number;
   headerDisplay: McpHeaderDisplay[];
   sensitiveFields: { authorizationRedacted: boolean; authorizationDisplay: string };
+  /** Phase 4 (preset packs / FR-020): echo of the required-secret-field
+   *  names that were checked. Populated even when validation passes. */
+  requiredSecretFields: string[];
 }
 
 export function validateMcpServerForm(
@@ -90,7 +110,7 @@ export function validateMcpServerForm(
   let confirmationRequired = false;
   let hostClass: HostClass | undefined;
 
-  const tlsError = findTlsBypassKey(input as unknown as Record<string, unknown>);
+  const tlsError = findTlsBypassKeyShared(input as unknown as Record<string, unknown>);
   if (tlsError) errors.push(`TLS bypass option "${tlsError}" is not supported.`);
 
   try {
@@ -119,9 +139,9 @@ export function validateMcpServerForm(
     if (input.transport === "stdio") {
       const command = input.command?.trim() ?? "";
       if (!command) errors.push("Command is required for stdio MCP servers.");
-      if (hasControlCharacter(command)) errors.push("Command contains invalid control characters.");
-      const args = Array.isArray(input.args) ? input.args : parseArgs(input.args ?? "");
-      if (args.some((arg) => hasControlCharacter(arg))) {
+      if (hasControlCharacterShared(command)) errors.push("Command contains invalid control characters.");
+      const args = Array.isArray(input.args) ? input.args : parseArgsString(input.args ?? "");
+      if (args.some((arg) => hasControlCharacterShared(arg))) {
         errors.push("Arguments contain invalid control characters.");
       }
       const cwd = input.cwd?.trim() || context.vaultRoot;
@@ -129,7 +149,7 @@ export function validateMcpServerForm(
       if (context.pathExists && !context.pathExists(cwd)) {
         errors.push(`Working directory does not exist: ${cwd}`);
       }
-      const denylistEnvWarnings = collectDenylistWarnings(input.env, context.platform);
+      const denylistEnvWarnings = collectDenylistWarningsShared(input.env, context.platform);
       if (denylistEnvWarnings.length > 0) {
         warnings.push(
           `Explicit environment overrides match the MCP denylist: ${denylistEnvWarnings.map((w) => w.key).join(", ")}`,
@@ -183,7 +203,17 @@ export function validateMcpServerForm(
   }
 
   const denylistEnvWarnings =
-    input.transport === "stdio" ? collectDenylistWarnings(input.env, context.platform) : [];
+    input.transport === "stdio" ? collectDenylistWarningsShared(input.env, context.platform) : [];
+  const requiredSecretFields = Array.isArray(input.requiredSecretFields)
+    ? [...input.requiredSecretFields]
+    : [];
+  for (const field of requiredSecretFields) {
+    if (isRequiredSecretFieldEmpty(field, input, authorization)) {
+      errors.push(
+        `Required field ${field} from imported pack must be filled in before saving.`,
+      );
+    }
+  }
   if (errors.length > 0 || !config) config = undefined;
 
   return {
@@ -207,7 +237,38 @@ export function validateMcpServerForm(
           : redactAuthorizationValue(authorization)
         : "",
     },
+    requiredSecretFields,
   };
+}
+
+/**
+ * FR-020 / Phase 4: returns true when a pack-required field is empty in
+ * the form, blocking save. Supported field names:
+ *   - "authorization": HTTP static-bearer token (also matches an
+ *     Authorization header passed via `headers`).
+ *   - "env.<KEY>": stdio env value templated by the exporter.
+ *   - "refreshTokenRef": oauth-pkce refresh-token reference (parked for
+ *     when oauth-pkce surfaces in the form UI).
+ * Unknown field names are ignored (treated as already-satisfied).
+ */
+function isRequiredSecretFieldEmpty(
+  field: string,
+  input: McpServerFormInput,
+  authorization: string | undefined,
+): boolean {
+  if (field === "authorization") {
+    return !authorization || authorization.length === 0;
+  }
+  if (field.startsWith("env.")) {
+    const key = field.slice(4);
+    const value = input.env?.[key];
+    return !value || value.length === 0;
+  }
+  if (field === "refreshTokenRef") {
+    // Form does not surface this yet; defer to future UI.
+    return false;
+  }
+  return false;
 }
 
 export function buildHeaderDisplay(input: Pick<McpServerFormInput, "authorization" | "headers">, reveal = false): McpHeaderDisplay[] {
@@ -234,7 +295,7 @@ export function displaySensitiveValue(value: string | undefined, reveal: boolean
 }
 
 export function assertNoTlsBypassFields(value: Record<string, unknown>): void {
-  const key = findTlsBypassKey(value);
+  const key = findTlsBypassKeyShared(value);
   if (key) throw new Error(`TLS bypass option "${key}" is not supported.`);
 }
 
@@ -306,9 +367,13 @@ function resolveCredentialsFromForm(
       }
       const tokenPath = input.credentialTokenPath?.trim();
       const expiryPath = input.credentialExpiryPath?.trim();
+      const credArgs = Array.isArray(input.credentialArgs) && input.credentialArgs.length > 0
+        ? [...input.credentialArgs]
+        : undefined;
       return {
         kind: "command-based",
         command,
+        ...(credArgs ? { args: credArgs } : {}),
         ...(tokenPath ? { tokenPath } : {}),
         ...(expiryPath ? { expiryPath } : {}),
         ...(refreshBuffer != null ? { refreshBufferSeconds: refreshBuffer } : {}),
@@ -392,39 +457,4 @@ function formatRelativeAgo(ms: number): string {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ago`;
-}
-
-function collectDenylistWarnings(
-  env: Record<string, string> | undefined,
-  platform: NodeJS.Platform = process.platform,
-): ExplicitDenylistOverrideWarning[] {
-  const caseInsensitive = platform === "win32";
-  return Object.keys(env ?? {}).flatMap((key) => {
-    const pattern = matchDenylist(key, caseInsensitive);
-    return pattern ? [{ key, pattern }] : [];
-  });
-}
-
-function parseArgs(raw: string): string[] {
-  const args: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(raw)) !== null) args.push(match[1] ?? match[2] ?? match[3]);
-  return args;
-}
-
-function hasControlCharacter(value: string): boolean {
-  return /[\u0000-\u001f\u007f]/.test(value);
-}
-
-function findTlsBypassKey(value: Record<string, unknown>): string | null {
-  for (const key of TLS_BYPASS_KEYS) {
-    if (Object.hasOwn(value, key)) return key;
-  }
-  if (value.headers && typeof value.headers === "object") {
-    for (const key of TLS_BYPASS_KEYS) {
-      if (Object.hasOwn(value.headers as Record<string, unknown>, key)) return key;
-    }
-  }
-  return null;
 }

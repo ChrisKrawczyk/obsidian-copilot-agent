@@ -58,7 +58,18 @@ export function createMcpSdkTools(snapshot: McpToolRegistrySnapshot, options: Mc
         );
         const normalized = normalizeMcpResult(raw);
         if (normalized.isError) {
-          throw new Error(`${normalized.errorKind === "json-rpc" ? "MCP JSON-RPC error" : "MCP tool reported error"}: ${normalized.content}`);
+          // Industry pattern (bastani/atomic, kimchi, inkeep, MCP spec 2025-06-18 §"Error Handling"):
+          // return tool-execution errors as content, not as thrown exceptions. This guarantees the
+          // error text is rendered in chat (tool return values always render), lets the LLM read
+          // the diagnostic and self-correct or explain to the user, and avoids depending on
+          // downstream SDK error-propagation to preserve `error.message`. Hard failures
+          // (server disabled/disconnected, cancellation, timeout) remain thrown above — those are
+          // invocation failures, not tool-execution errors.
+          const kind = normalized.errorKind === "json-rpc" ? "MCP JSON-RPC error" : "MCP tool reported error";
+          const body = normalized.content && normalized.content.length > 0
+            ? normalized.content
+            : "(no error details returned by the server)";
+          return `Error: ${kind}: ${body}`;
         }
         return normalized.content;
       },
