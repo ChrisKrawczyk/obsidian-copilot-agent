@@ -3,16 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.8.0] - Unreleased
+## [0.8.0] - 2026-07-01
 
-Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7. Additive over v0.7; no breaking changes. Existing built-in presets and HTTP authentication paths are unchanged.
+Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7, plus targeted MCP UX hardening surfaced during smoke testing (error visibility, tool readiness on reload). Additive over v0.7; no breaking changes. Existing built-in presets and HTTP authentication paths are unchanged.
 
 ### Added
 
 - **Pack JSON format (FR-001 / FR-019).** Strict-JSON `Pack` and `PackPreset` types with hand-written validator (single-error contract returning RFC-6901 pointer + message), canonical form, structural diff, and a hard 1 MB size cap with a 100 KB "large pack" notice. (`src/settings/presets/packTypes.ts`, `packParser.ts`, `packValidator.ts`, `packCanonical.ts`, `packDiff.ts`.)
 - **Secret-templating policy (FR-020 revised).** `SECRET_PLACEHOLDER = "__NEEDS_VALUE__"` and a per-credential-kind classification table. `command-based` `command`/`args`/`tokenPath`/`expiryPath`/`refreshBufferSeconds` are STRUCTURAL (mirroring the built-in M365 reality); future / unknown credential kinds default to fully templatized. Stdio `env` keys in the form denylist are templatized. (`src/settings/presets/packSecretPolicy.ts`.)
 - **PresetPacksStore (FR-009 / FR-011).** New `mcpPresetPacks` top-level settings key with sibling-key preservation invariant verified by tests. Add/replace, remove, subscribe API. (`src/settings/PresetPacksStore.ts`.)
-- **Pack file I/O (FR-002 / FR-005).** `PackFileReader` and `PackFileWriter` interfaces. Production readers use a transient off-DOM `<input type=file>` and Electron `file.path` for `sourcePath`. Production writer targets `<vault>/exported-packs/` via the vault adapter (native save-dialog deferred per Phase 4B spike). (`src/settings/presets/packFileIO.ts`.)
+- **Pack file I/O (FR-002 / FR-005).** `PackFileReader` and `PackFileWriter` interfaces. Production readers use a transient off-DOM `<input type=file>` and Electron `file.path` for `sourcePath`. Production writer targets `<vault>/exported-packs/` via the vault adapter (native save-dialog deferred). (`src/settings/presets/packFileIO.ts`.)
 - **Import orchestrator with diff confirmation (FR-007).** Parse → validate → diff vs persisted pack → present confirmation surface → apply. Re-import of an unchanged file shows an empty diff. (`src/settings/presets/packImporter.ts`, `src/settings/packSettingsLogic.ts`.)
 - **Effective registry with FR-013 namespacing.** Built-in presets always sort first; collisions resolve to `<packId>.<presetId>` for the imported side; two-imports collisions namespace BOTH; duplicate ids within one pack are rejected by the validator. (`src/settings/presets/effectiveRegistry.ts`, `src/settings/presets/BuiltInPacks.ts`.)
 - **Grouped Add Server dropdown.** Dropdown is now built from the effective registry with one optgroup per source pack (built-in first). Pack-preset selection pre-fills the form and surfaces a "Pack-templatized: please supply a value before saving (…)" hint with `aria-required="true"` on required inputs. Built-in branch preserves the existing `preset.build()` + preflight-hint path exactly. (`src/settings/presetDropdownLogic.ts`, `src/settings/McpServersSection.ts`.)
@@ -22,7 +22,6 @@ Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7. A
 - **Field-level re-import diff.** Re-import confirmations include secret-aware structural field annotations capped at 8 lines so label/command/credential-shape changes are visible without exposing secret values.
 - **Imported packs UI subsection.** Per-pack rows show label, version, preset count, source path, and "imported at" timestamp; **Remove** button never touches `mcpServers` (FR-008). (`src/settings/McpServersSection.ts`.)
 - **User guide** at [`docs/preset-packs.md`](docs/preset-packs.md): what packs are, JSON format, import / re-import / remove / export flows, secret-templating contract per credential kind, FR-013 namespacing example, safety model, troubleshooting matrix.
-- **PAW technical reference** at [`.paw/work/preset-packs/Docs.md`](.paw/work/preset-packs/Docs.md). Manual smoke checklist at [`.paw/work/preset-packs/SmokeChecklist.md`](.paw/work/preset-packs/SmokeChecklist.md), including a settings-performance NFR measurement step.
 
 ### Changed
 
@@ -34,6 +33,17 @@ Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7. A
 
 - The `oauth-pkce` credential variant remains reserved and inert; pack export does not emit `oauth-pkce` rows.
 - No new runtime dependencies. Pack validation is hand-written; canonicalisation is `JSON.stringify` with sorted keys.
+
+### MCP tool-call UX hardening
+
+- **Tool-call errors surface as content.** MCP tool calls that return an error result are now propagated back to the model as text (prefixed with an `Error:` sentinel) instead of being swallowed. Includes both tool-reported errors (`isError: true`) and transport-level JSON-RPC errors. Chat now shows the failure inline and the model can react. (`src/mcp/McpToolBridge.ts`, `src/sdk/AgentSession.ts`.)
+- **Errored tool-call chip renders red.** The tool-call chip is reclassified from `completed` to `errored` when an MCP call returns one of the sentinel error prefixes, so the UI status matches reality. Custom (non-MCP) tools that legitimately return text starting with `Error:` are exempt. (`src/sdk/AgentSession.ts`.)
+- **MCP readiness gate before session creation.** On plugin load, chat now waits (up to 15s) for every enabled MCP server to reach a terminal status (`connected` / `error` / `crashloop` / `disabled`) before creating the first SDK session, so tool lists are populated on the first message. Fixes a regression where reload could drop MCP tools until "New Conversation" was clicked. Also applies to `resetConversation()` and deferred-catalog recovery. (`src/mcp/McpManager.ts`, `src/sdk/AgentSession.ts`, `src/main.ts`.)
+- **Sticky stdio startup notice.** First-launch stdio startup notices in Settings are now sticky (duration 0) so they can't be missed mid-scroll.
+
+### Fixed
+
+- **Composer un-selectable after conversation switch.** Auto-focuses the composer input after conversation switch / create, closing a race where the input remained un-clickable after MCP settings changes. (`src/ui/ChatView.ts`.)
 
 ## [0.7.0] - 2026-06-23
 
