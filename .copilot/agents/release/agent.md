@@ -74,3 +74,5 @@ Read this list before starting any release — these failures have happened and 
 6. **Pre-releases (versions containing `-`, e.g. `0.6.0-rc.1`) are auto-marked `prerelease: true`** by `release.yml`. BRAT users testing pre-releases must check "Enable beta versions" when adding the plugin or BRAT will skip the tag.
 
 7. **The repo must be public for BRAT to fetch it.** BRAT cannot reach private GitHub repos anonymously. If you ever flip it back to private, BRAT installs will break with "repository not found".
+
+8. **CHANGELOG dead links + agentic-framework-speak.** The CHANGELOG section ships verbatim as the GitHub Release body — every repo-relative link must resolve on the target commit (stop-tracked `.paw/` scratch paths and feature-only paths are the common dead-link sources), and framework scaffolding references (PAW, phase numbers, spec/plan/impl-review, `.paw/` paths) should not leak into user-facing text unless the change itself modifies that framework. The `changelog-draft` skill's step 7 content rules enforce both — do not skip that step.

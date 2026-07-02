@@ -32,7 +32,7 @@ git add package.json manifest.json versions.json CHANGELOG.md
 git commit -m "chore(release): v<version>"
 
 # 4. Annotated tag with the extracted release notes as the message:
-npm run changelog:extract -- <version> > .release-notes.tmp
+npm run --silent changelog:extract -- <version> > .release-notes.tmp
 git tag --annotate v<version> --file .release-notes.tmp
 rm .release-notes.tmp
 

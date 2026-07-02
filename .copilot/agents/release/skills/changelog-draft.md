@@ -47,6 +47,17 @@ After `version-bump` reports success and the maintainer has confirmed the bump d
    Use the date of the current local day (`new Date().toISOString().slice(0,10)`). Omit empty sections (do not emit a `### Fixed` heading with no bullets). When the source is a PR body, prefer carrying its existing structure over forcing the strict `Added/Changed/Fixed` partition — readability of the final user-facing CHANGELOG entry wins.
 
 7. **Present and iterate.** Show the draft to the maintainer with the uncategorized + omitted-by-default lists. Accept edits in plain prose ("merge the first two bullets", "move X to Fixed", "drop the third one"). Re-render after each edit until the maintainer says "ship it" or "looks good".
+
+   **Content rules (apply before write):**
+
+   a. **No agentic-framework references.** The CHANGELOG is user-facing and shipped verbatim in the GitHub Release body. Do NOT include references to PAW, phased-agent-workflow, `.paw/` artifacts, phase numbers, spec/plan/impl-review activities, or other agentic scaffolding — unless the change itself modifies that framework (e.g. adding PAW support, changing agent files). Rewrite bullets that mention them to describe the user-visible outcome instead. Examples of what to remove: "PAW technical reference at `.paw/work/…/Docs.md`", "Phase 4 introduces…", "spec-review passed…". If a scaffolding file has a real user-facing counterpart (e.g. a `docs/` guide), link that instead.
+
+   b. **Repo-relative link integrity.** Every repo-relative link (`[text](path)` where path does NOT start with `http://`, `https://`, `#`, or `mailto:`) must resolve on the target commit. Enumerate every such link in the draft and run `git ls-files --error-unmatch <path>` (or `git cat-file -e HEAD:<path>`) against each. Any that fails is a dead link that will 404 on the published Release page. Common causes:
+   - Links to `.paw/`, `.copilot/`, or other scratch/framework paths that were stop-tracked.
+   - Links to files that only exist on a feature branch, never merged to `main`.
+   - Typos in paths.
+
+   Surface every dead link to the maintainer with the offending path and the containing bullet. Do not write the section until they are either removed, replaced with a live link, or converted to plain prose. This check runs on the finalized text right before step 8.
 8. **Write.** Replace the stub section in `CHANGELOG.md` with the agreed text. Preserve the file's existing line endings (CRLF vs LF).
 
 ## Outputs
