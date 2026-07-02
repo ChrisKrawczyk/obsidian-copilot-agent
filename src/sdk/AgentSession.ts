@@ -1304,7 +1304,13 @@ export class CopilotAgentSession implements AgentSession {
   }
 
   hasLiveToolUpdate(): boolean {
-    return this.hasLiveToolUpdateInternal();
+    // True when either the real SDK primitive is present (Phase 5)
+    // OR the Phase 4.5 `resumeSession` stop-gap is available. Both
+    // give users a seamless post-connect refresh; the toast gate in
+    // main.ts should surface for either.
+    return (
+      this.hasLiveToolUpdateInternal() || this.canSwapForToolRefresh()
+    );
   }
 
   /**
@@ -1334,34 +1340,140 @@ export class CopilotAgentSession implements AgentSession {
       this.pendingToolUpdate = true;
       return;
     }
-    // SDK 1.0.0 fallback: no live update primitive. Log once so the
-    // no-op is observable in diagnostics, then return. FR-011
-    // strict no-op.
-    if (!this.hasLiveToolUpdateInternal()) {
-      if (!this.loggedNoOpFallback) {
-        this.loggedNoOpFallback = true;
-        console.debug(
-          "[AgentSession] applyToolListChange: SDK does not expose live tool update primitive; skipping (FR-011 fallback)",
+    // Preferred path (Phase 5, once SDK #1896 lands): live update
+    // primitive on the session. Rebuilds the merged tool list and
+    // hands it to the SDK; conversation state is preserved by the
+    // SDK layer.
+    if (this.hasLiveToolUpdateInternal()) {
+      const tools = this.toolsForSession();
+      const session = this.session as unknown as {
+        updateTools?: (tools: SdkTool[] | undefined) => unknown;
+      };
+      try {
+        await Promise.resolve(session.updateTools?.(tools));
+      } catch (e) {
+        // Best-effort: an SDK error here must not crash the plugin or
+        // corrupt session state. Log and move on — the next transition
+        // will retry with a fresh snapshot.
+        console.warn(
+          "[AgentSession] applyToolListChange: SDK updateTools threw; leaving previous tool list in place",
+          e,
         );
       }
       return;
     }
-    const tools = this.toolsForSession();
-    const session = this.session as unknown as {
-      updateTools?: (tools: SdkTool[] | undefined) => unknown;
-    };
-    try {
-      await Promise.resolve(session.updateTools?.(tools));
-    } catch (e) {
-      // Best-effort: an SDK error here must not crash the plugin or
-      // corrupt session state. Log and move on — the next transition
-      // will retry with a fresh snapshot.
-      console.warn(
-        "[AgentSession] applyToolListChange: SDK updateTools threw; leaving previous tool list in place",
-        e,
+    // Phase 4.5 stop-gap: SDK 1.0.0 has no `updateTools` primitive.
+    // Fall back to `resumeSession(sessionId, { tools })`, which
+    // preserves server-side conversation history while replacing
+    // the active tool list. This is only safe because the plugin
+    // only holds one persistent SDK-session handler
+    // (`onPermissionRequest`); every `session.on(...)` subscription
+    // is per-turn and torn down in the streaming finally, so a
+    // mid-idle swap can never orphan a live subscription. Removed
+    // in Phase 5.
+    if (this.canSwapForToolRefresh()) {
+      await this.swapSessionForToolRefresh();
+      return;
+    }
+    // Neither path is available (very old SDK / test fake): log
+    // once so the no-op is observable, then return. FR-011 strict.
+    if (!this.loggedNoOpFallback) {
+      this.loggedNoOpFallback = true;
+      console.debug(
+        "[AgentSession] applyToolListChange: SDK does not expose live tool update primitive; skipping (FR-011 fallback)",
       );
     }
   }
+
+  /**
+   * Phase 4.5 (MCP Readiness UX): true iff the SDK exposes
+   * `client.resumeSession(...)` AND the current session carries a
+   * `sessionId` (so the plugin has a handle to resume against).
+   * Both are true for `@github/copilot-sdk >= 1.0.0`.
+   */
+  private canSwapForToolRefresh(): boolean {
+    if (!this.client || !this.session) return false;
+    const client = this.client as unknown as {
+      resumeSession?: unknown;
+    };
+    if (typeof client.resumeSession !== "function") return false;
+    const session = this.session as unknown as { sessionId?: unknown };
+    return typeof session.sessionId === "string" && session.sessionId.length > 0;
+  }
+
+  /**
+   * Phase 4.5 (MCP Readiness UX): stop-gap for tool refresh on
+   * SDK 1.0.0. Uses `client.resumeSession(sessionId, { tools, ... })`
+   * to swap the SDK session object while preserving server-side
+   * conversation history. Called from the FR-011 fallback branch of
+   * `applyToolListChange` when the live primitive is absent.
+   *
+   * Guards:
+   *   - Disposed or session-less runtimes bail early.
+   *   - Streaming sessions defer to the drain (same latch as
+   *     `applyToolListChange`).
+   *   - If `resumeSession` throws, the old session is left in
+   *     place — tool inventory stays stale, but the conversation
+   *     survives. The next transition will retry.
+   *
+   * Removed in Phase 5 once the real `updateTools` primitive ships
+   * (github/copilot-sdk#1896).
+   */
+  private async swapSessionForToolRefresh(): Promise<void> {
+    if (this.disposed) return;
+    const client = this.client;
+    const oldSession = this.session;
+    if (!client || !oldSession) return;
+    if (this.isStreamingFlag) {
+      this.pendingToolUpdate = true;
+      return;
+    }
+    const clientAsAny = client as unknown as {
+      resumeSession?: (
+        sessionId: string,
+        opts: SdkResumeSessionOptions,
+      ) => Promise<SdkSession>;
+    };
+    if (typeof clientAsAny.resumeSession !== "function") return;
+    const sessionId = (oldSession as unknown as { sessionId?: string })
+      .sessionId;
+    if (!sessionId) return;
+    const model = this.selectedModel;
+    if (!model) return;
+    let fresh: SdkSession;
+    try {
+      fresh = await clientAsAny.resumeSession(sessionId, {
+        model,
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
+        streaming: true,
+        tools: this.toolsForSession(),
+        onPermissionRequest: (request: SdkPermissionRequest) =>
+          this.handlePermission(request),
+      });
+    } catch (e) {
+      // Leave old session in place. Users see stale tools; the
+      // next transition will retry with a fresh snapshot.
+      console.warn(
+        "[AgentSession] swapSessionForToolRefresh: resumeSession threw; keeping previous session",
+        e,
+      );
+      return;
+    }
+    // Race: dispose fired during the resume round-trip. Disconnect
+    // the freshly-built session and bail — the previous session
+    // was already cleared by dispose().
+    if (this.disposed) {
+      await safeCall(() => fresh.disconnect?.());
+      return;
+    }
+    this.session = fresh;
+    // Disconnect the old session in the background so we don't
+    // block the transition subscriber on SDK teardown. Any per-turn
+    // subscriptions on the old session were already unsubscribed
+    // (streaming finally cleans up) since we required idle above.
+    void safeCall(() => oldSession.disconnect?.());
+  }
+
 
   /**
    * Test probe — returns the text most recently handed to
@@ -2485,6 +2597,17 @@ export interface SdkClient {
   ping?: () => Promise<unknown> | unknown;
   listModels?: () => Promise<SdkModelInfo[]>;
   createSession: (opts: SdkSessionOptions) => Promise<SdkSession>;
+  /**
+   * Phase 4.5 (MCP Readiness UX): stop-gap for tool refresh on
+   * SDK 1.0.0. Preserves server-side conversation history while
+   * swapping the active tool list. Removed in Phase 5 when the
+   * upstream SDK exposes a live `session.updateTools` primitive
+   * (tracked by github/copilot-sdk#1896).
+   */
+  resumeSession?: (
+    sessionId: string,
+    opts: SdkResumeSessionOptions,
+  ) => Promise<SdkSession>;
   stop?: () => Promise<unknown>;
   forceStop?: () => Promise<void>;
 }
@@ -2495,6 +2618,23 @@ export interface SdkSessionOptions {
   /** Phase 4: opt in to streaming delta events. */
   streaming?: boolean;
   /** Phase 5: custom tools registered with the session. */
+  tools?: SdkTool[];
+  onPermissionRequest: (
+    request: SdkPermissionRequest,
+    invocation?: unknown,
+  ) => Promise<SdkPermissionResult> | SdkPermissionResult;
+}
+
+/**
+ * Phase 4.5 (MCP Readiness UX): shape passed to
+ * `client.resumeSession(sessionId, opts)`. Structurally a subset of
+ * `SdkSessionOptions` minus `sessionId` semantics (the id is the
+ * first positional argument). Modelled loose so tests can stub.
+ */
+export interface SdkResumeSessionOptions {
+  model?: string;
+  availableTools?: string[] | unknown;
+  streaming?: boolean;
   tools?: SdkTool[];
   onPermissionRequest: (
     request: SdkPermissionRequest,
@@ -2531,6 +2671,12 @@ export interface SdkToolExecutionCompleteEvent {
 }
 
 export interface SdkSession {
+  /**
+   * SDK-assigned session id, stable across `resumeSession` calls.
+   * Phase 4.5 (MCP Readiness UX): read as the first argument to
+   * `client.resumeSession()` for the stop-gap tool-refresh swap.
+   */
+  sessionId?: string;
   sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;

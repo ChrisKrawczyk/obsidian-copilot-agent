@@ -100,8 +100,9 @@ server scenarios documented in Spec.md P1/P2/P3.
 - [x] **Phase 1: MCP status watcher (pure module)** — Depends on: nothing. Coalescing, per-server debounce, subscribe/unsubscribe surface for Phase 2 and Phase 3 to consume.
 - [x] **Phase 2: Readiness indicator in ChatView** — Depends on: Phase 1. Inline pill, fast-path guard, gate-lifecycle state machine, event bridge from `AgentSession` to `ChatView`.
 - [x] **Phase 3: Plugin refresh flow with SDK-feature-detect fallback** — Depends on: Phase 1. Broadcast to all live runtimes, turn-boundary queueing (last-write-wins), Notice toast, strict no-op path.
-- [ ] **Phase 4: Upstream SDK contribution** — Depends on: nothing in this repo (external). PR to `github/copilot-sdk` adding a live tool-list update primitive plus docs.
-- [ ] **Phase 5: SDK adoption in plugin** — Depends on: Phase 4 published to npm. Bump `@github/copilot-sdk`, wire the real primitive in the refresh method, remove the no-op branch (or leave it behind a version guard).
+- [ ] **Phase 4: Upstream SDK contribution** — Depends on: nothing in this repo (external). PR to `github/copilot-sdk` adding a live tool-list update primitive plus docs. **Status**: filed as issue [github/copilot-sdk#1896](https://github.com/github/copilot-sdk/issues/1896) re-triaging closed #735. Blocked on maintainer response.
+- [x] **Phase 4.5: `resumeSession` stop-gap for tool refresh** — Depends on: Phase 3. Route the FR-011 fallback branch of `applyToolListChange` through a new `swapSessionForToolRefresh()` that uses `client.resumeSession(sessionId, { tools, onPermissionRequest, model })` to swap the SDK session in place while preserving server-side conversation history. Handler surface is small (only `onPermissionRequest` persists across turns; all `session.on(...)` subscriptions are per-turn). Removed in Phase 5 when SDK #1896 lands and `hasLiveToolUpdate()` returns true against the real primitive.
+- [ ] **Phase 5: SDK adoption in plugin** — Depends on: Phase 4 published to npm. Bump `@github/copilot-sdk`, wire the real primitive in the refresh method, remove Phase 4.5's `swapSessionForToolRefresh` fallback.
 - [ ] **Phase 6: Documentation** — Depends on: Phases 1-3 (minimum) or Phases 1-5 (full). Docs.md + README section + CHANGELOG entry.
 
 ## Phase Candidates
