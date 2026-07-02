@@ -191,13 +191,29 @@ server scenarios documented in Spec.md P1/P2/P3.
 ### Changes Required:
 
 - **`src/sdk/AgentSession.ts`**: Add optional callback
-  `onReadinessGateEvent?: (evt: "start" | "resolved" | "timed-out") => void`
+  `onReadinessGateEvent?: (evt: "start" | "resolved") => void`
   to `AgentSessionOptions` alongside `mcpReadinessGate`
   (`src/sdk/AgentSession.ts:131-151`). `awaitMcpReadinessGate` fires
-  `start` before awaiting and `resolved`/`timed-out` on the branch
-  taken. Timed-out is signalled by an internal `Promise.race`
-  wrapper in `main.ts`'s `runtimeFactory` (which owns the timeout
-  value) so the SDK layer stays agnostic to timeout semantics.
+  `start` before awaiting and `resolved` when the gate promise
+  fulfills. Because `McpManager.waitUntilEnabledReady` already
+  encapsulates the 15 s timeout and resolves silently in either the
+  all-connected or timed-out outcome (`src/mcp/McpManager.ts:268-313`),
+  the SDK layer does not need to distinguish those cases at the event
+  boundary — the pill removes on `resolved` regardless of cause
+  (Spec P1 scenario 4). No `Promise.race` wrapper is introduced
+  (planning-docs review S6 — the wrapper would duplicate the
+  manager's own timeout).
+
+- **`src/sdk/AgentSession.ts` — synchronous state getter**: Expose
+  `isReadinessGateWaiting(): boolean` as a read-only accessor on
+  `AgentSession`. It flips to `true` inside `awaitMcpReadinessGate`
+  immediately before the `start` event and back to `false` when the
+  gate resolves (or when the session is disposed). This is the hook
+  `ChatView.bindActiveRuntime` interrogates on conversation switch
+  so the pill correctly initializes when the user activates a
+  conversation whose gate is already in progress (planning-docs
+  review S2 — transient `start` events would otherwise be missed on
+  late-bound observers).
 
 - **`src/main.ts` — event bridge**: The wiring channel from
   session-level events to `ChatView` (called out by plan review):
@@ -221,21 +237,41 @@ server scenarios documented in Spec.md P1/P2/P3.
     the input, that renders "Preparing MCP tools…" plus a comma-joined
     display-name list of pending server ids from `snapshotPending()`.
     Style follows the existing auth pill patterns near `renderAuth`
-    (`src/ui/ChatView.ts:685-724`).
+    (`src/ui/ChatView.ts:685-724`). The pill element MUST carry a
+    tooltip (accessible `title` attribute plus `aria-describedby`
+    where feasible) with copy along the lines of
+    "One or more MCP servers are still authenticating and will
+    provide tools once ready." This satisfies Spec P1 AC2
+    (planning-docs review S5).
   - Subscribe to the `ReadinessGateBus` in `onOpen()`, filtered by
     `boundConversationId` (`src/ui/ChatView.ts:198-207`). Introduce
-    a `ReadinessGateState` field: `pending | idle | timed-out`. Bus
-    events flip the state; in `timed-out` state the pill is removed
-    and no new blocking indicator replaces it (spec P1 scenario 4).
-  - **Fast-path guard**: on `start`, arm a `setTimeout(showPill, 100)`;
-    on `resolved` or `timed-out` inside that 100 ms window, cancel
-    the timeout and never render the pill. The 100 ms budget is
-    measured **from the `start` event** (gate-start), which follows
-    Spec P1 scenario 1's "gate already waiting at first render"
-    assumption. FR-001's 250 ms budget from composer render is
-    satisfied because `getActiveRuntime()` (which triggers `init()`)
-    is called synchronously in `bindActiveRuntime`
-    (`src/ui/ChatView.ts:198-207`) at composer render time.
+    a `ReadinessGateState` field: `pending | idle`. Bus `start`
+    events flip to `pending`; `resolved` events flip to `idle`
+    (both the "all connected" and the "timed out" outcomes surface
+    as `resolved` — see AgentSession bullet above). In `idle` state
+    the pill is removed and no new blocking indicator replaces it
+    (spec P1 scenario 4).
+  - On `bindActiveRuntime`, interrogate
+    `activeRuntime.session.isReadinessGateWaiting()` synchronously
+    and seed `ReadinessGateState` to `pending` when it returns true
+    (planning-docs review S2). Bus subscription then handles
+    subsequent transitions. Without this seed, activating a
+    conversation whose gate is already in progress would miss the
+    `start` event and never render the pill.
+  - **Fast-path guard (measured from composer render)**: To satisfy
+    Spec FR-013 / SC-008 (render→input-usable ≤ 100 ms), capture the
+    composer render timestamp in `onOpen()` and, on `start`, check
+    whether the gate is expected to resolve within
+    `100 - (now - renderTs)` ms. If so, arm a `setTimeout(showPill, remaining)`
+    and cancel on `resolved` inside the window. The wall-clock
+    origin used for SC-008 is composer render, not gate-start
+    (planning-docs review C1 / F1 — earlier wording anchored the
+    100 ms at gate-start, which is not the same instant as render
+    given lazy `init()`). For the guarantee that gate-start is
+    observable at bind time, the synchronous
+    `isReadinessGateWaiting()` seed above closes the gap: bind sees
+    an in-progress gate immediately even if no `start` event has
+    yet been dispatched to this ChatView instance.
   - Manager subscription updates the pill on `active-changed` since
     each conversation has its own runtime and gate cycle
     (`src/ui/ChatView.ts:459-480`).
@@ -246,16 +282,26 @@ server scenarios documented in Spec.md P1/P2/P3.
 - **Tests: `src/ui/ChatView.test.ts`** (**new file** — the existing
   test coverage is `src/ui/ChatView.modelPick.test.ts` only; a
   general suite does not yet exist):
-  Verify pill appears/disappears on the three gate transitions,
-  fast-path guard suppresses < 100 ms flashes (measured from `start`),
-  per-conversation state is preserved across active-changed events,
+  Verify pill appears/disappears on the two gate transitions
+  (`start`, `resolved`); tooltip/help text is present on the pill
+  element (planning-docs S5); fast-path guard suppresses < 100 ms
+  flashes measured from **composer render** with fake timers
+  (SC-008 wall-clock automated assertion — planning-docs C1/F4);
+  the 15.25 s ceiling is respected in a fake-timer scenario where
+  the gate times out (SC-002 automated verification — planning-docs
+  S4); `bindActiveRuntime` seeds `pending` state when
+  `isReadinessGateWaiting()` returns true (planning-docs S2);
+  per-conversation state is preserved across active-changed events;
   and no regressions in existing setBusy/streaming disabled logic.
 
 - **Tests: `src/sdk/AgentSession.test.ts`** (extend existing file at
   `src/sdk/AgentSession.test.ts:23-50`): Verify `onReadinessGateEvent`
-  fires in the correct order (`start` before `resolved`/`timed-out`,
-  exactly once per event kind per session) for `doInit`,
+  fires in the correct order (`start` before `resolved`, exactly
+  once per event kind per session) for `doInit`,
   `resetConversation`, and `tryRecoverDeferred` paths.
+  `isReadinessGateWaiting()` returns `true` between the internal
+  `start` dispatch and gate resolution, `false` at all other times
+  including before init and after dispose.
 
 ### Success Criteria:
 
@@ -263,12 +309,14 @@ server scenarios documented in Spec.md P1/P2/P3.
 - [ ] Tests pass: `npm test`
 - [ ] Typecheck: `npm run typecheck`
 - [ ] Build: `npm run build`
+- [ ] Wall-clock timing test asserts render→input-usable ≤ 100 ms on the fast path (SC-008 — planning-docs C1/F4).
+- [ ] Fake-timer test asserts composer becomes usable within 15.25 s when gate hits ceiling (SC-002 — planning-docs S4).
 
 #### Manual Verification:
-- [ ] Fresh vault, slow-auth server configured: pill visible within 250 ms of chat view render, names the server, disappears when server connects.
+- [ ] Fresh vault, slow-auth server configured: pill visible within 250 ms of chat view render, names the server, disappears when server connects. Hovering the pill shows explanatory tooltip (P1 AC2 / planning-docs S5).
 - [ ] Fast path with all servers pre-connected: no visible pill flash on cold start (verify by log-instrumenting the fast-path suppression).
 - [ ] Gate timeout (server never connects): composer becomes usable after ceiling; no leftover blocking indicator.
-- [ ] Switching active conversation while a gate is pending: pill state reflects the new conversation's gate, not the previous one.
+- [ ] Switching active conversation while a gate is pending: pill state reflects the new conversation's gate, not the previous one (verified via `isReadinessGateWaiting()` seed on `bindActiveRuntime`).
 
 ---
 
@@ -287,31 +335,43 @@ server scenarios documented in Spec.md P1/P2/P3.
     the finally/completion path). This is the exact hook Phase 3
     reads for turn-boundary queueing (called out by plan review — the
     prior "or equivalent existing state" wording was under-specified).
-  - Add a new public method `applyToolListChange(newTools: SdkTool[]): Promise<void>` that:
+  - Add a new public method `applyToolListChange(): Promise<void>`
+    (**no arguments** — planning-docs review S1: passing an
+    externally-computed MCP-only list would overwrite the session's
+    conversation-specific custom tools merged inside
+    `toolsForSession()` at `src/sdk/AgentSession.ts:1129-1140`). The
+    method:
     1. Guards against `this.session` being undefined — early-returns
        if the session has not yet been created (transition arrived
        during a pre-`doInit` window). No error, no log spam.
-    2. Feature-detects whether `this.session` exposes a live update
+    2. Builds the current combined tool list internally by calling
+       `this.toolsForSession()`, which merges the live `mcpTools()`
+       snapshot with the session's own custom/built-in tools. This
+       preserves per-session tool composition across refreshes.
+    3. Feature-detects whether `this.session` exposes a live update
        capability. Detection is a duck-type check for a well-known
        method name matching the primitive to be added in Phase 4
        (e.g., `if (typeof (this.session as any).updateTools ===
        "function")`). This lookup MUST be centralized in a single
        private helper (`private hasLiveToolUpdate(): boolean`) so
-       Phase 5 can flip it to a real typed import in one place.
-    3. If the capability is present, calls it with `newTools`.
-    4. If the capability is absent, logs once at debug level via
+       Phase 5 can flip it to a real typed import in one place. The
+       helper is also exposed to the plugin scope via
+       `AgentSession.hasLiveToolUpdate()` (public read-only proxy)
+       so `main.ts` can gate the "tools now available" Notice on it
+       (planning-docs S3).
+    4. If the capability is present, calls it with the internally
+       built tool list.
+    5. If the capability is absent, logs once at debug level via
        `this.opts.log` (following the existing pattern) and returns —
        strict no-op (FR-011). Subsequent calls in the same session do
        not re-log.
-    5. **Turn-boundary queueing with last-write-wins**: maintains a
-       single `pendingToolUpdate: SdkTool[] | null` slot on the
-       session (not a queue — plan review flagged that a queue with
-       skip-on-duplicate semantics could drop later state). If
-       `isStreaming` is true, the call **overwrites**
-       `pendingToolUpdate` with the latest `newTools` and returns;
-       on stream completion the drain runs the SDK call with
-       whatever is in the slot (which is the most recent state).
-       If `isStreaming` is false, apply immediately.
+    6. **Turn-boundary queueing with last-write-wins**: maintains a
+       single `pendingToolUpdate: true | false` slot on the session
+       (a boolean latch — the tool list is always rebuilt at drain
+       time from the live `mcpTools()` snapshot, so no payload
+       queueing is needed). If `isStreaming` is true, set the latch
+       and return; on stream completion, if the latch is set, rebuild
+       and apply. If `isStreaming` is false, apply immediately.
   - Ensure disposal path (`stopRuntime()` / `dispose()`) clears
     `pendingToolUpdate` and cancels any in-flight drain to avoid
     calling into a disposed session
@@ -320,18 +380,32 @@ server scenarios documented in Spec.md P1/P2/P3.
 - **`src/main.ts`**:
   - Instantiate `McpStatusWatcher` (Phase 1) and subscribe to both
     surfaces:
-    - **`onTransition`** (fast, no-debounce): compute the new
-      plugin-side tool list via existing `mcpTools()` factory
-      plumbing (referenced from `toolsForSession` at
-      `src/sdk/AgentSession.ts:1129-1140`), then iterate
-      `liveRuntimes` (`src/main.ts:784-803`, `804-825`) and invoke
-      `session.applyToolListChange(newTools)` on each. This is the
-      2-second-bound path (FR-004 / FR-005 / FR-007).
+    - **`onTransition`** (fast, no-debounce): iterate `liveRuntimes`
+      (`src/main.ts:784-803`, `804-825`) and invoke
+      `session.applyToolListChange()` (no arguments — the session
+      rebuilds its own list internally, per S1 above) on each. This
+      is the 2-second-bound path (FR-004 / FR-005 / FR-007).
+      **Metadata-only conversations** (open in the picker but whose
+      runtime has not yet been instantiated via
+      `ConversationManager.getActiveRuntime()`) are *not* iterated
+      here; they acquire the new tool set on their next
+      `createSession()` because `toolsForSession()` reads the live
+      `mcpTools()` snapshot at that time
+      (`CodeResearch.md:197`). This semantic satisfies FR-005 for
+      both instantiated and lazy conversations — the plan-side
+      dispatch handles the former; SDK-side snapshot capture
+      handles the latter (planning-docs review C2).
     - **`onNotice`** (5 s coalesced): show a single
       `new Notice("Tools from <serverName> are now available", 4000)`
-      per connect emission (durations match existing informational
-      Notices at `src/ui/ChatView.ts:483-490`). Do not toast on
-      disconnect (silent removal).
+      per connect emission, **but only when at least one live
+      runtime returns `session.hasLiveToolUpdate() === true`**. If
+      the SDK primitive is unavailable on all live runtimes
+      (Phase 3 with SDK 1.0.0), suppress the toast entirely because
+      tools are not actually available until reload / new
+      conversation (planning-docs S3 — FR-011 strict no-op).
+      Durations match existing informational Notices at
+      `src/ui/ChatView.ts:483-490`. Do not toast on disconnect
+      (silent removal).
   - Register the watcher's `disposeAll()` in the plugin's
     `onunload()` alongside other teardown hooks.
 
@@ -340,15 +414,20 @@ server scenarios documented in Spec.md P1/P2/P3.
     (fallback branch, log recorded, no throw).
   - `applyToolListChange` no-ops silently when `this.session` is
     undefined (pre-init edge case).
-  - `applyToolListChange` calls the session's update method when
-    present (verify with a fake SDK session exposing an `updateTools`
-    stub).
+  - `applyToolListChange` calls the session's update method with the
+    list produced by `toolsForSession()` (verify with a fake SDK
+    session exposing an `updateTools` stub and a spy on
+    `toolsForSession`). Confirms MCP + custom tools are merged
+    (planning-docs S1 — regression guard against MCP-only overwrite).
   - **Turn-boundary last-write-wins**: two calls arriving mid-stream
-    result in only the most recent `newTools` being applied on
-    drain; the first call's payload is discarded.
+    result in exactly one drain that rebuilds tools from the current
+    `mcpTools()` snapshot; verified by counting `toolsForSession`
+    invocations and asserting drain uses the latest snapshot.
   - Call arriving when idle is applied immediately.
   - Disposal drops any pending call and prevents post-dispose SDK
     invocation.
+  - `hasLiveToolUpdate()` returns `false` on a fake session without
+    the primitive, `true` on one that exposes `updateTools`.
 
 - **Tests: `src/main.integration.test.ts`** (or nearest existing
   integration point — check `src/main.integration*.ts` glob first,
@@ -361,6 +440,11 @@ server scenarios documented in Spec.md P1/P2/P3.
   - `onNotice` fires exactly once per server per 5 s window under a
     flapping harness (FR-012 / SC-007). `onTransition` fires on
     every flip (independence verified).
+  - **Toast gating**: `onNotice` connect with all live runtimes
+    reporting `hasLiveToolUpdate() === false` (SDK 1.0.0 fallback)
+    produces **zero** `Notice` calls; the same emission with at
+    least one runtime returning `true` produces exactly one Notice
+    (planning-docs S3 / FR-011).
 
 ### Success Criteria:
 
@@ -370,9 +454,9 @@ server scenarios documented in Spec.md P1/P2/P3.
 - [ ] Build: `npm run build`
 
 #### Manual Verification:
-- [ ] With current SDK 1.0.0 installed (no update primitive): plugin loads without errors; after a slow-auth server connects, the internal log records the no-op fallback; user still sees the pre-existing "reload to see new tools" behavior — no regression.
-- [ ] Flapping server (repeatedly toggled in settings): at most 1 Notice per server per 5 s window regardless of flip rate; `applyToolListChange` dispatch count matches transition count (verified via a log-tap or spied test double).
-- [ ] Multi-conversation open: refresh call is dispatched to every entry in `liveRuntimes`, not only the active one.
+- [ ] With current SDK 1.0.0 installed (no update primitive): plugin loads without errors; after a slow-auth server connects, the internal log records the no-op fallback; **no "Tools now available" toast is shown** (planning-docs S3 — toast gated on `hasLiveToolUpdate`); user still sees the pre-existing "reload to see new tools" behavior — no regression.
+- [ ] Flapping server (repeatedly toggled in settings): at most 1 Notice per server per 5 s window regardless of flip rate (only when `hasLiveToolUpdate` is true); `applyToolListChange` dispatch count matches transition count (verified via a log-tap or spied test double).
+- [ ] Multi-conversation open: refresh call is dispatched to every entry in `liveRuntimes`, not only the active one. Conversations that are open in the picker but have not been activated (no live runtime) will pick up the new tools on their next activation via `toolsForSession()`.
 - [ ] Note: FR-004 / FR-005 / FR-007 end-to-end (tools actually appearing in the model's tool list) verification is deferred to Phase 5.
 
 ---
