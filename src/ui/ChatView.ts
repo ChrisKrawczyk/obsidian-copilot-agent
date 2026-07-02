@@ -42,7 +42,7 @@ const RAW_FS_TOOL_NAME_SET: ReadonlySet<string> = new Set(
   V01_RAW_FS_TOOL_NAMES,
 );
 
-interface ChatViewDeps {
+export interface ChatViewDeps {
   /**
    * v0.3 Phase 4: per-conversation runtime architecture. The view
    * reads the active runtime via `manager.getActiveRuntime()` and
@@ -75,6 +75,35 @@ interface ChatViewDeps {
    * without re-listing models per view open.
    */
   modelCatalog: ModelCatalog;
+  /**
+   * Phase 2 (MCP Readiness UX): event bus fan-out for
+   * `AgentSession.onReadinessGateEvent`. Payload is filtered by
+   * `conversationId` so multiple open ChatViews see their own
+   * conversation's gate lifecycle. Optional so tests that don't
+   * exercise readiness can omit it.
+   */
+  readinessGateBus?: {
+    subscribe: (
+      listener: (evt: { conversationId: string; kind: "start" | "resolved" }) => void,
+    ) => () => void;
+  };
+  /**
+   * Phase 2 (MCP Readiness UX): live pending-server snapshot from
+   * `McpStatusWatcher.snapshotPending()`. ChatView reads this when
+   * rendering the readiness pill so the label names the servers the
+   * gate is waiting on (FR-002). Optional so tests that don't
+   * exercise readiness can omit it.
+   */
+  snapshotPendingMcp?: () => readonly { id: string; state: string }[];
+  /**
+   * Phase 2 (MCP Readiness UX): resolves an MCP server id to its
+   * user-facing display name (`config.name`). Used by the readiness
+   * pill so the label names servers the user recognizes, not the
+   * canonical id. Falls back to the id if the resolver returns
+   * undefined (defensive — a race where the config was removed
+   * between snapshot and render should still show something usable).
+   */
+  mcpServerName?: (id: string) => string | undefined;
 }
 
 export class ChatView extends ItemView {
@@ -180,6 +209,41 @@ export class ChatView extends ItemView {
    private inlineErrorMsgEl?: HTMLElement;
    private inlineErrorRetryEl?: HTMLButtonElement;
 
+  /**
+   * Phase 2 (MCP Readiness UX): readiness pill state machine.
+   *  - `idle`: no gate cycle in flight (pill hidden).
+   *  - `pending`: gate is waiting; pill visible after fast-path window.
+   * Two sub-states of `pending` are implicit:
+   *  - Armed but not yet visible (inside the 100 ms fast-path guard).
+   *  - Visible (past the guard window).
+   * The fast-path guard runs a `setTimeout` measured from composer
+   * render (`renderTimestamp`) so a gate that resolves in under 100 ms
+   * never flashes the pill (SC-008 / planning-docs C1).
+   */
+  private readinessGateState: "idle" | "pending" = "idle";
+  private readinessPillEl?: HTMLElement;
+  private readinessPillLabelEl?: HTMLElement;
+  private readinessFastPathTimer: ReturnType<typeof setTimeout> | null = null;
+  private renderTimestamp: number | null = null;
+  private unsubReadinessGate?: () => void;
+  private readinessGateBus?: ChatViewDeps["readinessGateBus"];
+  private snapshotPendingMcp?: ChatViewDeps["snapshotPendingMcp"];
+  private mcpServerName?: ChatViewDeps["mcpServerName"];
+  /**
+   * FR-013 / SC-008: budget from composer render to input-usable when
+   * no gate wait is required. Matched by the fast-path guard: if the
+   * gate resolves inside this window, the pill never appears.
+   */
+  private static readonly FAST_PATH_MS = 100;
+
+  /**
+   * Spec P1 AC2 (planning-docs S5): hover text that explains why the
+   * pill is present. Exposed as a static so tests can assert the
+   * attribute is applied without duplicating the string.
+   */
+  static readonly READINESS_PILL_TOOLTIP =
+    "One or more MCP servers are still authenticating and will provide tools once ready.";
+
   constructor(leaf: WorkspaceLeaf, deps: ChatViewDeps) {
     super(leaf);
     this.manager = deps.manager;
@@ -187,6 +251,9 @@ export class ChatView extends ItemView {
     this.openSettings = deps.openSettings;
     this.getExposeRawFsTools = deps.getExposeRawFsTools;
     this.modelCatalog = deps.modelCatalog;
+    this.readinessGateBus = deps.readinessGateBus;
+    this.snapshotPendingMcp = deps.snapshotPendingMcp;
+    this.mcpServerName = deps.mcpServerName;
     this.bindActiveRuntime();
   }
 
@@ -204,6 +271,21 @@ export class ChatView extends ItemView {
     this.agent = runtime.session;
     this.undoJournal = runtime.journal;
     this.boundConversationId = activeId;
+    // Phase 2 (MCP Readiness UX): seed the readiness pill state from
+    // the session's synchronous getter so activating a conversation
+    // whose gate is already running renders the pill even if the
+    // `start` bus event was published before this view bound
+    // (planning-docs review S2).
+    try {
+      if (this.agent?.isReadinessGateWaiting?.()) {
+        this.enterReadinessPending();
+      } else {
+        this.exitReadinessPending();
+      }
+    } catch {
+      // Older AgentSession implementations without the getter — treat
+      // as not-waiting; the bus will still drive future transitions.
+    }
   }
 
   getViewType(): string {
@@ -219,6 +301,12 @@ export class ChatView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    // Phase 2 (MCP Readiness UX): capture the composer render wall
+    // clock at the very start of onOpen so the fast-path guard budget
+    // (SC-008: render → input-usable ≤ 100 ms) is measured from the
+    // moment the user actually sees the composer, not from a later
+    // internal event.
+    this.renderTimestamp = performance.now();
     const root = this.containerEl.children[1];
     root.empty();
     root.addClass("copilot-agent-chat-root");
@@ -357,6 +445,12 @@ export class ChatView extends ItemView {
     });
 
     const composer = root.createDiv({ cls: "copilot-agent-composer" });
+    // Phase 2 (MCP Readiness UX): inline pill co-located with the
+    // composer so users see, from render, that MCP tools are still
+    // authenticating. Hidden by default; toggled via
+    // `enterReadinessPending()` / `exitReadinessPending()`. Tooltip
+    // (title attribute) satisfies Spec P1 AC2 (planning-docs S5).
+    this.buildReadinessPill(composer);
     // v0.4 Phase 5: inline-error banner above the textarea — hidden by
     // default; shown whenever `canSend()` returns a catalog/model
     // blocked reason. Built once here; refreshSendGate() toggles
@@ -510,6 +604,29 @@ export class ChatView extends ItemView {
     // call covers the case where the picker is disabled (early-return
     // in refreshModelPicker) but the gate still needs to evaluate.
     this.refreshSendGate();
+
+    // Phase 2 (MCP Readiness UX): subscribe to the readiness gate
+    // bus. Events are filtered to the currently-bound conversation
+    // so multiple open ChatViews (multi-workspace panes) each track
+    // only their own gate. `bindActiveRuntime` already seeded state
+    // from the synchronous getter for the currently-bound
+    // conversation; the bus drives subsequent transitions.
+    if (this.readinessGateBus) {
+      this.unsubReadinessGate = this.readinessGateBus.subscribe((evt) => {
+        if (evt.conversationId !== this.boundConversationId) return;
+        if (evt.kind === "start") {
+          this.enterReadinessPending();
+        } else {
+          this.exitReadinessPending();
+        }
+      });
+    }
+    // Re-sync pill visibility now that the DOM element exists. The
+    // constructor's bindActiveRuntime call may have flipped state to
+    // "pending" before the pill DOM was built.
+    if (this.readinessGateState === "pending") {
+      this.enterReadinessPending();
+    }
   }
 
   /** v0.4 Phase 4: compute the model picker view model from the
@@ -674,12 +791,129 @@ export class ChatView extends ItemView {
     this.unsubAuth?.();
     this.unsubManager?.();
     this.unsubModelCatalog?.();
+    this.unsubReadinessGate?.();
+    if (this.readinessFastPathTimer !== null) {
+      clearTimeout(this.readinessFastPathTimer);
+      this.readinessFastPathTimer = null;
+    }
     this.picker?.destroy();
     this.picker = undefined;
     this.modelPicker?.destroy();
     this.modelPicker = undefined;
     this.renderer?.dispose();
     this.renderer = undefined;
+  }
+
+  /**
+   * Phase 2 (MCP Readiness UX): builds the pill DOM into the given
+   * composer container. Extracted from `onOpen` so tests can invoke
+   * it with a minimal container stub and assert the tooltip / role
+   * attributes without running the full onOpen orchestration.
+   */
+  private buildReadinessPill(composer: HTMLElement): void {
+    this.readinessPillEl = composer.createDiv({
+      cls: "copilot-agent-mcp-readiness-pill",
+    });
+    this.readinessPillEl.style.display = "none";
+    this.readinessPillEl.setAttribute(
+      "title",
+      ChatView.READINESS_PILL_TOOLTIP,
+    );
+    this.readinessPillEl.setAttribute("role", "status");
+    this.readinessPillLabelEl = this.readinessPillEl.createSpan({
+      cls: "copilot-agent-mcp-readiness-pill-label",
+      text: "Preparing MCP tools…",
+    });
+  }
+
+  /**
+   * Phase 2 (MCP Readiness UX): flip to `pending` state. If the state
+   * was already `pending`, this is a no-op (idempotent — bus and
+   * bindActiveRuntime both may call this). Applies the fast-path
+   * guard: measures the remaining budget from composer render and
+   * defers showing the pill until either the budget elapses or the
+   * gate resolves (whichever comes first).
+   */
+  private enterReadinessPending(): void {
+    const wasIdle = this.readinessGateState === "idle";
+    this.readinessGateState = "pending";
+    if (!this.readinessPillEl) {
+      // DOM not built yet (constructor path). onOpen re-syncs.
+      return;
+    }
+    // If already visible (state was pending and pill shown), just
+    // refresh the label because the pending-server set may have
+    // changed.
+    if (this.readinessPillEl.style.display !== "none") {
+      this.updateReadinessPillLabel();
+      return;
+    }
+    // Fast-path guard: measure elapsed since render. If we still have
+    // room in the 100 ms window, arm a timer for the remainder.
+    // Otherwise show immediately (past the fast-path budget).
+    const now = performance.now();
+    const elapsed = this.renderTimestamp === null ? 0 : now - this.renderTimestamp;
+    const remaining = ChatView.FAST_PATH_MS - elapsed;
+    if (this.readinessFastPathTimer !== null) {
+      clearTimeout(this.readinessFastPathTimer);
+      this.readinessFastPathTimer = null;
+    }
+    if (remaining <= 0) {
+      this.showReadinessPill();
+    } else {
+      // Only arm the deferred show on a fresh enter — if we're
+      // re-entering while a timer was already armed, we cleared it
+      // above and are arming a fresh one anchored to the current
+      // remaining budget.
+      void wasIdle;
+      this.readinessFastPathTimer = setTimeout(() => {
+        this.readinessFastPathTimer = null;
+        if (this.readinessGateState === "pending") {
+          this.showReadinessPill();
+        }
+      }, remaining);
+    }
+  }
+
+  private exitReadinessPending(): void {
+    this.readinessGateState = "idle";
+    if (this.readinessFastPathTimer !== null) {
+      clearTimeout(this.readinessFastPathTimer);
+      this.readinessFastPathTimer = null;
+    }
+    this.hideReadinessPill();
+  }
+
+  private showReadinessPill(): void {
+    if (!this.readinessPillEl) return;
+    this.updateReadinessPillLabel();
+    this.readinessPillEl.style.display = "";
+  }
+
+  private hideReadinessPill(): void {
+    if (!this.readinessPillEl) return;
+    this.readinessPillEl.style.display = "none";
+  }
+
+  /**
+   * Names the pending servers on the pill (FR-002). Resolves ids to
+   * user-facing display names via the injected `mcpServerName`
+   * resolver; falls back to the raw id if the resolver returns
+   * undefined (server was removed between snapshot and render).
+   */
+  private updateReadinessPillLabel(): void {
+    if (!this.readinessPillLabelEl) return;
+    const snapshot = this.snapshotPendingMcp?.() ?? [];
+    if (snapshot.length === 0) {
+      this.readinessPillLabelEl.setText("Preparing MCP tools…");
+      return;
+    }
+    const names = snapshot.map(
+      (entry) => this.mcpServerName?.(entry.id) ?? entry.id,
+    );
+    this.readinessPillLabelEl.setText(
+      `Preparing MCP tools: ${names.join(", ")}…`,
+    );
   }
 
   private renderAuth(state: AuthState): void {

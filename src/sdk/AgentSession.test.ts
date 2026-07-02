@@ -7,7 +7,9 @@ import {
   type SdkModule,
   type SdkPermissionRequest,
   type SdkPermissionResult,
+  type SdkResumeSessionOptions,
   type SdkSession,
+  type SdkTool,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
 import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
@@ -1129,6 +1131,165 @@ describe("CopilotAgentSession", () => {
     await agent.dispose();
   });
 
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent fires start then resolved once per init", async () => {
+    const h = makeFakeSdk();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: () => gate,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    const initP = agent.init();
+    // Yield so the gate is awaited and `start` fires.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual(["start"]);
+    expect(agent.isReadinessGateWaiting()).toBe(true);
+    resolveGate();
+    await initP;
+    expect(events).toEqual(["start", "resolved"]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent always emits resolved even when gate throws", async () => {
+    const h = makeFakeSdk();
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => {
+          throw new Error("gate crashed");
+        },
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(events).toEqual(["start", "resolved"]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: isReadinessGateWaiting is false before init and after dispose", async () => {
+    const h = makeFakeSdk();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+      },
+      async () => h.sdk,
+    );
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.init();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent listener that throws does not wedge gate", async () => {
+    // Regression: a bad listener must not stall the gate. The
+    // internal emit helper swallows listener throws.
+    const h = makeFakeSdk();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: () => {
+          throw new Error("bad listener");
+        },
+      },
+      async () => h.sdk,
+    );
+    await expect(agent.init()).resolves.toBeUndefined();
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: onReadinessGateEvent fires start/resolved on each resetConversation", async () => {
+    // Every gate-awaiting entry point (init, resetConversation, and
+    // the deferred-catalog recovery in send) must emit its own
+    // start/resolved pair. This test covers the resetConversation
+    // path so the pill flips again when the user clears the
+    // conversation and a fresh createSession runs.
+    const h = makeFakeSdk();
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(events).toEqual(["start", "resolved"]);
+    events.length = 0;
+    await agent.resetConversation();
+    expect(events).toEqual(["start", "resolved"]);
+    await agent.dispose();
+  });
+
+  test("MCP Readiness UX Phase 2: dispose clears isReadinessGateWaiting even if gate is still parked", async () => {
+    // Plan requirement (§isReadinessGateWaiting): the flag must
+    // read false after dispose returns, even if an
+    // awaitMcpReadinessGate was still awaiting its inner promise
+    // when dispose was invoked. Otherwise a late-bound ChatView
+    // calling the getter after dispose would render a phantom pill.
+    const h = makeFakeSdk();
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpReadinessGate: () => gate,
+      },
+      async () => h.sdk,
+    );
+    const initP = agent.init();
+    // Yield so the gate is entered and the flag flips to true.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(agent.isReadinessGateWaiting()).toBe(true);
+    // Kick off dispose. It will race-with-timeout the initPromise;
+    // resolve the gate concurrently so initPromise settles quickly.
+    const disposeP = agent.dispose();
+    resolveGate();
+    await Promise.all([disposeP, initP.catch(() => undefined)]);
+    expect(agent.isReadinessGateWaiting()).toBe(false);
+  });
+
   test("denied permission request emits live tool_call_start + tool_call_complete during streaming", async () => {
     const h = makeFakeSdk();
     h.session.on = () => () => {};
@@ -2230,6 +2391,57 @@ describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
     await agent.dispose();
   });
 
+  test("MCP Readiness UX Phase 2: tryRecoverDeferred emits start/resolved when catalog transitions to ready", async () => {
+    // Deferred-init flow (`ImplementationPlan.md:297-304`): init()
+    // returns without calling the gate (createSession is deferred
+    // because catalog is non-ready). Later, when the catalog
+    // recovers, `tryRecoverDeferred` fires — and IT calls the gate.
+    // The pill must therefore see start/resolved on this path too,
+    // not only on init/resetConversation.
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels =
+      async () => {
+        throw new Error("client.listModels boom");
+      };
+    const { ModelCatalog } = await import("./ModelCatalog");
+    let catalogModelsFn: () => Promise<Array<{ id: string }>> = async () => {
+      throw new Error("catalog down");
+    };
+    const catalogClient = {
+      createSession: () => Promise.reject(new Error("x")),
+      listModels: () => catalogModelsFn(),
+    } as unknown as SdkClient;
+    const catalog = new ModelCatalog(() => catalogClient);
+    await catalog.refresh();
+    expect(catalog.getState().kind).toBe("error");
+
+    const events: Array<"start" | "resolved"> = [];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        catalog,
+        mcpReadinessGate: async () => undefined,
+        onReadinessGateEvent: (kind) => events.push(kind),
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    // Init deferred — gate NOT called yet.
+    expect(agent.hasDeferredSession()).toBe(true);
+    expect(events).toEqual([]);
+    // Catalog recovers → tryRecoverDeferred fires → gate is called.
+    catalogModelsFn = async () => [{ id: "gpt-4o" }];
+    await catalog.refresh();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(agent.hasDeferredSession()).toBe(false);
+    // start/resolved must have fired exactly once during recovery.
+    expect(events).toEqual(["start", "resolved"]);
+    await agent.dispose();
+  });
+
   test("deferred → swapModel(newId) creates the SDK session in-place (user explicit pick path)", async () => {
     const h = makeFakeSdk();
     (h.client as { listModels: () => Promise<unknown> }).listModels =
@@ -2282,6 +2494,575 @@ describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
     await agent.init();
     expect(agent.hasDeferredSession()).toBe(true);
     expect(agent.hasPendingApprovals()).toBe(false);
+    await agent.dispose();
+  });
+});
+
+// ---------- MCP Readiness UX Phase 3: applyToolListChange ----------
+
+describe("CopilotAgentSession — applyToolListChange (MCP Readiness UX Phase 3)", () => {
+  test("hasLiveToolUpdate returns false when session has no updateTools primitive (SDK 1.0.0)", async () => {
+    // Default fake SDK session in makeFakeSdk has no updateTools —
+    // this is the SDK 1.0.0 baseline the plugin ships against
+    // today (planning-docs S3).
+    const h = makeFakeSdk();
+    const agent = makeAgent(h, denyAll);
+    expect(agent.hasLiveToolUpdate()).toBe(false); // pre-init
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(false); // post-init
+    await agent.dispose();
+  });
+
+  test("hasLiveToolUpdate returns true when session exposes updateTools primitive (Phase 5 readiness)", async () => {
+    // Simulates the post-Phase-4 SDK: session.updateTools exists.
+    // This test also guards Phase 5's flip point — the Phase 3
+    // detection code MUST accept the primitive as-is without any
+    // capability-flag options.
+    const h = makeFakeSdk();
+    (h.session as unknown as { updateTools: () => Promise<void> }).updateTools =
+      async () => {};
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(true);
+    await agent.dispose();
+  });
+
+  test("applyToolListChange is a no-op when session is not yet created (pre-init)", async () => {
+    // The watcher can fire onTransition before any conversation has
+    // been activated — the plugin holds a session-less runtime in
+    // that case. Must not throw and must not log noise.
+    const h = makeFakeSdk();
+    const agent = makeAgent(h, denyAll);
+    await expect(agent.applyToolListChange()).resolves.toBeUndefined();
+    await agent.dispose();
+  });
+
+  test("applyToolListChange logs no-op fallback once when SDK lacks updateTools (FR-011)", async () => {
+    // Strict no-op: FR-011 requires the plugin to not pretend the
+    // update succeeded when it can't. We log at debug once so the
+    // fallback is visible in diagnostics but a flapping server
+    // can't spam the console.
+    const h = makeFakeSdk();
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      await agent.applyToolListChange();
+      await agent.applyToolListChange();
+      await agent.applyToolListChange();
+      const fallbackLogs = debugSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes("FR-011 fallback"),
+      );
+      expect(fallbackLogs.length).toBe(1);
+      await agent.dispose();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  test("applyToolListChange calls session.updateTools with merged tools when primitive is present", async () => {
+    // Planning-docs S1: the SDK receives the FULL merged tool list
+    // (base custom + MCP), not an MCP-only list — otherwise the
+    // session's conversation-specific custom tools would be
+    // silently deleted.
+    const h = makeFakeSdk();
+    const updateCalls: Array<unknown[]> = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push([tools]);
+    };
+    const mcpToolsList = [{ name: "mcp:svc/hello" }] as unknown as SdkTool[];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }, { name: "write_file" }],
+        mcpTools: () => mcpToolsList,
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(1);
+    const applied = updateCalls[0][0] as Array<{ name: string }>;
+    // Must contain both custom (base) and MCP tools.
+    expect(applied.map((t) => t.name).sort()).toEqual(
+      ["mcp:svc/hello", "read_file", "write_file"].sort(),
+    );
+    await agent.dispose();
+  });
+
+  test("applyToolListChange latches during streaming and drains once with last-write-wins snapshot", async () => {
+    // Turn-boundary queueing: two transitions during a stream must
+    // result in exactly ONE drain call using the LATEST mcpTools
+    // snapshot at drain time (not the snapshot at latch time).
+    const h = makeFakeSdk();
+    const updateCalls: Array<Array<{ name: string }>> = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push((tools ?? []) as Array<{ name: string }>);
+    };
+    // Hold sendAndWait open until we say so, so isStreamingFlag stays true.
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    let mcpSnapshot: Array<{ name: string }> = [{ name: "mcp:v1" }];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => mcpSnapshot as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    // Start the iterator body; it will suspend inside the queue loop
+    // waiting for sendAndWait to settle. isStreamingFlag flips true
+    // before that suspension.
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    // First transition: latches.
+    mcpSnapshot = [{ name: "mcp:v1" }, { name: "mcp:v2" }];
+    await agent.applyToolListChange();
+    // Second transition: latch already set — last-write-wins.
+    mcpSnapshot = [{ name: "mcp:final" }];
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(0); // still latched
+    // Now let sendAndWait resolve so the generator can complete.
+    sendGate.resolve({ data: { content: "ok" } });
+    // Drain the terminal event and finish the iterator.
+    const first = await nextP;
+    if (!first.done) {
+      while (true) {
+        const step = await iter.next();
+        if (step.done) break;
+      }
+    }
+    // Give the fire-and-forget drain a microtask to complete.
+    await new Promise((r) => setTimeout(r, 10));
+    // Exactly one drain, using the FINAL snapshot at drain time.
+    expect(updateCalls.length).toBe(1);
+    expect(updateCalls[0].map((t) => t.name).sort()).toEqual(
+      ["mcp:final", "read_file"].sort(),
+    );
+    await agent.dispose();
+  });
+
+  test("applyToolListChange applies immediately when session is idle (not streaming)", async () => {
+    const h = makeFakeSdk();
+    const updateCalls: unknown[] = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push(tools);
+    };
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(1);
+    await agent.dispose();
+  });
+
+  test("dispose drops any pending tool-update latch (post-dispose safety)", async () => {
+    // If a transition latched during a stream and the user
+    // dispatched dispose() before the drain fired, the drain must
+    // not call into the dead session.
+    const h = makeFakeSdk();
+    const updateCalls: unknown[] = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push(tools);
+    };
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    await agent.applyToolListChange(); // latches
+    // Now dispose while the latch is set and the stream is in flight.
+    await agent.dispose();
+    // Release the gate so the generator can unwind cleanly.
+    sendGate.resolve({ data: { content: "ok" } });
+    // Drain the iterator to release its resources.
+    try {
+      const first = await nextP;
+      if (!first.done) {
+        while (true) {
+          const step = await iter
+            .next()
+            .catch(() => ({ done: true, value: undefined }));
+          if (step.done) break;
+        }
+      }
+    } catch {
+      /* dispose may have already torn things down */
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    const postDisposeCalls = updateCalls.length;
+    // A subsequent applyToolListChange must remain a no-op after dispose.
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(postDisposeCalls);
+    // And post-dispose hasLiveToolUpdate must report false.
+    expect(agent.hasLiveToolUpdate()).toBe(false);
+  });
+
+  test("applyToolListChange swallows SDK errors (never crashes plugin)", async () => {
+    // A misbehaving SDK primitive must not propagate to the
+    // watcher subscription in main.ts. The next transition will
+    // retry with a fresh snapshot.
+    const h = makeFakeSdk();
+    (h.session as unknown as {
+      updateTools: () => Promise<void>;
+    }).updateTools = async () => {
+      throw new Error("SDK boom");
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      await expect(agent.applyToolListChange()).resolves.toBeUndefined();
+      // Warning was logged so the failure is diagnosable.
+      const relevant = warnSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes("SDK updateTools threw"),
+      );
+      expect(relevant.length).toBe(1);
+      await agent.dispose();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("AgentSession Phase 4.5: resumeSession swap stop-gap", () => {
+  // Helper: install a Phase-4.5-capable resumeSession + sessionId onto a
+  // fake handle. The fresh session returned by resumeSession is a fresh
+  // Object literal so tests can assert `agent` swapped over.
+  function equipResumeSession(
+    h: ReturnType<typeof makeFakeSdk>,
+    opts: {
+      initialSessionId?: string;
+      onResume?: (sessionId: string, cfg: SdkResumeSessionOptions) => void;
+      resumeThrows?: Error;
+      resumeDelayMs?: number;
+    } = {},
+  ): {
+    resumeCalls: Array<{
+      sessionId: string;
+      opts: SdkResumeSessionOptions;
+    }>;
+    freshSessions: SdkSession[];
+    disconnectedOld: number;
+    disconnectedFresh: number;
+  } {
+    (h.session as unknown as { sessionId: string }).sessionId =
+      opts.initialSessionId ?? "sess-initial";
+    const state = {
+      resumeCalls: [] as Array<{
+        sessionId: string;
+        opts: SdkResumeSessionOptions;
+      }>,
+      freshSessions: [] as SdkSession[],
+      disconnectedOld: 0,
+      disconnectedFresh: 0,
+    };
+    const originalDisconnect = h.session.disconnect;
+    h.session.disconnect = async () => {
+      state.disconnectedOld += 1;
+      await originalDisconnect?.();
+    };
+    (h.client as unknown as {
+      resumeSession?: (
+        sessionId: string,
+        cfg: SdkResumeSessionOptions,
+      ) => Promise<SdkSession>;
+    }).resumeSession = async (sessionId, cfg) => {
+      state.resumeCalls.push({ sessionId, opts: cfg });
+      opts.onResume?.(sessionId, cfg);
+      if (opts.resumeDelayMs) {
+        await new Promise((r) => setTimeout(r, opts.resumeDelayMs));
+      }
+      if (opts.resumeThrows) throw opts.resumeThrows;
+      // Fresh session carries the same sessionId (SDK contract) plus a
+      // marker so tests can assert the swap happened.
+      const fresh: SdkSession = {
+        sessionId,
+        on: () => () => undefined,
+        sendAndWait: async () => ({ data: { content: "resumed" } }),
+        disconnect: async () => {
+          state.disconnectedFresh += 1;
+        },
+      } as unknown as SdkSession;
+      (fresh as unknown as { __resumed: true }).__resumed = true;
+      state.freshSessions.push(fresh);
+      return fresh;
+    };
+    return state;
+  }
+
+  test("hasLiveToolUpdate is true when only resumeSession + sessionId available (no updateTools)", async () => {
+    const h = makeFakeSdk();
+    equipResumeSession(h);
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(true);
+    await agent.dispose();
+  });
+
+  test("hasLiveToolUpdate is false when neither updateTools nor resumeSession available", async () => {
+    const h = makeFakeSdk();
+    // No resumeSession; no sessionId; no updateTools. SDK 1.0.0 baseline.
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("hasLiveToolUpdate is false when resumeSession present but sessionId missing", async () => {
+    const h = makeFakeSdk();
+    (h.client as unknown as {
+      resumeSession?: unknown;
+    }).resumeSession = async () => h.session;
+    // No sessionId assigned — swap cannot proceed.
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("applyToolListChange swaps via resumeSession when updateTools absent", async () => {
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h);
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => [{ name: "mcp:new" }] as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const originalSession = h.session;
+    await agent.applyToolListChange();
+    expect(state.resumeCalls.length).toBe(1);
+    expect(state.resumeCalls[0].sessionId).toBe("sess-initial");
+    // Tools payload must include the fresh mcp snapshot.
+    const toolNames =
+      state.resumeCalls[0].opts.tools?.map((t) => (t as { name: string }).name)
+        .sort() ?? [];
+    expect(toolNames).toEqual(["mcp:new", "read_file"].sort());
+    // onPermissionRequest must be wired.
+    expect(typeof state.resumeCalls[0].opts.onPermissionRequest).toBe(
+      "function",
+    );
+    // Old session disconnected in background.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(state.disconnectedOld).toBe(1);
+    // Fresh session installed on the agent.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const currentSession = (agent as any).session as SdkSession;
+    expect(currentSession).not.toBe(originalSession);
+    expect(
+      (currentSession as unknown as { __resumed?: true }).__resumed,
+    ).toBe(true);
+    await agent.dispose();
+  });
+
+  test("swap preserves onPermissionRequest: fresh session's callback routes to the plugin decider", async () => {
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h);
+    let deciderCalls = 0;
+    const decider = async () => {
+      deciderCalls += 1;
+      return { decision: "deny" as const };
+    };
+    const agent = makeAgent(h, decider);
+    await agent.init();
+    await agent.applyToolListChange();
+    expect(state.resumeCalls.length).toBe(1);
+    // Simulate the SDK invoking the resumed callback.
+    const cb = state.resumeCalls[0].opts.onPermissionRequest;
+    await cb({
+      id: "req-1",
+      toolName: "shell",
+      arguments: {},
+    } as unknown as SdkPermissionRequest);
+    expect(deciderCalls).toBe(1);
+    await agent.dispose();
+  });
+
+  test("swap failure keeps the previous session in place and logs a warning", async () => {
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h, {
+      resumeThrows: new Error("resume boom"),
+    });
+    const originalSession = h.session;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      await expect(agent.applyToolListChange()).resolves.toBeUndefined();
+      expect(state.resumeCalls.length).toBe(1);
+      // Old session NOT disconnected — we still need it.
+      expect(state.disconnectedOld).toBe(0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((agent as any).session).toBe(originalSession);
+      const relevant = warnSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes(
+          "swapSessionForToolRefresh: resumeSession threw",
+        ),
+      );
+      expect(relevant.length).toBe(1);
+      await agent.dispose();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("dispose during resumeSession round-trip disconnects the fresh session and does not swap", async () => {
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h, { resumeDelayMs: 20 });
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    const originalSession = h.session;
+    // Kick off swap without awaiting; then dispose while resumeSession pends.
+    const swapP = agent.applyToolListChange();
+    await new Promise((r) => setTimeout(r, 5));
+    await agent.dispose();
+    await swapP;
+    // Fresh session was built but immediately disconnected because dispose fired.
+    expect(state.resumeCalls.length).toBe(1);
+    expect(state.freshSessions.length).toBe(1);
+    expect(state.disconnectedFresh).toBe(1);
+    // Agent's session was cleared by dispose(); it is NOT the fresh one.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const finalSession = (agent as any).session;
+    expect(finalSession).not.toBe(state.freshSessions[0]);
+    expect(finalSession === originalSession || finalSession == null).toBe(
+      true,
+    );
+  });
+
+  test("streaming begun DURING resumeSession round-trip: fresh session discarded, old session preserved, latch re-set", async () => {
+    // Guards the FR-006 race: after the swap awaits resumeSession
+    // and yields the event loop, a user-triggered send may flip
+    // isStreamingFlag true against the OLD session. If we swap in
+    // the fresh session at that point, disconnecting the old
+    // session aborts the in-flight stream. Instead: discard the
+    // fresh session, re-latch pendingToolUpdate, and let the
+    // stream's drain re-enter applyToolListChange at the turn
+    // boundary.
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h, { resumeDelayMs: 30 });
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    let mcpSnapshot: Array<{ name: string }> = [{ name: "mcp:v1" }];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => mcpSnapshot as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const originalSession = h.session;
+    // Kick off swap while idle — it enters the resumeSession await.
+    mcpSnapshot = [{ name: "mcp:final" }];
+    const swapP = agent.applyToolListChange();
+    // Yield once so the swap enters the await.
+    await new Promise((r) => setTimeout(r, 5));
+    // Now user starts streaming against the OLD session, before
+    // resumeSession resolves.
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    // Let resumeSession resolve.
+    await swapP;
+    // Old session was NOT disconnected — the stream is still using it.
+    expect(state.disconnectedOld).toBe(0);
+    // Fresh session WAS disconnected — it is unused.
+    expect(state.freshSessions.length).toBe(1);
+    expect(state.disconnectedFresh).toBe(1);
+    // Agent's session is still the original.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((agent as any).session).toBe(originalSession);
+    // Let the stream complete; the drain should re-drive the swap.
+    sendGate.resolve({ data: { content: "ok" } });
+    const first = await nextP;
+    if (!first.done) {
+      while (true) {
+        const step = await iter.next();
+        if (step.done) break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    // Second resume call fires from the drain, this time cleanly.
+    expect(state.resumeCalls.length).toBe(2);
+    expect(state.disconnectedOld).toBe(1);
+    await agent.dispose();
+  });
+
+  test("swap latches during streaming and drains once on completion", async () => {
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h);
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    let mcpSnapshot: Array<{ name: string }> = [{ name: "mcp:v1" }];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => mcpSnapshot as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    // First transition while streaming — latch, no resume yet.
+    mcpSnapshot = [{ name: "mcp:v1" }, { name: "mcp:v2" }];
+    await agent.applyToolListChange();
+    expect(state.resumeCalls.length).toBe(0);
+    // Second transition — still latched (last-write-wins).
+    mcpSnapshot = [{ name: "mcp:final" }];
+    await agent.applyToolListChange();
+    expect(state.resumeCalls.length).toBe(0);
+    // Let the stream complete.
+    sendGate.resolve({ data: { content: "ok" } });
+    const first = await nextP;
+    if (!first.done) {
+      while (true) {
+        const step = await iter.next();
+        if (step.done) break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    // Exactly one drain, using the FINAL snapshot at drain time.
+    expect(state.resumeCalls.length).toBe(1);
+    const toolNames =
+      state.resumeCalls[0].opts.tools?.map((t) => (t as { name: string }).name)
+        .sort() ?? [];
+    expect(toolNames).toEqual(["mcp:final", "read_file"].sort());
     await agent.dispose();
   });
 });
