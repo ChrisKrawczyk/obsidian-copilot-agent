@@ -24,27 +24,35 @@ left two gaps:
 
 ### 1. Inline readiness pill (`ChatView`)
 
-A small inline pill next to the composer that reflects the gate's
-state machine. The pill:
+A small inline pill next to the composer, rendered while the plugin
+is waiting on MCP servers to reach a terminal state. The pill:
 
-- Is announced via `aria-live="polite"` and is keyboard/focus-safe.
-- Emits at most one state per second (rAF-coalesced).
-- Only renders while `AgentSession` is in `awaiting-mcp-readiness`; it
-  is torn down as soon as `sdkReady` fires.
-- Fast-path guarded: if the gate resolves within `readinessFastPathMs`
-  (default 200 ms) the pill is never shown.
+- Uses `role="status"` so screen readers announce state changes as
+  a live region.
+- Only renders while the `mcpReadinessGate` cycle is in flight;
+  disappears the moment the gate resolves.
+- Fast-path guarded: if the gate resolves within `FAST_PATH_MS`
+  (a static in `ChatView`, currently `100` ms — matches Spec FR-013
+  / SC-008) the pill is never shown.
 
-State machine surfaced by `AgentSession` via
-`onReadinessGateEvent({ phase, pending, resolved, timedOut })`:
+Event surface on `AgentSession` (`src/sdk/AgentSession.ts:163`):
 
-- `waiting` — one or more MCP servers not yet terminal
-- `all-connected` — every server terminal in `connected`
-- `partial` — at least one terminal but some errored/timed-out
-- `resolved` — gate closed (session about to send)
+```ts
+onReadinessGateEvent?: (evt: "start" | "resolved") => void;
+```
 
-Consumer implementation lives in `src/ChatView.ts` under
-`renderReadinessPill()` and is fully driven by the event stream — no
-polling.
+`start` fires immediately when a session enters
+`awaitMcpReadinessGate()`. `resolved` fires when the gate returns.
+
+Consumer implementation lives in `src/ui/ChatView.ts` — the pill's
+lifecycle is driven through `enterReadinessPending()`,
+`showReadinessPill()`, and `exitReadinessPending()`; the DOM node is
+built once via `buildReadinessPill()` and shown/hidden thereafter.
+`ChatView.ts:237` holds `FAST_PATH_MS`. Pill state is tracked as
+`idle | pending` internally — the finer states (`waiting`,
+`all-connected`, `partial`) live in `McpStatusWatcher`; the pill
+does not distinguish them because the readiness gate resolves on
+*any* terminal outcome.
 
 ### 2. Automatic live tool refresh (`AgentSession`)
 
@@ -54,13 +62,13 @@ tearing down conversation state.
 
 **Broadcast wiring** (`src/main.ts`):
 
-- `McpStatusWatcher.onTransition("connected")` fires
+- `McpStatusWatcher.onTransition("connected")` triggers
   `handleMcpTransitionForToolRefresh(...)` which iterates all live
   `AgentSession` instances and calls `applyToolListChange()` on each.
-- `handleMcpNoticeForToolToast(...)` shows a single
-  `"MCP tools refreshed"` Notice per burst (5 s coalescing window),
-  gated on `hasLiveToolUpdate()` so the toast only fires when the
-  refresh actually took effect.
+- `handleMcpNoticeForToolToast(...)` shows a per-server Notice
+  `"Tools from <serverName> are now available."`, gated on
+  `hasLiveToolUpdate()` so the toast only fires when the refresh
+  actually took effect. Debounced against notice-spam.
 
 **`AgentSession.applyToolListChange()`** — three branches evaluated in
 order:
@@ -115,25 +123,30 @@ Phase 5 is tidying, not a fix.
 
 ## Files touched in v0.9.0
 
-- `src/ChatView.ts` — readiness pill render + lifecycle
-- `src/sdk/AgentSession.ts` — readiness gate event stream,
-  `applyToolListChange`, `swapSessionForToolRefresh`,
-  `hasLiveToolUpdate`, `canSwapForToolRefresh`
+- `src/ui/ChatView.ts` — readiness pill render + lifecycle
+  (`buildReadinessPill`, `enterReadinessPending`,
+  `showReadinessPill`, `exitReadinessPending`, `FAST_PATH_MS`)
+- `src/sdk/AgentSession.ts` — readiness gate event stream
+  (`onReadinessGateEvent`), `applyToolListChange`,
+  `swapSessionForToolRefresh`, `hasLiveToolUpdate`,
+  `canSwapForToolRefresh`
 - `src/main.ts` — watcher-side wiring
   (`handleMcpTransitionForToolRefresh`,
   `handleMcpNoticeForToolToast`)
-- `src/domain/McpStatusWatcher.ts` — Phase 1 status coalescing (may
-  have shipped in an earlier release; see the plan file for
-  provenance)
+- `src/mcp/McpStatusWatcher.ts` — Phase 1 status coalescing and
+  transition/notice event surface
 - Tests: `src/sdk/AgentSession.test.ts`,
-  `src/main.mcpToolRefresh.test.ts`, `src/ChatView.test.ts`
+  `src/main.mcpToolRefresh.test.ts`,
+  `src/ui/ChatView.readinessPill.test.ts`
 
 ## Testing notes
 
 - 1559 tests across 109 files at v0.9.0. Full suite runs in ~17 s on
   CI-equivalent hardware.
-- The session-swap path is covered by 8 dedicated tests including a
-  streaming-latch drain-once test and a dispose-mid-round-trip test.
+- The session-swap path is covered by 9 dedicated tests including a
+  streaming-latch drain-once test, a dispose-mid-round-trip test,
+  and a streaming-started-mid-round-trip test that guards FR-006
+  (in-flight turns are never interrupted by a swap).
 - Reload-the-plugin escape hatch remains available: if for any reason
   the swap fails and the user has stale tools, restarting Obsidian
   still works exactly as before.

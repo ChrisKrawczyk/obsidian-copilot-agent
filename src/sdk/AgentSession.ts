@@ -1466,6 +1466,18 @@ export class CopilotAgentSession implements AgentSession {
       await safeCall(() => fresh.disconnect?.());
       return;
     }
+    // Race: a new turn began during the resume round-trip. The
+    // in-flight stream captured the OLD session at start; if we
+    // swap now, disconnecting the old session would abort that
+    // stream mid-turn (FR-006 violation). Discard the fresh
+    // session, re-latch the pending flag, and let the streaming
+    // finally re-drive `applyToolListChange` at the next
+    // turn boundary.
+    if (this.isStreamingFlag) {
+      this.pendingToolUpdate = true;
+      void safeCall(() => fresh.disconnect?.());
+      return;
+    }
     this.session = fresh;
     // Disconnect the old session in the background so we don't
     // block the transition subscriber on SDK teardown. Any per-turn

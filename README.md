@@ -10,13 +10,14 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
   waiting on MCP servers to come online (device-flow login, cloud CLI
   refresh, cold-start startup, etc.), the composer now shows an inline
   pill naming what it is waiting for. Fast-path guarded — if servers
-  reach a terminal state within 200 ms the pill never appears.
-  Announced via `aria-live` so screen readers pick up the state.
+  reach a terminal state within 100 ms the pill never appears.
+  Announced via `role="status"` so screen readers pick up the state.
 - **Automatic tool refresh after slow-auth connects.** Servers that
   authenticate after the composer has already opened — including cases
   where an access token expires mid-session and the server reconnects —
   now inject their tools into the live chat session automatically. A
-  single "MCP tools refreshed" Notice confirms the pickup. **No more
+  single "Tools from *&lt;server name&gt;* are now available." Notice
+  confirms the pickup, naming the specific server. **No more
   reloading Obsidian to recover from token expiry.**
 - **Preserves conversation state.** The refresh uses the Copilot SDK's
   `client.resumeSession(sessionId, …)` primitive to swap the session in

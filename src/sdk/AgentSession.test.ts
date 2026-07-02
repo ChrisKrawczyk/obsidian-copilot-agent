@@ -2955,6 +2955,69 @@ describe("AgentSession Phase 4.5: resumeSession swap stop-gap", () => {
     );
   });
 
+  test("streaming begun DURING resumeSession round-trip: fresh session discarded, old session preserved, latch re-set", async () => {
+    // Guards the FR-006 race: after the swap awaits resumeSession
+    // and yields the event loop, a user-triggered send may flip
+    // isStreamingFlag true against the OLD session. If we swap in
+    // the fresh session at that point, disconnecting the old
+    // session aborts the in-flight stream. Instead: discard the
+    // fresh session, re-latch pendingToolUpdate, and let the
+    // stream's drain re-enter applyToolListChange at the turn
+    // boundary.
+    const h = makeFakeSdk();
+    const state = equipResumeSession(h, { resumeDelayMs: 30 });
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    let mcpSnapshot: Array<{ name: string }> = [{ name: "mcp:v1" }];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => mcpSnapshot as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const originalSession = h.session;
+    // Kick off swap while idle — it enters the resumeSession await.
+    mcpSnapshot = [{ name: "mcp:final" }];
+    const swapP = agent.applyToolListChange();
+    // Yield once so the swap enters the await.
+    await new Promise((r) => setTimeout(r, 5));
+    // Now user starts streaming against the OLD session, before
+    // resumeSession resolves.
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    // Let resumeSession resolve.
+    await swapP;
+    // Old session was NOT disconnected — the stream is still using it.
+    expect(state.disconnectedOld).toBe(0);
+    // Fresh session WAS disconnected — it is unused.
+    expect(state.freshSessions.length).toBe(1);
+    expect(state.disconnectedFresh).toBe(1);
+    // Agent's session is still the original.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((agent as any).session).toBe(originalSession);
+    // Let the stream complete; the drain should re-drive the swap.
+    sendGate.resolve({ data: { content: "ok" } });
+    const first = await nextP;
+    if (!first.done) {
+      while (true) {
+        const step = await iter.next();
+        if (step.done) break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    // Second resume call fires from the drain, this time cleanly.
+    expect(state.resumeCalls.length).toBe(2);
+    expect(state.disconnectedOld).toBe(1);
+    await agent.dispose();
+  });
+
   test("swap latches during streaming and drains once on completion", async () => {
     const h = makeFakeSdk();
     const state = equipResumeSession(h);
