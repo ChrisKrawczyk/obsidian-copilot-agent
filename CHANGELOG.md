@@ -3,6 +3,29 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.0] - 2026-07-02
+
+Two small, coherent UX follow-ups on top of v0.8.0's MCP work: the chat composer now tells you what it is waiting on when it stalls on an MCP server, and slow-authenticating servers that connect after the composer opens (or reconnect after a token expiry) get their tools injected into the live chat automatically. No breaking changes; no new user-facing settings.
+
+### Added
+
+- **Inline readiness indicator on the chat composer.** A small pill next to a new-chat composer names the MCP servers it is currently waiting on and updates as they resolve. Rendered only while the readiness gate is open; disappears the moment the composer becomes usable. Fast-path guarded — if the gate closes within 200 ms the pill never appears, so quick starts still feel instant. Announced via `aria-live="polite"` for screen readers.
+- **Automatic live tool refresh on late MCP connect.** When an MCP server reaches `connected` after the composer is already open (typical for device-flow logins, `az login` refreshes, or servers whose first-time auth exceeded the 15 s readiness ceiling), the plugin now injects that server's tools into the running chat session and shows a single "MCP tools refreshed" Notice. Conversation history is preserved. **Users no longer need to reload Obsidian when a slow-auth server finally connects, or when an MCP access token expires and reconnects mid-session.** (`src/main.ts`, `src/sdk/AgentSession.ts`.)
+- **Turn-boundary queueing for the refresh.** If a server connects mid-stream, the refresh is latched and applied exactly once at the turn boundary using the latest snapshot at drain time (last-write-wins). Prevents mid-response tool-list churn without dropping updates. (`src/sdk/AgentSession.ts` — `pendingToolUpdate` latch.)
+
+### Changed
+
+- The chat composer's disabled state during MCP readiness now carries a positive signal (the pill) instead of only a greyed-out background, resolving a v0.8.0 rollout observation that users assumed the plugin was broken during the wait.
+
+### Under the hood
+
+- The live tool refresh uses the Copilot SDK's `client.resumeSession(sessionId, { tools, model, onPermissionRequest, … })` to swap the SDK session in place. `sessionId` is stable across the resume, so server-side conversation history is preserved. The old session is disconnected in the background after the fresh one is installed.
+- Race safety: if the user closes the chat while a refresh is in flight, the freshly-built session is disconnected and the swap is skipped. If the resume call fails, the previous session is left in place and the next transition retries with a fresh snapshot.
+
+### Follow-ups
+
+- The refresh above is a stop-gap while an upstream `session.updateTools(...)` primitive lands. That primitive is proposed at [github/copilot-sdk#1896](https://github.com/github/copilot-sdk/issues/1896) (re-triage of the previously-closed #735). When it ships and is published to npm, a future release will bump `@github/copilot-sdk`, wire the real primitive, and drop the session-swap fallback. **User-visible behavior is unchanged either way** — this is purely an internal simplification.
+
 ## [0.8.0] - 2026-07-01
 
 Adds importable preset packs (JSON) and an export-as-pack flow on top of v0.7, plus targeted MCP UX hardening surfaced during smoke testing (error visibility, tool readiness on reload). Additive over v0.7; no breaking changes. Existing built-in presets and HTTP authentication paths are unchanged.

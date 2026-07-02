@@ -1,7 +1,7 @@
 {
   "id": "obsidian-copilot-agent",
   "name": "Copilot Agent",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "minAppVersion": "1.5.0",
   "description": "GitHub Copilot agent for Obsidian, with vault tools, MCP, and OAuth.",
   "author": "Chris Krawczyk",
