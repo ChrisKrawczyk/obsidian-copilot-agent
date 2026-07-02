@@ -95,6 +95,67 @@ export async function removeMcpServerLifecycle(
 }
 
 /**
+ * Phase 3 (MCP Readiness UX): pure handler for
+ * `McpStatusWatcher.onTransition`. Fans out
+ * `applyToolListChange()` to every live runtime so the tool
+ * inventory tracks reality within the FR-004/005/007 2 s bound.
+ *
+ * Fire-and-forget: the watcher's subscribe loop must not block on
+ * SDK round-trips. Errors are logged with the offending serverId.
+ *
+ * Extracted for direct unit testing.
+ */
+export function handleMcpTransitionForToolRefresh(
+  liveRuntimes: Iterable<{ session: Pick<AgentSession, "applyToolListChange"> }>,
+  evt: { serverId: McpServerId },
+): void {
+  for (const { session } of liveRuntimes) {
+    void session.applyToolListChange().catch((e) => {
+      console.warn(
+        "[copilot-agent] applyToolListChange failed",
+        evt.serverId,
+        e,
+      );
+    });
+  }
+}
+
+/**
+ * Phase 3 (MCP Readiness UX): pure handler for
+ * `McpStatusWatcher.onNotice`. Emits a single toast naming the
+ * server whose tools just became available.
+ *
+ * Silent on disconnect: dropping tools mid-session is a background
+ * event, not user-actionable.
+ *
+ * Toast gating: suppressed when no live runtime can actually apply
+ * the update — with SDK 1.0.0 (no `updateTools` primitive) the
+ * toast would lie because tools require reload (planning-docs S3 /
+ * FR-011).
+ *
+ * Extracted for direct unit testing.
+ */
+export function handleMcpNoticeForToolToast(
+  liveRuntimes: Iterable<{ session: Pick<AgentSession, "hasLiveToolUpdate"> }>,
+  serversSnapshot: ReadonlyArray<{ id: McpServerId; name: string }>,
+  notify: (message: string, timeoutMs: number) => void,
+  evt: { serverId: McpServerId; kind: "connected" | "disconnected" },
+): void {
+  if (evt.kind !== "connected") return;
+  let anyCanUpdate = false;
+  for (const { session } of liveRuntimes) {
+    if (session.hasLiveToolUpdate()) {
+      anyCanUpdate = true;
+      break;
+    }
+  }
+  if (!anyCanUpdate) return;
+  const name =
+    serversSnapshot.find((s) => s.id === evt.serverId)?.name ?? evt.serverId;
+  notify(`Tools from ${name} are now available.`, 4000);
+}
+
+/**
  * Phase 3 wiring:
  *   1. Build TokenStore + AuthController early (they hold no SDK state).
  *   2. Build AgentSession with no token initially. AuthController will
@@ -388,6 +449,29 @@ export default class CopilotAgentPlugin extends Plugin {
       serversProvider: () => mcpSettingsStore.snapshot(),
     });
     this.mcpStatusWatcher = mcpStatusWatcher;
+    // Phase 3 (MCP Readiness UX): wire the watcher's two surfaces.
+    //   • onTransition (leading-edge, no debounce): fan out
+    //     `applyToolListChange()` to every live runtime so the tool
+    //     inventory tracks reality within the FR-004/005/007 2 s
+    //     bound. Metadata-only conversations (no live runtime) pick
+    //     up the change on their next createSession via
+    //     `toolsForSession()`.
+    //   • onNotice (5 s per-server coalesced): show a single toast
+    //     naming the server whose tools just became available. Gated
+    //     on `hasLiveToolUpdate()` — with SDK 1.0.0 (no primitive)
+    //     the toast would lie because tools require reload
+    //     (planning-docs S3 / FR-011).
+    mcpStatusWatcher.onTransition((evt) => {
+      handleMcpTransitionForToolRefresh(liveRuntimes, evt);
+    });
+    mcpStatusWatcher.onNotice((evt) => {
+      handleMcpNoticeForToolToast(
+        liveRuntimes,
+        mcpSettingsStore.snapshot(),
+        (message, timeoutMs) => new Notice(message, timeoutMs),
+        evt,
+      );
+    });
     const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
       void reconcileMcpLifecycle(mcpManager).catch((err) => {
         console.warn("[copilot-agent] MCP lifecycle reconcile failed", err);

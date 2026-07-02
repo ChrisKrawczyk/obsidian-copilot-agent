@@ -8,6 +8,7 @@ import {
   type SdkPermissionRequest,
   type SdkPermissionResult,
   type SdkSession,
+  type SdkTool,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
 import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
@@ -2493,5 +2494,250 @@ describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
     expect(agent.hasDeferredSession()).toBe(true);
     expect(agent.hasPendingApprovals()).toBe(false);
     await agent.dispose();
+  });
+});
+
+// ---------- MCP Readiness UX Phase 3: applyToolListChange ----------
+
+describe("CopilotAgentSession — applyToolListChange (MCP Readiness UX Phase 3)", () => {
+  test("hasLiveToolUpdate returns false when session has no updateTools primitive (SDK 1.0.0)", async () => {
+    // Default fake SDK session in makeFakeSdk has no updateTools —
+    // this is the SDK 1.0.0 baseline the plugin ships against
+    // today (planning-docs S3).
+    const h = makeFakeSdk();
+    const agent = makeAgent(h, denyAll);
+    expect(agent.hasLiveToolUpdate()).toBe(false); // pre-init
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(false); // post-init
+    await agent.dispose();
+  });
+
+  test("hasLiveToolUpdate returns true when session exposes updateTools primitive (Phase 5 readiness)", async () => {
+    // Simulates the post-Phase-4 SDK: session.updateTools exists.
+    // This test also guards Phase 5's flip point — the Phase 3
+    // detection code MUST accept the primitive as-is without any
+    // capability-flag options.
+    const h = makeFakeSdk();
+    (h.session as unknown as { updateTools: () => Promise<void> }).updateTools =
+      async () => {};
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    expect(agent.hasLiveToolUpdate()).toBe(true);
+    await agent.dispose();
+  });
+
+  test("applyToolListChange is a no-op when session is not yet created (pre-init)", async () => {
+    // The watcher can fire onTransition before any conversation has
+    // been activated — the plugin holds a session-less runtime in
+    // that case. Must not throw and must not log noise.
+    const h = makeFakeSdk();
+    const agent = makeAgent(h, denyAll);
+    await expect(agent.applyToolListChange()).resolves.toBeUndefined();
+    await agent.dispose();
+  });
+
+  test("applyToolListChange logs no-op fallback once when SDK lacks updateTools (FR-011)", async () => {
+    // Strict no-op: FR-011 requires the plugin to not pretend the
+    // update succeeded when it can't. We log at debug once so the
+    // fallback is visible in diagnostics but a flapping server
+    // can't spam the console.
+    const h = makeFakeSdk();
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      await agent.applyToolListChange();
+      await agent.applyToolListChange();
+      await agent.applyToolListChange();
+      const fallbackLogs = debugSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes("FR-011 fallback"),
+      );
+      expect(fallbackLogs.length).toBe(1);
+      await agent.dispose();
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  test("applyToolListChange calls session.updateTools with merged tools when primitive is present", async () => {
+    // Planning-docs S1: the SDK receives the FULL merged tool list
+    // (base custom + MCP), not an MCP-only list — otherwise the
+    // session's conversation-specific custom tools would be
+    // silently deleted.
+    const h = makeFakeSdk();
+    const updateCalls: Array<unknown[]> = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push([tools]);
+    };
+    const mcpToolsList = [{ name: "mcp:svc/hello" }] as unknown as SdkTool[];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }, { name: "write_file" }],
+        mcpTools: () => mcpToolsList,
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(1);
+    const applied = updateCalls[0][0] as Array<{ name: string }>;
+    // Must contain both custom (base) and MCP tools.
+    expect(applied.map((t) => t.name).sort()).toEqual(
+      ["mcp:svc/hello", "read_file", "write_file"].sort(),
+    );
+    await agent.dispose();
+  });
+
+  test("applyToolListChange latches during streaming and drains once with last-write-wins snapshot", async () => {
+    // Turn-boundary queueing: two transitions during a stream must
+    // result in exactly ONE drain call using the LATEST mcpTools
+    // snapshot at drain time (not the snapshot at latch time).
+    const h = makeFakeSdk();
+    const updateCalls: Array<Array<{ name: string }>> = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push((tools ?? []) as Array<{ name: string }>);
+    };
+    // Hold sendAndWait open until we say so, so isStreamingFlag stays true.
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    let mcpSnapshot: Array<{ name: string }> = [{ name: "mcp:v1" }];
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        tools: [{ name: "read_file" }],
+        mcpTools: () => mcpSnapshot as unknown as SdkTool[],
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    // Start the iterator body; it will suspend inside the queue loop
+    // waiting for sendAndWait to settle. isStreamingFlag flips true
+    // before that suspension.
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    // First transition: latches.
+    mcpSnapshot = [{ name: "mcp:v1" }, { name: "mcp:v2" }];
+    await agent.applyToolListChange();
+    // Second transition: latch already set — last-write-wins.
+    mcpSnapshot = [{ name: "mcp:final" }];
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(0); // still latched
+    // Now let sendAndWait resolve so the generator can complete.
+    sendGate.resolve({ data: { content: "ok" } });
+    // Drain the terminal event and finish the iterator.
+    const first = await nextP;
+    if (!first.done) {
+      while (true) {
+        const step = await iter.next();
+        if (step.done) break;
+      }
+    }
+    // Give the fire-and-forget drain a microtask to complete.
+    await new Promise((r) => setTimeout(r, 10));
+    // Exactly one drain, using the FINAL snapshot at drain time.
+    expect(updateCalls.length).toBe(1);
+    expect(updateCalls[0].map((t) => t.name).sort()).toEqual(
+      ["mcp:final", "read_file"].sort(),
+    );
+    await agent.dispose();
+  });
+
+  test("applyToolListChange applies immediately when session is idle (not streaming)", async () => {
+    const h = makeFakeSdk();
+    const updateCalls: unknown[] = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push(tools);
+    };
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(1);
+    await agent.dispose();
+  });
+
+  test("dispose drops any pending tool-update latch (post-dispose safety)", async () => {
+    // If a transition latched during a stream and the user
+    // dispatched dispose() before the drain fired, the drain must
+    // not call into the dead session.
+    const h = makeFakeSdk();
+    const updateCalls: unknown[] = [];
+    (h.session as unknown as {
+      updateTools: (tools: unknown) => Promise<void>;
+    }).updateTools = async (tools) => {
+      updateCalls.push(tools);
+    };
+    const sendGate = deferred<unknown>();
+    h.session.sendAndWait = async () => sendGate.promise;
+    const agent = makeAgent(h, denyAll);
+    await agent.init();
+    const iter = agent.sendMessageStreaming("hi")[Symbol.asyncIterator]();
+    const nextP = iter.next();
+    await new Promise((r) => setTimeout(r, 0));
+    await agent.applyToolListChange(); // latches
+    // Now dispose while the latch is set and the stream is in flight.
+    await agent.dispose();
+    // Release the gate so the generator can unwind cleanly.
+    sendGate.resolve({ data: { content: "ok" } });
+    // Drain the iterator to release its resources.
+    try {
+      const first = await nextP;
+      if (!first.done) {
+        while (true) {
+          const step = await iter
+            .next()
+            .catch(() => ({ done: true, value: undefined }));
+          if (step.done) break;
+        }
+      }
+    } catch {
+      /* dispose may have already torn things down */
+    }
+    await new Promise((r) => setTimeout(r, 10));
+    const postDisposeCalls = updateCalls.length;
+    // A subsequent applyToolListChange must remain a no-op after dispose.
+    await agent.applyToolListChange();
+    expect(updateCalls.length).toBe(postDisposeCalls);
+    // And post-dispose hasLiveToolUpdate must report false.
+    expect(agent.hasLiveToolUpdate()).toBe(false);
+  });
+
+  test("applyToolListChange swallows SDK errors (never crashes plugin)", async () => {
+    // A misbehaving SDK primitive must not propagate to the
+    // watcher subscription in main.ts. The next transition will
+    // retry with a fresh snapshot.
+    const h = makeFakeSdk();
+    (h.session as unknown as {
+      updateTools: () => Promise<void>;
+    }).updateTools = async () => {
+      throw new Error("SDK boom");
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      await expect(agent.applyToolListChange()).resolves.toBeUndefined();
+      // Warning was logged so the failure is diagnosable.
+      const relevant = warnSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes("SDK updateTools threw"),
+      );
+      expect(relevant.length).toBe(1);
+      await agent.dispose();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
