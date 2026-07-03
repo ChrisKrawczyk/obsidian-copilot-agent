@@ -46,6 +46,8 @@ import type { McpServerId } from "./mcp/McpTypes";
 import { resolveMcpToolSourceMetadata } from "./mcp/McpToolIdentity";
 import { buildMcpToolRegistrySnapshot } from "./mcp/McpToolRegistry";
 import { createMcpSdkTools } from "./mcp/McpToolBridge";
+import { McpStatusWatcher } from "./mcp/McpStatusWatcher";
+import { ReadinessGateBus } from "./ui/ReadinessGateBus";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
@@ -93,6 +95,67 @@ export async function removeMcpServerLifecycle(
 }
 
 /**
+ * Phase 3 (MCP Readiness UX): pure handler for
+ * `McpStatusWatcher.onTransition`. Fans out
+ * `applyToolListChange()` to every live runtime so the tool
+ * inventory tracks reality within the FR-004/005/007 2 s bound.
+ *
+ * Fire-and-forget: the watcher's subscribe loop must not block on
+ * SDK round-trips. Errors are logged with the offending serverId.
+ *
+ * Extracted for direct unit testing.
+ */
+export function handleMcpTransitionForToolRefresh(
+  liveRuntimes: Iterable<{ session: Pick<AgentSession, "applyToolListChange"> }>,
+  evt: { serverId: McpServerId },
+): void {
+  for (const { session } of liveRuntimes) {
+    void session.applyToolListChange().catch((e) => {
+      console.warn(
+        "[copilot-agent] applyToolListChange failed",
+        evt.serverId,
+        e,
+      );
+    });
+  }
+}
+
+/**
+ * Phase 3 (MCP Readiness UX): pure handler for
+ * `McpStatusWatcher.onNotice`. Emits a single toast naming the
+ * server whose tools just became available.
+ *
+ * Silent on disconnect: dropping tools mid-session is a background
+ * event, not user-actionable.
+ *
+ * Toast gating: suppressed when no live runtime can actually apply
+ * the update — with SDK 1.0.0 (no `updateTools` primitive) the
+ * toast would lie because tools require reload (planning-docs S3 /
+ * FR-011).
+ *
+ * Extracted for direct unit testing.
+ */
+export function handleMcpNoticeForToolToast(
+  liveRuntimes: Iterable<{ session: Pick<AgentSession, "hasLiveToolUpdate"> }>,
+  serversSnapshot: ReadonlyArray<{ id: McpServerId; name: string }>,
+  notify: (message: string, timeoutMs: number) => void,
+  evt: { serverId: McpServerId; kind: "connected" | "disconnected" },
+): void {
+  if (evt.kind !== "connected") return;
+  let anyCanUpdate = false;
+  for (const { session } of liveRuntimes) {
+    if (session.hasLiveToolUpdate()) {
+      anyCanUpdate = true;
+      break;
+    }
+  }
+  if (!anyCanUpdate) return;
+  const name =
+    serversSnapshot.find((s) => s.id === evt.serverId)?.name ?? evt.serverId;
+  notify(`Tools from ${name} are now available.`, 4000);
+}
+
+/**
  * Phase 3 wiring:
  *   1. Build TokenStore + AuthController early (they hold no SDK state).
  *   2. Build AgentSession with no token initially. AuthController will
@@ -112,6 +175,21 @@ export default class CopilotAgentPlugin extends Plugin {
   mcpSettingsStore: McpSettingsStore | null = null;
   presetPacksStore: PresetPacksStore | null = null;
   mcpManager: McpManager | null = null;
+  /**
+   * Phase 2 (MCP Readiness UX): plugin-scope pub/sub bus that fans
+   * out `awaitMcpReadinessGate` start/resolved events from every
+   * conversation's AgentSession to any open ChatView. Held on the
+   * plugin so `onunload` can dispose all listeners.
+   */
+  private readinessGateBus: ReadinessGateBus | null = null;
+  /**
+   * Phase 2 (MCP Readiness UX): pure McpManager status watcher used
+   * by ChatView for the readiness pill (via `snapshotPending()`).
+   * Phase 3+ will add `onTransition` subscriptions for live tool
+   * refresh — the watcher is created here so both surfaces share a
+   * single subscription to McpManager.
+   */
+  private mcpStatusWatcher: McpStatusWatcher | null = null;
   /** v0.6 Phase 2: most-recent BinaryFetcher failure, surfaced by the
    *  Settings tab's CliBinarySection so the user can see why startup
    *  short-circuited and click Retry. Null on success or before any
@@ -358,6 +436,42 @@ export default class CopilotAgentPlugin extends Plugin {
       fetch: createObsidianFetch(),
     });
     this.mcpManager = mcpManager;
+    // Phase 2 (MCP Readiness UX): plugin-scope readiness gate bus and
+    // status watcher. Created after `mcpManager` so both can share
+    // its subscription/snapshot APIs. The watcher's transition
+    // surface is unused in Phase 2 (added for the pill's pending
+    // server label refresh only); Phase 3 adds `onTransition` /
+    // `onNotice` subscribers for live tool refresh + toast.
+    const readinessGateBus = new ReadinessGateBus();
+    this.readinessGateBus = readinessGateBus;
+    const mcpStatusWatcher = new McpStatusWatcher({
+      manager: mcpManager,
+      serversProvider: () => mcpSettingsStore.snapshot(),
+    });
+    this.mcpStatusWatcher = mcpStatusWatcher;
+    // Phase 3 (MCP Readiness UX): wire the watcher's two surfaces.
+    //   • onTransition (leading-edge, no debounce): fan out
+    //     `applyToolListChange()` to every live runtime so the tool
+    //     inventory tracks reality within the FR-004/005/007 2 s
+    //     bound. Metadata-only conversations (no live runtime) pick
+    //     up the change on their next createSession via
+    //     `toolsForSession()`.
+    //   • onNotice (5 s per-server coalesced): show a single toast
+    //     naming the server whose tools just became available. Gated
+    //     on `hasLiveToolUpdate()` — with SDK 1.0.0 (no primitive)
+    //     the toast would lie because tools require reload
+    //     (planning-docs S3 / FR-011).
+    mcpStatusWatcher.onTransition((evt) => {
+      handleMcpTransitionForToolRefresh(liveRuntimes, evt);
+    });
+    mcpStatusWatcher.onNotice((evt) => {
+      handleMcpNoticeForToolToast(
+        liveRuntimes,
+        mcpSettingsStore.snapshot(),
+        (message, timeoutMs) => new Notice(message, timeoutMs),
+        evt,
+      );
+    });
     const unsubscribeMcpSettings = mcpSettingsStore.subscribe(() => {
       void reconcileMcpLifecycle(mcpManager).catch((err) => {
         console.warn("[copilot-agent] MCP lifecycle reconcile failed", err);
@@ -633,6 +747,12 @@ export default class CopilotAgentPlugin extends Plugin {
         // the gate never rejects, so a slow server just degrades to a
         // partial tool list rather than hanging the agent.
         mcpReadinessGate: () => mcpManager.waitUntilEnabledReady(15_000),
+        // Phase 2 (MCP Readiness UX): fan out gate lifecycle events to
+        // any open ChatView bound to this conversation. The bus
+        // filters by `conversationId` so multiple concurrent gates
+        // (one per conversation) don't cross-signal each other.
+        onReadinessGateEvent: (kind) =>
+          readinessGateBus.publish({ conversationId: metadata.id, kind }),
         safety: {
           config: () => {
             const snap = safetySettingsStore.snapshot();
@@ -948,6 +1068,14 @@ export default class CopilotAgentPlugin extends Plugin {
           );
         }
       },
+      // Phase 2 (MCP Readiness UX): forward the plugin-scope bus +
+      // pending snapshot + name resolver into ChatView so its
+      // readiness pill can render pending server names and flip on
+      // gate lifecycle events.
+      readinessGateBus,
+      snapshotPendingMcp: () => mcpStatusWatcher.snapshotPending(),
+      mcpServerName: (id) =>
+        mcpSettingsStore.snapshot().find((s) => s.id === id)?.name,
     });
 
     // v0.3 Phase 5 (FR-008 durability): Obsidian awaits handlers on
@@ -976,12 +1104,30 @@ export default class CopilotAgentPlugin extends Plugin {
     const mcpManager = this.mcpManager;
     const store = this.conversationsStore;
     const disposeShared = this.disposeSharedSdkClient;
+    const readinessGateBus = this.readinessGateBus;
+    const mcpStatusWatcher = this.mcpStatusWatcher;
     this.conversationManager = null;
     this.mcpManager = null;
     this.conversationsStore = null;
     this.disposeSharedSdkClient = null;
     this.mcpSettingsStore = null;
     this.presetPacksStore = null;
+    this.readinessGateBus = null;
+    this.mcpStatusWatcher = null;
+    // Phase 2 (MCP Readiness UX): tear down the bus + watcher BEFORE
+    // disposing runtimes so any late `resolved` publishes from
+    // in-flight `awaitMcpReadinessGate` calls are dropped rather
+    // than fanning out to already-closed ChatViews.
+    try {
+      readinessGateBus?.disposeAll();
+    } catch (err) {
+      console.warn("[copilot-agent] readiness bus dispose failed", err);
+    }
+    try {
+      mcpStatusWatcher?.disposeAll();
+    } catch (err) {
+      console.warn("[copilot-agent] mcp status watcher dispose failed", err);
+    }
     // Flush BEFORE disposing runtimes so any in-flight debounced
     // conversation/undo writes land. dispose only cancels SDK streams;
     // the journal/store deltas are already committed in memory.

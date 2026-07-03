@@ -150,6 +150,18 @@ export interface AgentSessionOptions {
    */
   mcpReadinessGate?: () => Promise<void>;
   /**
+   * Phase 2 (MCP Readiness UX): callback invoked at the boundaries of
+   * every `awaitMcpReadinessGate()` cycle. Fires `start` immediately
+   * before awaiting the gate and `resolved` after the gate promise
+   * fulfills (both the "all connected" and the "timed out" outcomes
+   * surface as `resolved` — `McpManager.waitUntilEnabledReady` already
+   * encapsulates the ceiling and resolves silently in either case).
+   *
+   * The callback should never reject — failures inside it are logged
+   * and swallowed so a broken listener can't wedge session init.
+   */
+  onReadinessGateEvent?: (evt: "start" | "resolved") => void;
+  /**
    * Phase 2 (Chat UX + Vault Tools): callback invoked on the FIRST
    * `sendMessage`/`sendMessageStreaming` of each SDK session (i.e. on
    * init() and on each `resetConversation()`). Its return value is
@@ -304,6 +316,38 @@ export interface AgentSession {
    */
   swapModel(newModelId: string): Promise<void>;
   /**
+   * Phase 2 (MCP Readiness UX): synchronous read of readiness-gate
+   * state. Returns `true` while an `awaitMcpReadinessGate()` cycle
+   * is in flight, `false` otherwise. Used by `ChatView.bindActiveRuntime`
+   * to seed the readiness pill on late binds (planning-docs review S2).
+   */
+  isReadinessGateWaiting(): boolean;
+  /**
+   * Phase 3 (MCP Readiness UX): apply the current MCP + custom tool
+   * snapshot to the live SDK session. Called by `main.ts` when
+   * `McpStatusWatcher.onTransition` fires (a server crossed
+   * connecting → connected or reconnecting → connected, or the
+   * reverse). Behavior:
+   *   - If `this.session` is not yet created (pre-init), no-op.
+   *   - If the SDK exposes a live update primitive
+   *     (`hasLiveToolUpdate()`), rebuild the tool list via
+   *     `toolsForSession()` and call the primitive.
+   *   - If the primitive is absent (SDK 1.0.0 fallback), record the
+   *     no-op once and return (FR-011 strict no-op).
+   *   - If a streaming turn is in flight (`isStreaming` true), latch
+   *     `pendingToolUpdate` and drain on stream completion — the
+   *     drain rebuilds the list from the live snapshot so the
+   *     always-latest set applies (last-write-wins).
+   */
+  applyToolListChange(): Promise<void>;
+  /**
+   * Phase 3 (MCP Readiness UX): does this session expose the live
+   * tool-update primitive? Consumed by `main.ts` to gate the "tools
+   * now available" Notice — with SDK 1.0.0 the primitive is absent
+   * and toasting would mislead users (tools require reload).
+   */
+  hasLiveToolUpdate(): boolean;
+  /**
    * Phase 6: resolve a pending approval prompt with the user's choice.
    * Called by the chat view when the user clicks an approval button.
    * No-op if no approval is pending for this tool-call id (e.g. the
@@ -393,6 +437,34 @@ export class CopilotAgentSession implements AgentSession {
   private client: SdkClient | null = null;
   private session: SdkSession | null = null;
   private selectedModel: string | undefined;
+  /**
+   * Phase 2 (MCP Readiness UX): `true` while `awaitMcpReadinessGate()`
+   * is in flight. Exposed via `isReadinessGateWaiting()` so ChatView
+   * can seed the readiness pill on late binds (planning-docs review S2).
+   */
+  private readinessGateWaiting = false;
+  /**
+   * Phase 3 (MCP Readiness UX): `true` while a
+   * `sendMessageStreaming` iterator is producing events. Read by
+   * `applyToolListChange` to decide between apply-now and
+   * latch-and-drain. Flipped in the streaming generator (`try` at
+   * top, `finally` at bottom).
+   */
+  private isStreamingFlag = false;
+  /**
+   * Phase 3 (MCP Readiness UX): last-write-wins latch. Set when
+   * `applyToolListChange` is invoked mid-stream; drained in the
+   * streaming finally block. Boolean — the tool list is always
+   * rebuilt from the current `mcpTools()` snapshot at drain time
+   * so no payload queue is needed (planning-docs S1 semantics).
+   */
+  private pendingToolUpdate = false;
+  /**
+   * Phase 3 (MCP Readiness UX): guard so the SDK-1.0.0 no-op
+   * fallback is logged at most once per session — otherwise a
+   * flapping server could spam the console.
+   */
+  private loggedNoOpFallback = false;
   /**
    * v0.4 FR-005: per-instance override of `opts.preferredModel`. Set by
    * `swapModel()` (mid-life model change) so that subsequent
@@ -701,6 +773,10 @@ export class CopilotAgentSession implements AgentSession {
     if (!this.session) {
       throw new Error("AgentSession.session missing after init");
     }
+    // Phase 3 (MCP Readiness UX): announce streaming so
+    // applyToolListChange defers to the drain. Cleared in the
+    // outermost finally.
+    this.isStreamingFlag = true;
     const session = this.session;
     this.toolCallsThisTurn = [];
     this.activeMcpCallsByServer.clear();
@@ -995,6 +1071,18 @@ export class CopilotAgentSession implements AgentSession {
           console.warn("[AgentSession] early-close abort failed", e);
         }
       }
+      // Phase 3 (MCP Readiness UX): stream complete. Clear the
+      // streaming flag first (so applyToolListChange applies inline
+      // rather than re-latching), then drain any pending update.
+      this.isStreamingFlag = false;
+      if (this.pendingToolUpdate) {
+        this.pendingToolUpdate = false;
+        // Fire-and-forget: don't block the generator's finally on
+        // an SDK round-trip. Errors are logged by the method itself.
+        void this.applyToolListChange().catch((e) => {
+          console.warn("[AgentSession] drain applyToolListChange failed", e);
+        });
+      }
     }
   }
 
@@ -1147,16 +1235,257 @@ export class CopilotAgentSession implements AgentSession {
    * benefit from the up-to-date MCP inventory.
    *
    * The gate itself owns its timeout (see `McpManager.waitUntilEnabledReady`).
+   *
+   * Phase 2 (MCP Readiness UX) additions:
+   *  - Emits `start`/`resolved` via `opts.onReadinessGateEvent` so the
+   *    UI can render/hide a "Preparing MCP tools…" pill.
+   *  - Sets `readinessGateWaiting = true` for the duration of the wait
+   *    so `isReadinessGateWaiting()` reflects reality synchronously
+   *    (used by ChatView.bindActiveRuntime on conversation switch).
    */
   private async awaitMcpReadinessGate(): Promise<void> {
     const gate = this.opts.mcpReadinessGate;
     if (!gate) return;
+    this.readinessGateWaiting = true;
+    this.emitReadinessGateEvent("start");
     try {
       await gate();
     } catch (e) {
       console.warn("[AgentSession] mcpReadinessGate threw; proceeding without wait", e);
+    } finally {
+      this.readinessGateWaiting = false;
+      this.emitReadinessGateEvent("resolved");
     }
   }
+
+  private emitReadinessGateEvent(kind: "start" | "resolved"): void {
+    const cb = this.opts.onReadinessGateEvent;
+    if (!cb) return;
+    try {
+      cb(kind);
+    } catch (e) {
+      console.warn("[AgentSession] onReadinessGateEvent listener threw", e);
+    }
+  }
+
+  /**
+   * Returns `true` while an `awaitMcpReadinessGate()` cycle is in
+   * flight. ChatView reads this synchronously on
+   * `bindActiveRuntime()` to seed the readiness pill when activating
+   * a conversation whose gate is already in progress — bus `start`
+   * events would otherwise have been missed by late-bound observers.
+   */
+  isReadinessGateWaiting(): boolean {
+    return this.readinessGateWaiting;
+  }
+
+  /**
+   * Phase 3 (MCP Readiness UX): true iff the underlying SDK session
+   * exposes the live tool-update primitive that will land in the
+   * upstream SDK PR (Phase 4). Duck-typed against a well-known method
+   * name so this file can build against the current SDK 1.0.0
+   * unchanged. When Phase 5 pins the new SDK version, this helper
+   * becomes the single flip point (planning-docs S3).
+   *
+   * Returns `false` when:
+   *   - the session has not been created (`session` is null), OR
+   *   - the session does not have an `updateTools` method.
+   *
+   * `main.ts` reads this via the public proxy (`hasLiveToolUpdate()`)
+   * to gate the "tools now available" Notice — showing that Notice
+   * with SDK 1.0.0 would lie because tools require reload.
+   */
+  private hasLiveToolUpdateInternal(): boolean {
+    const session = this.session as unknown as
+      | { updateTools?: unknown }
+      | null;
+    if (!session) return false;
+    return typeof session.updateTools === "function";
+  }
+
+  hasLiveToolUpdate(): boolean {
+    // True when either the real SDK primitive is present (Phase 5)
+    // OR the Phase 4.5 `resumeSession` stop-gap is available. Both
+    // give users a seamless post-connect refresh; the toast gate in
+    // main.ts should surface for either.
+    return (
+      this.hasLiveToolUpdateInternal() || this.canSwapForToolRefresh()
+    );
+  }
+
+  /**
+   * Phase 3 (MCP Readiness UX): apply the current merged tool list
+   * (MCP + custom) to the live SDK session. See interface JSDoc for
+   * the state-machine table (idle / streaming / pre-init / SDK 1.0.0
+   * fallback).
+   *
+   * This method is safe to call at any time; it never throws. It is
+   * called from `main.ts` on `McpStatusWatcher.onTransition` events
+   * (per-server terminal state changes) — that surface is
+   * intentionally not coalesced so tool availability tracks reality
+   * inside the FR-004/005/007 2 s bound.
+   */
+  async applyToolListChange(): Promise<void> {
+    // Disposed sessions can never accept further tool updates.
+    if (this.disposed) return;
+    // Pre-init or between-runtime: nothing to update. The next
+    // createSession() reads `toolsForSession()` fresh, so lazy
+    // conversations still pick up the new snapshot on activation.
+    if (!this.session) return;
+    // Turn-boundary queueing: while a stream is running, defer the
+    // update to the drain in the streaming finally. Last-write-wins
+    // — a boolean latch is enough because the tool list is always
+    // rebuilt from the live `mcpTools()` snapshot at drain time.
+    if (this.isStreamingFlag) {
+      this.pendingToolUpdate = true;
+      return;
+    }
+    // Preferred path (Phase 5, once SDK #1896 lands): live update
+    // primitive on the session. Rebuilds the merged tool list and
+    // hands it to the SDK; conversation state is preserved by the
+    // SDK layer.
+    if (this.hasLiveToolUpdateInternal()) {
+      const tools = this.toolsForSession();
+      const session = this.session as unknown as {
+        updateTools?: (tools: SdkTool[] | undefined) => unknown;
+      };
+      try {
+        await Promise.resolve(session.updateTools?.(tools));
+      } catch (e) {
+        // Best-effort: an SDK error here must not crash the plugin or
+        // corrupt session state. Log and move on — the next transition
+        // will retry with a fresh snapshot.
+        console.warn(
+          "[AgentSession] applyToolListChange: SDK updateTools threw; leaving previous tool list in place",
+          e,
+        );
+      }
+      return;
+    }
+    // Phase 4.5 stop-gap: SDK 1.0.0 has no `updateTools` primitive.
+    // Fall back to `resumeSession(sessionId, { tools })`, which
+    // preserves server-side conversation history while replacing
+    // the active tool list. This is only safe because the plugin
+    // only holds one persistent SDK-session handler
+    // (`onPermissionRequest`); every `session.on(...)` subscription
+    // is per-turn and torn down in the streaming finally, so a
+    // mid-idle swap can never orphan a live subscription. Removed
+    // in Phase 5.
+    if (this.canSwapForToolRefresh()) {
+      await this.swapSessionForToolRefresh();
+      return;
+    }
+    // Neither path is available (very old SDK / test fake): log
+    // once so the no-op is observable, then return. FR-011 strict.
+    if (!this.loggedNoOpFallback) {
+      this.loggedNoOpFallback = true;
+      console.debug(
+        "[AgentSession] applyToolListChange: SDK does not expose live tool update primitive; skipping (FR-011 fallback)",
+      );
+    }
+  }
+
+  /**
+   * Phase 4.5 (MCP Readiness UX): true iff the SDK exposes
+   * `client.resumeSession(...)` AND the current session carries a
+   * `sessionId` (so the plugin has a handle to resume against).
+   * Both are true for `@github/copilot-sdk >= 1.0.0`.
+   */
+  private canSwapForToolRefresh(): boolean {
+    if (!this.client || !this.session) return false;
+    const client = this.client as unknown as {
+      resumeSession?: unknown;
+    };
+    if (typeof client.resumeSession !== "function") return false;
+    const session = this.session as unknown as { sessionId?: unknown };
+    return typeof session.sessionId === "string" && session.sessionId.length > 0;
+  }
+
+  /**
+   * Phase 4.5 (MCP Readiness UX): stop-gap for tool refresh on
+   * SDK 1.0.0. Uses `client.resumeSession(sessionId, { tools, ... })`
+   * to swap the SDK session object while preserving server-side
+   * conversation history. Called from the FR-011 fallback branch of
+   * `applyToolListChange` when the live primitive is absent.
+   *
+   * Guards:
+   *   - Disposed or session-less runtimes bail early.
+   *   - Streaming sessions defer to the drain (same latch as
+   *     `applyToolListChange`).
+   *   - If `resumeSession` throws, the old session is left in
+   *     place — tool inventory stays stale, but the conversation
+   *     survives. The next transition will retry.
+   *
+   * Removed in Phase 5 once the real `updateTools` primitive ships
+   * (github/copilot-sdk#1896).
+   */
+  private async swapSessionForToolRefresh(): Promise<void> {
+    if (this.disposed) return;
+    const client = this.client;
+    const oldSession = this.session;
+    if (!client || !oldSession) return;
+    if (this.isStreamingFlag) {
+      this.pendingToolUpdate = true;
+      return;
+    }
+    const clientAsAny = client as unknown as {
+      resumeSession?: (
+        sessionId: string,
+        opts: SdkResumeSessionOptions,
+      ) => Promise<SdkSession>;
+    };
+    if (typeof clientAsAny.resumeSession !== "function") return;
+    const sessionId = (oldSession as unknown as { sessionId?: string })
+      .sessionId;
+    if (!sessionId) return;
+    const model = this.selectedModel;
+    if (!model) return;
+    let fresh: SdkSession;
+    try {
+      fresh = await clientAsAny.resumeSession(sessionId, {
+        model,
+        availableTools: ["builtin:*", "custom:*", "mcp:*"],
+        streaming: true,
+        tools: this.toolsForSession(),
+        onPermissionRequest: (request: SdkPermissionRequest) =>
+          this.handlePermission(request),
+      });
+    } catch (e) {
+      // Leave old session in place. Users see stale tools; the
+      // next transition will retry with a fresh snapshot.
+      console.warn(
+        "[AgentSession] swapSessionForToolRefresh: resumeSession threw; keeping previous session",
+        e,
+      );
+      return;
+    }
+    // Race: dispose fired during the resume round-trip. Disconnect
+    // the freshly-built session and bail — the previous session
+    // was already cleared by dispose().
+    if (this.disposed) {
+      await safeCall(() => fresh.disconnect?.());
+      return;
+    }
+    // Race: a new turn began during the resume round-trip. The
+    // in-flight stream captured the OLD session at start; if we
+    // swap now, disconnecting the old session would abort that
+    // stream mid-turn (FR-006 violation). Discard the fresh
+    // session, re-latch the pending flag, and let the streaming
+    // finally re-drive `applyToolListChange` at the next
+    // turn boundary.
+    if (this.isStreamingFlag) {
+      this.pendingToolUpdate = true;
+      void safeCall(() => fresh.disconnect?.());
+      return;
+    }
+    this.session = fresh;
+    // Disconnect the old session in the background so we don't
+    // block the transition subscriber on SDK teardown. Any per-turn
+    // subscriptions on the old session were already unsubscribed
+    // (streaming finally cleans up) since we required idle above.
+    void safeCall(() => oldSession.disconnect?.());
+  }
+
 
   /**
    * Test probe — returns the text most recently handed to
@@ -1209,6 +1538,21 @@ export class CopilotAgentSession implements AgentSession {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // MCP Readiness UX Phase 2: clear the readiness-gate flag on
+    // dispose so `isReadinessGateWaiting()` reflects the disposed
+    // state truthfully even if an in-flight `awaitMcpReadinessGate`
+    // is still parked in its `await`. The awaiting doInit() will
+    // observe `disposed = true` immediately after and bail without
+    // creating a session, so the finally-block still emits
+    // `resolved` and resets the flag — but doing it here too makes
+    // the observable state consistent from the moment dispose
+    // returns, per plan Phase 2 spec §isReadinessGateWaiting.
+    this.readinessGateWaiting = false;
+    // MCP Readiness UX Phase 3: drop any pending tool-update latch
+    // and stream flag so a post-dispose transition doesn't try to
+    // drain into a dead session.
+    this.pendingToolUpdate = false;
+    this.isStreamingFlag = false;
     if (this.unsubCatalog) {
       try {
         this.unsubCatalog();
@@ -2265,6 +2609,17 @@ export interface SdkClient {
   ping?: () => Promise<unknown> | unknown;
   listModels?: () => Promise<SdkModelInfo[]>;
   createSession: (opts: SdkSessionOptions) => Promise<SdkSession>;
+  /**
+   * Phase 4.5 (MCP Readiness UX): stop-gap for tool refresh on
+   * SDK 1.0.0. Preserves server-side conversation history while
+   * swapping the active tool list. Removed in Phase 5 when the
+   * upstream SDK exposes a live `session.updateTools` primitive
+   * (tracked by github/copilot-sdk#1896).
+   */
+  resumeSession?: (
+    sessionId: string,
+    opts: SdkResumeSessionOptions,
+  ) => Promise<SdkSession>;
   stop?: () => Promise<unknown>;
   forceStop?: () => Promise<void>;
 }
@@ -2275,6 +2630,23 @@ export interface SdkSessionOptions {
   /** Phase 4: opt in to streaming delta events. */
   streaming?: boolean;
   /** Phase 5: custom tools registered with the session. */
+  tools?: SdkTool[];
+  onPermissionRequest: (
+    request: SdkPermissionRequest,
+    invocation?: unknown,
+  ) => Promise<SdkPermissionResult> | SdkPermissionResult;
+}
+
+/**
+ * Phase 4.5 (MCP Readiness UX): shape passed to
+ * `client.resumeSession(sessionId, opts)`. Structurally a subset of
+ * `SdkSessionOptions` minus `sessionId` semantics (the id is the
+ * first positional argument). Modelled loose so tests can stub.
+ */
+export interface SdkResumeSessionOptions {
+  model?: string;
+  availableTools?: string[] | unknown;
+  streaming?: boolean;
   tools?: SdkTool[];
   onPermissionRequest: (
     request: SdkPermissionRequest,
@@ -2311,6 +2683,12 @@ export interface SdkToolExecutionCompleteEvent {
 }
 
 export interface SdkSession {
+  /**
+   * SDK-assigned session id, stable across `resumeSession` calls.
+   * Phase 4.5 (MCP Readiness UX): read as the first argument to
+   * `client.resumeSession()` for the stop-gap tool-refresh swap.
+   */
+  sessionId?: string;
   sendAndWait: (prompt: string, timeout?: number) => Promise<unknown>;
   abort?: () => Promise<unknown> | unknown;
   disconnect?: () => Promise<unknown> | unknown;

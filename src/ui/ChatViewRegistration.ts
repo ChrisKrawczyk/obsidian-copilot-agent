@@ -1,5 +1,5 @@
 import { Plugin } from "obsidian";
-import { ChatView, CHAT_VIEW_TYPE } from "./ChatView";
+import { ChatView, CHAT_VIEW_TYPE, type ChatViewDeps } from "./ChatView";
 import type { AuthController } from "../auth/AuthController";
 import type { ConversationManager } from "../domain/ConversationManager";
 import type { ModelCatalog } from "../sdk/ModelCatalog";
@@ -25,6 +25,15 @@ interface ChatViewRegistrationDeps {
    * issuing its own listModels per view.
    */
   modelCatalog: ModelCatalog;
+  /**
+   * Phase 2 (MCP Readiness UX): plugin-scope bus that fans out
+   * `awaitMcpReadinessGate` start/resolved events to any open
+   * ChatView. Optional so tests can construct a registration without
+   * a full readiness stack.
+   */
+  readinessGateBus?: ChatViewDeps["readinessGateBus"];
+  snapshotPendingMcp?: ChatViewDeps["snapshotPendingMcp"];
+  mcpServerName?: ChatViewDeps["mcpServerName"];
 }
 
 export function registerChatView(
