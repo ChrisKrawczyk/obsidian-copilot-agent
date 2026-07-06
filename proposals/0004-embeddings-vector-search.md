@@ -1,8 +1,34 @@
 # 0004 — Vault embeddings and semantic search
 
-**Status:** Draft
+**Status:** Rejected (2026-07-06) — Superseded by 0010
 **Created:** 2026-06-18
 **Owner:** unassigned
+
+## Rejection note (2026-07-06)
+
+Rejected in favour of proposal **0010 — Agent-native vault navigation tools**.
+
+Rationale, in short:
+
+- The strategic value of embeddings has eroded as tool-using LLMs have gotten
+  strong at *iterative* navigation (grep → read → follow wikilink → grep
+  again). Top-k retrieval is one-shot and cannot recurse, so on
+  multi-hop questions it loses to a competent agent with good tools.
+- The plugin already has a rich vault toolset (`search_content`,
+  `search_by_tag`, `search_by_name`, `find_backlinks`, `vault_metadata`,
+  `list_recent_notes`, `find_tasks`, …). Chunk-boundary retrieval throws
+  away the graph structure those tools preserve.
+- The engineering + maintenance cost is substantial (indexing UX,
+  incremental reindex on vault change events, model migrations, first-run
+  friction on large vaults, storage location, sync considerations).
+- The failure mode is empirically visible in adjacent domains (codebase
+  embeddings vs. agentic code search).
+
+Embeddings could still earn their keep for **non-agentic UI features**
+(a "related notes" sidebar, clustering / theme visualisation,
+duplicate-detection when writing). If any of those are picked up, revisit
+this proposal (or file a new one scoped to that UI feature, not to
+augmenting the agent).
 
 ## Problem
 
