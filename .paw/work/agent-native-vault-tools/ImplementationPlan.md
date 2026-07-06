@@ -105,7 +105,7 @@ Verification approach:
 
 ## Phase Status
 
-- [ ] **Phase 1: search_content v2 (additive modes + spans)** —
+- [x] **Phase 1: search_content v2 (additive modes + spans)** —
   Preserve every existing caller; add opt-in `mode`, score, and
   per-match char spans. Highest regression risk (FR-003 / SC-003),
   which is why it lands first.

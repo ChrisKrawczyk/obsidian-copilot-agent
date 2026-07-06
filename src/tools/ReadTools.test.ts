@@ -6,6 +6,7 @@ import {
   readFileImpl,
   viewImpl,
   searchContentImpl,
+  searchInFiles,
   createReadTools,
   type ReadToolsVault,
   type TFileLike,
@@ -209,5 +210,71 @@ describe("createReadTools", () => {
       { sessionId: "s", toolCallId: "t", toolName: "read_file", arguments: {} },
     )) as { content: string };
     expect(result.content).toContain("ship phase 5");
+  });
+});
+
+describe("searchInFiles", () => {
+  test("substring mode matches legacy searchContentImpl output", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    const legacy = await searchContentImpl("bar", false, vault);
+    const next = await searchInFiles(files, "bar", vault, { mode: "substring" });
+    // Byte-identical match record shape (no score/spans) and same
+    // totals/ordering — this is the SC-003 anchor for legacy behavior.
+    expect(next.matches).toEqual(legacy.matches);
+    expect(next.totalMatches).toBe(legacy.totalMatches);
+    expect(next.truncated).toBe(legacy.truncated);
+    expect(next.matches[0].score).toBeUndefined();
+    expect(next.matches[0].spans).toBeUndefined();
+  });
+
+  test("simple mode returns ranked matches with spans and scores", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    const r = await searchInFiles(files, "bar", vault, { mode: "simple" });
+    expect(r.matches.length).toBeGreaterThan(0);
+    for (const m of r.matches) {
+      expect(typeof m.score).toBe("number");
+      expect(Array.isArray(m.spans)).toBe(true);
+      expect(m.spans!.length).toBeGreaterThan(0);
+    }
+    // Sorted by score desc.
+    for (let i = 1; i < r.matches.length; i++) {
+      expect(r.matches[i - 1].score! >= r.matches[i].score!).toBe(true);
+    }
+  });
+
+  test("fuzzy mode tolerates a single dropped character", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    // "wiget" is "widget" with a dropped 'd'. Fuzzy subsequence
+    // should still match the "widget" occurrence in spec.md.
+    const r = await searchInFiles(files, "wiget", vault, { mode: "fuzzy" });
+    expect(r.matches.length).toBeGreaterThan(0);
+    expect(r.matches.some((m) => m.path === "projects/alpha/spec.md")).toBe(
+      true,
+    );
+    expect(r.matches[0].score).toBeGreaterThan(0);
+    expect(r.matches[0].spans!.length).toBeGreaterThan(0);
+  });
+
+  test("respects overridden limit and reports truncation", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    const r = await searchInFiles(files, "bar", vault, {
+      mode: "simple",
+      limit: 1,
+    });
+    expect(r.matches.length).toBe(1);
+    expect(r.truncated).toBe(true);
+    expect(r.totalMatches).toBeGreaterThan(1);
+  });
+
+  test("regex mode with invalid regex throws", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    await expect(
+      searchInFiles(files, "([", vault, { mode: "regex" }),
+    ).rejects.toThrow(/Invalid regex/);
   });
 });
