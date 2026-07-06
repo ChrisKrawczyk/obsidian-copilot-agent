@@ -166,6 +166,19 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 ];
 
 /**
+ * v0.10 Phase 3 compound-query tool. Registered separately from the
+ * v0.3 read-only search entries so downstream consumers (tests,
+ * preamble) can distinguish "old" from "new" search surface.
+ */
+export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
+  {
+    name: "search_vault",
+    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note.",
+    readOnly: true,
+  },
+];
+
+/**
  * v0.10 Phase 2 structural navigation tools. All read-only,
  * `skipPermission: true`. Hint text is a placeholder here; Phase 5
  * refines the wording for the preamble inventory (FR-011).
@@ -193,6 +206,7 @@ export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   ...READ_NOTE_TOOL_ENTRIES,
   ...V03_READ_TOOL_ENTRIES,
+  ...COMPOUND_TOOL_ENTRIES,
   ...NAVIGATE_TOOL_ENTRIES,
   ...WRITE_NOTE_TOOL_ENTRIES,
   ...V01_TOOL_ENTRIES,
@@ -203,6 +217,9 @@ export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 
 /** v0.3 Phase 2 read-only search-tool names. */
 export const V03_READ_TOOL_NAMES = V03_READ_TOOL_ENTRIES.map((e) => e.name);
+
+/** v0.10 Phase 3 compound-query tool names. */
+export const COMPOUND_TOOL_NAMES = COMPOUND_TOOL_ENTRIES.map((e) => e.name);
 
 /** v0.10 Phase 2 structural navigation tool names. */
 export const NAVIGATE_TOOL_NAMES = NAVIGATE_TOOL_ENTRIES.map((e) => e.name);

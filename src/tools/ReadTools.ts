@@ -26,6 +26,9 @@ export interface ReadToolsVault {
 export interface TFileLike {
   path: string;
   extension?: string;
+  /** File stat block. Present on Obsidian's real `TFile`; optional
+   *  for test doubles that only exercise path-based logic. */
+  stat?: { size?: number; mtime?: number };
 }
 
 /** Maximum entries returned by `view` to keep huge vaults from drowning the model. */

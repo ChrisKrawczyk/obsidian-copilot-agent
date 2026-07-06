@@ -112,7 +112,7 @@ Verification approach:
 - [x] **Phase 2: Structural tools (resolve_link, get_outlinks,
   get_note_structure)** — Three metadata-cache-only tools; no body
   reads; small, low-risk surface for FR-006 / FR-007 / FR-008.
-- [ ] **Phase 3: search_vault compound query** — AND-combined tag /
+- [x] **Phase 3: search_vault compound query** — AND-combined tag /
   folder-prefix / modified-since / text filter with short-circuit
   when structural filters exclude the vault; delegates ranked/fuzzy
   text search to the Phase 1 helper (FR-004, FR-005).
