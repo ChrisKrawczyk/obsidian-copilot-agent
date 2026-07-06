@@ -228,6 +228,43 @@ describe("searchInFiles", () => {
     expect(next.matches[0].spans).toBeUndefined();
   });
 
+  test("regex mode matches legacy searchContentImpl output (SC-003)", async () => {
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    const legacy = await searchContentImpl("ba.", true, vault);
+    const next = await searchInFiles(files, "ba.", vault, { mode: "regex" });
+    expect(next.matches).toEqual(legacy.matches);
+    expect(next.totalMatches).toBe(legacy.totalMatches);
+    expect(next.truncated).toBe(legacy.truncated);
+    for (const m of next.matches) {
+      expect(m.score).toBeUndefined();
+      expect(m.spans).toBeUndefined();
+    }
+  });
+
+  test("search_content tool handler preserves legacy output when mode is omitted (SC-003)", async () => {
+    const vault = makeVault();
+    const tools = createReadTools(vault);
+    const tool = tools.find((t) => t.name === "search_content")!;
+    const legacySubstring = await searchContentImpl("bar", false, vault);
+    const handlerSubstring = (await tool.handler!(
+      { query: "bar" },
+      { sessionId: "s", toolCallId: "t", toolName: "search_content", arguments: {} },
+    )) as typeof legacySubstring;
+    expect(handlerSubstring).toEqual(legacySubstring);
+
+    const legacyRegex = await searchContentImpl("ba.", true, vault);
+    const handlerRegex = (await tool.handler!(
+      { query: "ba.", regex: true },
+      { sessionId: "s", toolCallId: "t", toolName: "search_content", arguments: {} },
+    )) as typeof legacyRegex;
+    expect(handlerRegex).toEqual(legacyRegex);
+    for (const m of handlerRegex.matches as Array<{ score?: number; spans?: unknown }>) {
+      expect(m.score).toBeUndefined();
+      expect(m.spans).toBeUndefined();
+    }
+  });
+
   test("simple mode returns ranked matches with spans and scores", async () => {
     const vault = makeVault();
     const files = vault.getMarkdownFiles!();
