@@ -4,6 +4,18 @@ An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent power
 
 > **Status:** v0.10 — Six new / upgraded read-only vault-navigation tools (`search_content` modes, `resolve_link`, `get_outlinks`, `get_note_structure`, `search_vault`, `related_notes`) let the agent locate, inspect, and traverse notes without asking the human. Builds on v0.9's readiness indicator + live MCP tool refresh, v0.8's importable preset packs, v0.7's authenticated MCP servers, v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
 
+## Install
+
+This plugin ships via [BRAT (Beta Reviewers Auto-update Tool)](https://github.com/TfTHacker/obsidian42-brat) rather than the official Community Plugins catalog. Requires **Obsidian desktop** (mobile is not supported — the plugin ships a native Copilot CLI binary).
+
+1. In Obsidian → **Settings → Community plugins**, install and enable **BRAT** from the catalog.
+2. Open the command palette and run **BRAT: Add a beta plugin for testing**.
+3. Paste `ChrisKrawczyk/obsidian-copilot-agent` and confirm. BRAT will grab the latest release (`v0.10.0` at time of writing).
+4. Once BRAT finishes, go to **Settings → Community plugins** and enable **Copilot Agent**.
+5. On first enable the plugin downloads a platform-specific Copilot CLI binary (~150 MB, one time). Then click **Connect** in **Settings → Copilot Agent** to run the GitHub OAuth device-flow sign-in.
+
+Detailed platform matrix, first-launch behavior, and known limitations are documented in the [full install section below](#install-via-brat).
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).

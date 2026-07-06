@@ -1,6 +1,6 @@
 {
   "name": "obsidian-copilot-agent",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Obsidian desktop plugin embedding a GitHub Copilot SDK-powered AI agent.",
   "private": true,
   "main": "main.js",
@@ -31,7 +31,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@github/copilot-sdk": "1.0.0",
+    "@github/copilot-sdk": "1.0.5",
     "@modelcontextprotocol/sdk": "1.29.0"
   },
   "devDependencies": {

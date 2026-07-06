@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.1] - 2026-07-06
+
+Quality release: dependency refresh and README install guidance. No functional changes to plugin behavior.
+
+### Changed
+
+- **Bumped `@github/copilot-sdk` from `1.0.0` → `1.0.5`.** Picks up ~5 months of upstream stable-track improvements. Transitive `@github/copilot` binary is pinned to `1.0.68` (latest stable). All 1605 tests pass unchanged; no plugin-visible SDK API drift.
+- **README: promoted BRAT install instructions above the fold.** A compact `## Install` section now sits right below the status banner so first-time readers see the install recipe before the multi-version "What's new" history. The full platform-support / first-launch / known-limitations breakdown remains further down.
+
+
 ## [0.10.0] - 2026-07-03
 
 Agent-native vault navigation surface. Six new / upgraded read-only capabilities let the agent locate, inspect, and traverse notes without asking the human — a substitute for the local-embedding path explored (and rejected) in proposal #0004. All new tools are auto-approved under the FR-017 read-only gate. No breaking changes.
