@@ -360,8 +360,8 @@ Acceptance Scenarios:
   location per capability**, matching the pattern already used for
   the plugin's existing read-only search caps, so that future tuning
   is a single-file edit.
-- **The plugin's current regression test suite is the baseline no
-  test in that suite is deleted or weakened as a result of this
+- **The plugin's current regression test suite is the baseline.**
+  No test in that suite is deleted or weakened as a result of this
   feature; new tests are additive.
 
 ## Scope
