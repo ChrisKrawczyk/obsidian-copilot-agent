@@ -3,6 +3,33 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.0] - 2026-07-03
+
+Agent-native vault navigation surface. Six new / upgraded read-only capabilities let the agent locate, inspect, and traverse notes without asking the human — a substitute for the local-embedding path explored (and rejected) in proposal #0004. All new tools are auto-approved under the FR-017 read-only gate. No breaking changes.
+
+### Added
+
+- **`search_content` modes (Phase 1).** The existing full-text search tool now accepts an explicit `mode`: `substring` (default; literal, byte-for-byte compatible with the v0.9 behavior), `regex` (JavaScript pattern with ranked/fuzzy fallback), or `fuzzy` (Obsidian's own scorer via `prepareFuzzySearch`). Returns match spans for precise follow-up reads. Backwards-compatible: omitting `mode` preserves the v0.9 behavior. (`src/tools/ReadTools.ts` — `searchInFiles` helper.)
+- **`resolve_link` (Phase 2).** Resolves a wikilink or markdown link to its target vault path, source-aware — matches Obsidian's own click behavior. Distinguishes `unresolved` from `metadata-cache-not-ready` for the FR-014 warmup contract. (`src/tools/NavigateTools.ts`.)
+- **`get_outlinks` (Phase 2).** Lists a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes `resolvedPath` when Obsidian can resolve the target. Capped at 200 entries with a truncation signal.
+- **`get_note_structure` (Phase 2).** Returns a note's headings + sections + block IDs with line numbers, WITHOUT body prose. Cheap structural inspection to plan a targeted `read_file`. Capped at 500 combined items.
+- **`search_vault` (Phase 3).** Compound query: AND-combines tag / folder-prefix / `modifiedSince` / text filters in a single call. Short-circuits without body reads when structural filters exclude every note. Delegates ranked/fuzzy text search to the Phase 1 helper. Capped at 100 results.
+- **`related_notes` (Phase 4).** Ranks vault neighbours of a source note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts. Deterministic sort (score desc, path asc). Zero-score neighbours are dropped.
+
+### Changed
+
+- Session-start preamble inventory (`vaultToolManifest.ts`) lists all five new capabilities plus the updated `search_content` hint so the agent discovers them on the first turn (FR-011 / SC-011).
+
+### Under the hood
+
+- All five new tools share the FR-014 metadata-cache-warmup contract: when the source file exists but its cache entry hasn't populated yet, the tool returns `{ok: false, reason: "metadata-cache-not-ready"}` — a retryable signal, distinct from a terminal `not-found`.
+- No new npm dependencies. No schema changes.
+
+### Follow-ups
+
+- Dataview query tool (deferred to proposal `#0011`).
+
+
 ## [0.9.0] - 2026-07-02
 
 Two small, coherent UX follow-ups on top of v0.8.0's MCP work: the chat composer now tells you what it is waiting on when it stalls on an MCP server, and slow-authenticating servers that connect after the composer opens (or reconnect after a token expiry) get their tools injected into the live chat automatically. No breaking changes; no new user-facing settings.

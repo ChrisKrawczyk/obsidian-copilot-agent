@@ -116,6 +116,77 @@ export class FileSystemAdapter {
 
 export type App = unknown;
 
+/** Search result shape returned by prepareSimpleSearch / prepareFuzzySearch. */
+export interface SearchResult {
+  score: number;
+  matches: Array<[number, number]>;
+}
+
+/**
+ * Whitespace-AND substring matcher, mirroring Obsidian's public
+ * `prepareSimpleSearch(query)` semantics closely enough for unit
+ * tests. Score is a simple sum favouring earlier / more-complete
+ * matches; tests assert ordering, not absolute values.
+ */
+export function prepareSimpleSearch(
+  query: string,
+): (text: string) => SearchResult | null {
+  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  return (text: string) => {
+    if (tokens.length === 0) return null;
+    const haystack = text.toLowerCase();
+    const matches: Array<[number, number]> = [];
+    let score = 0;
+    for (const tok of tokens) {
+      const idx = haystack.indexOf(tok);
+      if (idx < 0) return null;
+      matches.push([idx, idx + tok.length]);
+      score += tok.length - idx / (haystack.length + 1);
+    }
+    return { score, matches };
+  };
+}
+
+/**
+ * Ordered-subsequence matcher, mirroring Obsidian's public
+ * `prepareFuzzySearch(query)` semantics closely enough for unit
+ * tests. Non-null iff every char of `query` appears in `text` in
+ * order (case-insensitive).
+ */
+export function prepareFuzzySearch(
+  query: string,
+): (text: string) => SearchResult | null {
+  const q = query.toLowerCase();
+  return (text: string) => {
+    if (q.length === 0) return null;
+    const t = text.toLowerCase();
+    const matches: Array<[number, number]> = [];
+    let ti = 0;
+    let score = 0;
+    for (let qi = 0; qi < q.length; qi++) {
+      const ch = q[qi];
+      let found = -1;
+      while (ti < t.length) {
+        if (t[ti] === ch) {
+          found = ti;
+          break;
+        }
+        ti++;
+      }
+      if (found < 0) return null;
+      // Extend the previous span if contiguous, else start a new one.
+      if (matches.length > 0 && matches[matches.length - 1][1] === found) {
+        matches[matches.length - 1][1] = found + 1;
+      } else {
+        matches.push([found, found + 1]);
+      }
+      score += q.length - qi;
+      ti = found + 1;
+    }
+    return { score, matches };
+  };
+}
+
 function makeElement(): { empty: () => void; createEl: () => ReturnType<typeof makeElement>; createDiv: () => ReturnType<typeof makeElement>; setText: () => void; style: Record<string, string> } {
   return {
     style: {},

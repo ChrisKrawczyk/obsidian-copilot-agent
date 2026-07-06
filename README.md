@@ -2,7 +2,18 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.9 — Adds an inline readiness indicator on the chat composer and automatic tool refresh when slow-authenticating MCP servers connect after the composer is already open. Builds on v0.8's importable preset packs, v0.7's authenticated MCP servers, v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+> **Status:** v0.10 — Six new / upgraded read-only vault-navigation tools (`search_content` modes, `resolve_link`, `get_outlinks`, `get_note_structure`, `search_vault`, `related_notes`) let the agent locate, inspect, and traverse notes without asking the human. Builds on v0.9's readiness indicator + live MCP tool refresh, v0.8's importable preset packs, v0.7's authenticated MCP servers, v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+
+## What's new in v0.10
+
+- **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
+  - **`search_content` modes.** The existing full-text search tool now accepts `mode: "substring" | "regex" | "fuzzy"` and returns match spans for precise re-reads. Omitting `mode` preserves v0.9 behavior.
+  - **`resolve_link`.** Resolves a wikilink or markdown link to its target vault path, source-aware — matches Obsidian's own click behavior.
+  - **`get_outlinks`.** Lists a note's outgoing links + embeds with resolved paths and link-form (wikilink vs. markdown) discrimination.
+  - **`get_note_structure`.** Returns a note's headings, sections, and block IDs with line numbers — no body prose. Use before `read_file` to plan a targeted read.
+  - **`search_vault`.** Compound query: AND-combines tag / folder / `modifiedSince` / text filters in one call. Short-circuits without body reads when structural filters exclude every note.
+  - **`related_notes`.** Ranks vault neighbours by shared tags + shared outlinks + shared backlinks (weighted 3 / 2 / 1).
+- **Full quick reference:** [`docs/agent-vault-tools.md`](docs/agent-vault-tools.md).
 
 ## What's new in v0.9
 

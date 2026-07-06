@@ -126,6 +126,67 @@ describe("assemblePreamble", () => {
     }
   });
 
+  it("v0.10 new capabilities are all marked readOnly (SC-010 skipPermission wiring)", () => {
+    // SC-010: the five new / upgraded capabilities must be auto-approved
+    // (no user-approval prompt). readOnly in the manifest drives
+    // skipPermission: true in the tool factories, which is asserted
+    // individually in the per-factory tests
+    // (NavigateTools.test.ts, SearchTools.test.ts, ReadTools.test.ts).
+    // This test consolidates the manifest-level invariant.
+    const newTools = new Set([
+      "search_content",
+      "search_vault",
+      "resolve_link",
+      "get_outlinks",
+      "get_note_structure",
+      "related_notes",
+    ]);
+    for (const entry of ALL_VAULT_TOOL_ENTRIES) {
+      if (newTools.has(entry.name)) {
+        expect(entry.readOnly, `${entry.name} must be readOnly`).toBe(true);
+        newTools.delete(entry.name);
+      }
+    }
+    expect(newTools, "all six new capabilities present in manifest").toEqual(
+      new Set(),
+    );
+  });
+
+  it("v0.10 new capabilities appear once each with a distinguishable hint (SC-011)", () => {
+    const newTools = [
+      "search_vault",
+      "resolve_link",
+      "get_outlinks",
+      "get_note_structure",
+      "related_notes",
+    ];
+    const hints = new Set<string>();
+    for (const name of newTools) {
+      const matches = VAULT_TOOL_INVENTORY_BLOCK.match(
+        new RegExp(`\`${name}\``, "g"),
+      );
+      expect(matches).not.toBeNull();
+      expect(matches!.length).toBe(1);
+      // R/O tag applies to all five.
+      expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(
+        new RegExp(`\`${name}\`\\s+_\\(R/O\\)_`),
+      );
+      // Grab the hint line (everything after the tool name up to newline).
+      const line = VAULT_TOOL_INVENTORY_BLOCK.match(
+        new RegExp(`\`${name}\`[^\\n]*`),
+      )![0];
+      expect(line.length).toBeGreaterThan(name.length + 10);
+      hints.add(line);
+    }
+    // Distinguishable = every capability's line is unique.
+    expect(hints.size).toBe(newTools.length);
+
+    // search_content is extended in-place — the entry must still be
+    // present and its hint must name the new modes surface.
+    expect(VAULT_TOOL_INVENTORY_BLOCK).toContain("`search_content`");
+    expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(/substring|regex|fuzzy/);
+  });
+
   it("read-only entries are tagged R/O in the inventory; mutating entries are not", () => {
     expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(/`vault_tree`\s+_\(R\/O\)_/);
     expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(/`get_active_note`\s+_\(R\/O\)_/);

@@ -42,7 +42,7 @@ export const V01_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "search_content",
-    hint: "Full-text search across vault markdown for a literal phrase.",
+    hint: "Full-text search across vault markdown. mode: 'substring' (default, literal), 'regex' (JS pattern), 'fuzzy' (Obsidian scorer). Returns match spans for precise re-reads.",
     readOnly: true,
   },
   {
@@ -165,10 +165,53 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
 ];
 
+/**
+ * v0.10 Phase 3 compound-query tool. Registered separately from the
+ * v0.3 read-only search entries so downstream consumers (tests,
+ * preamble) can distinguish "old" from "new" search surface.
+ */
+export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
+  {
+    name: "search_vault",
+    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note. Capped at 100 results; when `totalIsLowerBound` is true the `total` field is an underestimate.",
+    readOnly: true,
+  },
+];
+
+/**
+ * v0.10 Phase 2 + Phase 4 structural navigation tools. All read-only,
+ * `skipPermission: true`. Hint text refined in Phase 5 for the
+ * session-start preamble inventory (FR-011 / SC-011).
+ */
+export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
+  {
+    name: "resolve_link",
+    hint: "Resolve a wikilink or markdown link to its target vault path, source-aware (matches Obsidian's own click behavior). Distinguishes unresolved vs. metadata-cache-not-ready. Call directly with the raw link text — no need to pre-scan with search_by_name / vault_tree.",
+    readOnly: true,
+  },
+  {
+    name: "get_outlinks",
+    hint: "List a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes resolvedPath when Obsidian can resolve the target. Capped at 200. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    readOnly: true,
+  },
+  {
+    name: "get_note_structure",
+    hint: "Return a note's headings + sections + block IDs with line numbers — NO body prose. Use before read_file to plan a targeted read. Capped at 500 items. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    readOnly: true,
+  },
+  {
+    name: "related_notes",
+    hint: "Rank vault neighbours of a note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    readOnly: true,
+  },
+];
+
 /** All tool entries combined, in inventory presentation order. */
 export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   ...READ_NOTE_TOOL_ENTRIES,
   ...V03_READ_TOOL_ENTRIES,
+  ...COMPOUND_TOOL_ENTRIES,
+  ...NAVIGATE_TOOL_ENTRIES,
   ...WRITE_NOTE_TOOL_ENTRIES,
   ...V01_TOOL_ENTRIES,
 ];
@@ -178,6 +221,12 @@ export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 
 /** v0.3 Phase 2 read-only search-tool names. */
 export const V03_READ_TOOL_NAMES = V03_READ_TOOL_ENTRIES.map((e) => e.name);
+
+/** v0.10 Phase 3 compound-query tool names. */
+export const COMPOUND_TOOL_NAMES = COMPOUND_TOOL_ENTRIES.map((e) => e.name);
+
+/** v0.10 Phase 2 structural navigation tool names. */
+export const NAVIGATE_TOOL_NAMES = NAVIGATE_TOOL_ENTRIES.map((e) => e.name);
 
 /** Phase 4/5 mutating + workspace tool names (excludes read-equivalent `open_note`). */
 export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.filter(

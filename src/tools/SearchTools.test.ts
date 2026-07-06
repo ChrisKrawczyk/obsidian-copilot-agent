@@ -4,12 +4,15 @@ import {
   searchByTagImpl,
   searchByNameImpl,
   listAllTagsImpl,
+  searchVaultImpl,
   SEARCH_BY_TAG_CAP,
   SEARCH_BY_NAME_CAP,
+  SEARCH_VAULT_CAP,
   collectFileTagsForFallback,
   type SearchByTagResult,
   type SearchByNameResult,
   type ListAllTagsResult,
+  type SearchVaultResult,
 } from "./SearchTools";
 import {
   ObsidianApi,
@@ -17,7 +20,10 @@ import {
   type FileCacheLike,
 } from "./ObsidianApi";
 import type { ReadToolsVault, TFileLike } from "./ReadTools";
-import { V03_READ_TOOL_NAMES } from "../domain/vaultToolManifest";
+import {
+  V03_READ_TOOL_NAMES,
+  COMPOUND_TOOL_NAMES,
+} from "../domain/vaultToolManifest";
 
 interface Fixture {
   files: TFileLike[];
@@ -391,11 +397,12 @@ describe("listAllTagsImpl", () => {
 // ---- factory + manifest ---------------------------------------------
 
 describe("createSearchTools factory", () => {
-  it("registers exactly the V03_READ_TOOL_NAMES, all skipPermission=true", () => {
+  it("registers exactly V03_READ_TOOL_NAMES + COMPOUND_TOOL_NAMES, all skipPermission=true", () => {
     const { api, vault } = makeFixture({ notes: [] });
     const tools = createSearchTools(api, vault);
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual([...V03_READ_TOOL_NAMES].sort());
+    const expected = [...V03_READ_TOOL_NAMES, ...COMPOUND_TOOL_NAMES].sort();
+    expect(names).toEqual(expected);
     for (const t of tools) {
       // Read-only contract — permission gate must be bypassed.
       expect((t as { skipPermission?: boolean }).skipPermission).toBe(true);
@@ -408,5 +415,271 @@ describe("createSearchTools factory", () => {
       "search_by_name",
       "search_by_tag",
     ]);
+  });
+});
+
+// ---- search_vault (Phase 3) ------------------------------------------
+
+function makeFsVault(
+  files: Array<{ path: string; content?: string; mtime?: number }>,
+  reads: { count: number },
+): ReadToolsVault {
+  const t: TFileLike[] = files.map((f) => ({
+    path: f.path,
+    extension: "md",
+    stat: { mtime: f.mtime },
+  }));
+  const contents = new Map(files.map((f) => [f.path, f.content ?? ""]));
+  return {
+    adapter: { getBasePath: () => "/tmp/vault" },
+    getMarkdownFiles: () => t,
+    getFileByPath: (p: string) => t.find((f) => f.path === p) ?? null,
+    getAbstractFileByPath: (p: string) =>
+      t.find((f) => f.path === p) ?? null,
+    cachedRead: async (file) => {
+      reads.count++;
+      return contents.get(file.path) ?? "";
+    },
+    read: async (file) => {
+      reads.count++;
+      return contents.get(file.path) ?? "";
+    },
+  } as unknown as ReadToolsVault;
+}
+
+describe("searchVaultImpl", () => {
+  it("AND-combines tag + folder + modifiedSince + text (SC-004)", async () => {
+    // Tag fixture builds AppLike + api with tag metadata.
+    const { api } = makeFixture({
+      notes: [
+        { path: "Work/hit.md", tags: ["project"] },
+        { path: "Work/miss-tag.md", tags: ["other"] },
+        { path: "Work/miss-old.md", tags: ["project"] },
+        { path: "Personal/wrong-folder.md", tags: ["project"] },
+      ],
+    });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "Work/hit.md", content: "the sunset was lovely", mtime: 2000 },
+        { path: "Work/miss-tag.md", content: "sunset", mtime: 2000 },
+        { path: "Work/miss-old.md", content: "sunset", mtime: 500 },
+        { path: "Personal/wrong-folder.md", content: "sunset", mtime: 2000 },
+      ],
+      reads,
+    );
+    // Rewire the fixture's app.vault to our FS-vault so findFilesByTag
+    // iterates the same file set.
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      {
+        tag: "project",
+        folder: "Work/",
+        modifiedSinceMs: 1000,
+        text: "sunset",
+      },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(1);
+    expect(r.matches[0].path).toBe("Work/hit.md");
+    expect(r.shortCircuited).toBe(false);
+  });
+
+  it("short-circuits with zero body reads when structural filters exclude every note (SC-005)", async () => {
+    const { api } = makeFixture({
+      notes: [{ path: "Work/a.md", tags: ["other"] }],
+    });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [{ path: "Work/a.md", content: "sunset", mtime: 5000 }],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { tag: "project", text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(0);
+    expect(r.shortCircuited).toBe(true);
+    // SC-005 anchor: NOT a single body read was attempted.
+    expect(reads.count).toBe(0);
+  });
+
+  it("normalizes folder input with leading/trailing slashes and backslashes", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "Work/a.md", content: "sunset", mtime: 1000 },
+        { path: "Personal/b.md", content: "sunset", mtime: 1000 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    // Each variant should match the same "Work" prefix — leading slash,
+    // trailing slash, backslashes, and combinations must all resolve
+    // to the vault-relative form.
+    for (const variant of ["Work", "/Work", "Work/", "/Work/", "\\Work\\"]) {
+      const r = (await searchVaultImpl(
+        { folder: variant },
+        api,
+        vault,
+      )) as Extract<SearchVaultResult, { ok: true }>;
+      expect(r.ok).toBe(true);
+      expect(r.matches.map((m) => m.path)).toEqual(["Work/a.md"]);
+    }
+  });
+
+  it("short-circuits on folder-only filter that excludes every note (SC-005 folder branch)", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "Work/a.md", content: "sunset", mtime: 1000 },
+        { path: "Personal/b.md", content: "sunset", mtime: 1000 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { folder: "Empty", text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(0);
+    expect(r.shortCircuited).toBe(true);
+    expect(reads.count).toBe(0);
+  });
+
+  it("short-circuits on modifiedSince-only filter that excludes every note (SC-005 mtime branch)", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [{ path: "a.md", content: "sunset", mtime: 1000 }],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      // Future mtime — no note qualifies.
+      { modifiedSinceMs: 99999999, text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(0);
+    expect(r.shortCircuited).toBe(true);
+    expect(reads.count).toBe(0);
+  });
+
+  it("respects SEARCH_VAULT_CAP (not the search_content default of 50)", async () => {
+    const total = SEARCH_VAULT_CAP + 20;
+    const files = Array.from({ length: total }, (_, i) => ({
+      path: `n${i}.md`,
+      content: "sunset",
+      mtime: 1000,
+    }));
+    const reads = { count: 0 };
+    const vault = makeFsVault(files, reads);
+    const { api } = makeFixture({ notes: [] });
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches.length).toBe(SEARCH_VAULT_CAP);
+    expect(r.truncated).toBe(true);
+    expect(r.total).toBeGreaterThan(SEARCH_VAULT_CAP);
+  });
+
+  it("supports all three textMode values", async () => {
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [{ path: "a.md", content: "the widget shines", mtime: 1 }],
+      reads,
+    );
+    const { api } = makeFixture({ notes: [] });
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    for (const mode of ["substring", "simple", "fuzzy"] as const) {
+      const r = (await searchVaultImpl(
+        { text: mode === "fuzzy" ? "wiget" : "widget", textMode: mode },
+        api,
+        vault,
+      )) as Extract<SearchVaultResult, { ok: true }>;
+      expect(r.ok).toBe(true);
+      expect(r.matches.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("returns metadata-cache-not-ready when tag is supplied and cache is warming (SC-014)", async () => {
+    // App without metadataCache — findFilesByTag returns not-ready.
+    const files: TFileLike[] = [{ path: "a.md", extension: "md" }];
+    const vault = {
+      getMarkdownFiles: () => files,
+    } as unknown as ReadToolsVault;
+    const app: AppLike = { vault };
+    const api = new ObsidianApi(app);
+    const r = await searchVaultImpl({ tag: "project" }, api, vault);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
+  });
+
+  it("modifiedSinceMs excludes older notes", async () => {
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "new.md", content: "x", mtime: 5000 },
+        { path: "old.md", content: "x", mtime: 100 },
+      ],
+      reads,
+    );
+    const { api } = makeFixture({ notes: [] });
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { modifiedSinceMs: 1000 },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches.map((m) => m.path)).toEqual(["new.md"]);
+  });
+
+  it("tag + text is a tag-filtered ranked text search over the whole vault", async () => {
+    // The tag reduces the candidate set BEFORE the text search
+    // touches any body — untagged notes with the same text must NOT
+    // appear in the results.
+    const { api } = makeFixture({
+      notes: [
+        { path: "keep.md", tags: ["project"] },
+        { path: "skip.md", tags: ["other"] },
+      ],
+    });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "keep.md", content: "the sunset is warm", mtime: 100 },
+        { path: "skip.md", content: "the sunset is warm", mtime: 100 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { tag: "project", text: "sunset", textMode: "simple" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    // Both files contain the word, but only the tagged one should
+    // appear because the tag filter shrank the candidate set first.
+    expect(r.matches.map((m) => m.path)).toEqual(["keep.md"]);
+    // Ranked mode → score + spans populated.
+    expect(typeof r.matches[0].score).toBe("number");
+    expect(Array.isArray(r.matches[0].spans)).toBe(true);
   });
 });
