@@ -5,68 +5,46 @@
 
 ## Overview
 
-The Obsidian Copilot agent already ships a rich vault toolset (search by
-tag / name, backlink discovery, per-note metadata inspection, recent
-notes, task queries, plus raw `search_content` and `read_file`). What
-it does *not* yet have is the ability to (a) rank text-search hits by
-relevance instead of returning up to 50 unsorted line matches,
-(b) express "fuzzy" queries the way Obsidian's own quick-switcher
-does, (c) resolve a wiki-link to its target note in one call, or
-(d) compose several cheap filters — tag, folder, modification time —
-against a text query in a single tool. In practice this means an agent
-answering a natural user question ("what did I write about weakly typed
-languages last month?") has to grep the whole vault with a naive
-substring match, sift through dozens of unranked hits, and stitch the
-answer together across multiple tool calls that a human user would just
-do in the Obsidian search bar.
+The Obsidian Copilot agent already helps users find notes by tag, by
+name, by backlink, by recent modification, and by task status, and can
+inspect any note's metadata. What it does *not* yet do well is answer
+the most common vault question — "where did I write about X?" — when
+the answer isn't a literal phrase the user remembers. The agent's
+current text search returns up to fifty unranked line hits in
+whatever order the vault iteration happens to yield; it cannot
+tolerate typos or rearranged wording; it has no direct way to follow
+a wikilink from one note to another in a single step; and it cannot
+compose the "text × tag × folder × recently modified" filter that a
+human answers with a five-second query in the Obsidian search bar.
 
-The strategic bet behind this feature is that stronger navigation
-primitives — the kind a competent human uses when reading their own
-notes — are a better investment than precomputed embeddings. See
-`proposals/0010-agent-native-vault-tools.md` for the rationale and the
-verified inventory of Obsidian's public plugin API surface. Notably,
-Obsidian exposes `prepareSimpleSearch` and `prepareFuzzySearch` as
-public helpers with match-span scoring, and its `MetadataCache` gives
-us structural note information (headings, tags, sections, block IDs,
-resolved outgoing links) synchronously — everything we need to build
-better tools without an index of our own.
-
-The result the user perceives is: the agent answers vault questions
-faster, with fewer irrelevant read-file round-trips, and can follow a
-wikilink or a heading anchor as directly as a human clicking through
-the Obsidian UI. The result the agent perceives is: a smaller number
-of tool calls per question, better-ranked results per call, and
-clearer signals about note structure that reduce whole-file reads.
+The strategic bet is that stronger navigation for the agent, using
+the same signals a human uses when reading their own notes, is a
+better investment than an opaque similarity index. The user's
+observable result: shorter, more accurate answers to vault questions,
+with fewer wrong-note detours; a natural experience following
+`[[wiki-links]]`; and the ability to phrase questions the way a
+person would ("things I wrote about sunset last week under Work/")
+without having to translate them into a sequence of separate searches.
 
 ## Objectives
 
-- Ranked text search that ranks by relevance rather than filesystem
-  order. (Rationale: today's `search_content` returns 50 unranked
-  matches; a large vault produces noise faster than signal.)
-- Fuzzy search for typos, near-matches, and paraphrased queries.
-  (Rationale: the model asks natural-language-shaped queries; users do
-  too.)
-- Compound queries in one tool call: text × tag × folder × modification
-  time. (Rationale: shrinks multi-step reasoning that the model
-  currently has to stitch together across three or four separate tools.)
-- Direct wikilink resolution and outgoing-link discovery.
-  (Rationale: today the agent has backlinks but no first-class outlink
-  or link-target lookup — a graph blind spot.)
-- Structural note inspection without reading full body text.
-  (Rationale: an outline is usually enough to answer "does this note
-  cover topic X?" and reading the full body wastes context.)
-- Link-graph-based "related notes" as a lightweight, index-free
-  alternative to embedding-based similarity. (Rationale: many "notes
-  near this one" questions are answered by shared tags + shared links,
-  no embeddings required.)
-- Preamble hints that steer the model toward the cheapest tool that
-  answers the current question. (Rationale: adding tools without
-  updating hints often *worsens* behavior because the model picks the
-  wrong one.)
-- No new external dependencies, no new persistent index, no runtime
-  network calls in the base set. (Rationale: keeps the plugin's
-  single-binary packaging story intact and avoids adding
-  first-run-friction UX for embeddings/indexing.)
+- The agent can find notes about a topic even when the query wording
+  and note wording don't match verbatim.
+- The agent can tolerate small typos and word-order differences in
+  the user's query.
+- The agent can answer questions that combine topical, structural,
+  and time filters in a single step, rather than a multi-turn
+  intersection.
+- The agent can move from a wiki-link mention to the linked note in
+  a single action, mirroring the user's own click.
+- The agent can decide whether a note is likely to contain the
+  answer *before* reading its full body, by inspecting the note's
+  outline.
+- The agent can offer "notes near this one" for a source note
+  without any first-run indexing or model-provider round-trip.
+- Adding these capabilities does not add a first-run indexing step,
+  a required user setting, or a new external service the plugin
+  depends on.
 
 ## User Scenarios & Testing
 
@@ -75,7 +53,7 @@ clearer signals about note structure that reduce whole-file reads.
 Narrative: A user with a several-thousand-note vault asks the agent
 "find my notes about weakly typed languages" — the notes actually use
 "weakly-typed" (hyphenated). The agent runs a single ranked text search
-that surfaces the correct notes at the top, cites their paths in the
+whose top result is the intended note, cites its path in the
 chat, and offers to summarise.
 
 Independent Test: On a seed vault where the phrase appears as
@@ -161,8 +139,9 @@ Acceptance Scenarios:
 ### User Story P5 – Link-graph "related notes"
 
 Narrative: The user is reading a note and asks the agent "what else in
-my vault relates to this?" Without any embeddings, the agent produces a
-short ranked list of notes that share the most tags, incoming links,
+my vault relates to this?" Without any embeddings, the agent produces
+a bounded, ranked list of notes that share the most tags, incoming
+links,
 or outgoing links with the current note.
 
 Independent Test: Given a seed vault where note X shares 3 tags with
@@ -180,258 +159,276 @@ Acceptance Scenarios:
 
 ### Edge Cases
 
-- **`prepareFuzzySearch` on a very large vault**: the public JSDoc
-  warns fuzzy match is expensive above a few thousand calls. Fuzzy
-  mode must stop scanning once the match cap is reached and must not
-  freeze the UI thread.
-- **Metadata cache still warming on plugin startup**: any tool that
-  reads `metadataCache.resolvedLinks` before the initial "resolved"
-  event must return a soft "not ready" result rather than empty data.
-- **Regex mode preserved verbatim**: existing callers of
-  `search_content` may pass `regex: true`; the upgraded tool must
-  preserve that behavior identically.
-- **A wikilink that Obsidian resolves ambiguously** (two notes with
-  the same basename in different folders): the resolution tool
-  returns whatever Obsidian's own resolver picks, without inventing
-  its own tiebreaking.
-- **Compound query with an impossible combination** (e.g., `tag:foo`
-  and `path_prefix:bar/` where no note has both): the tool short-circuits
-  cheaply and returns an empty result.
-- **Very large notes**: structural inspection returns metadata only,
-  never body text — even for a 1MB note.
+- **Very large vaults**: search modes that are documented as
+  computationally expensive must not freeze the UI thread and must
+  respect the same result-size caps that already exist for the
+  plugin's other read-only search tools.
+- **Vault metadata not fully loaded yet**: any tool that depends on
+  Obsidian's resolved metadata (link graph, tag index, note outline)
+  must return a well-formed "not ready" response — not throw and not
+  return silently wrong data — until Obsidian has finished its
+  initial resolution pass.
+- **Legacy behavior of existing text search**: existing callers of
+  the current text-search tool may pass a regex today; the upgraded
+  tool must preserve that behavior identically for those callers.
+- **A wikilink Obsidian itself resolves ambiguously** (for example,
+  two notes sharing the same basename in different folders): the
+  resolution tool returns whatever Obsidian's own resolver picks,
+  without inventing a different tiebreaker.
+- **Compound query with an impossible combination** (for example, a
+  tag filter and a folder filter with no intersection): the tool
+  short-circuits without reading any note bodies and returns an
+  empty result.
+- **Very large notes**: structural inspection returns outline
+  information only, and returns none of the note's body prose, at
+  any note size.
 - **Windows path separators**: all path-shaped inputs and outputs
-  remain vault-relative POSIX-style, per the existing `VaultPath`
-  contract in `src/tools/VaultPath.ts`.
+  remain vault-relative in the same normalized form the plugin
+  already produces for its existing read tools.
 
 ## Requirements
 
 ### Functional Requirements
 
-- **FR-001**: A ranked text-search mode is available where results are
-  returned in a documented, stable ordering by relevance rather than
-  filesystem/enumeration order. (Stories: P1)
-- **FR-002**: A fuzzy text-search mode is available that tolerates
-  typos, transpositions, and rearranged word order. (Stories: P1)
-- **FR-003**: The existing regex-mode behavior of `search_content` is
-  preserved so that existing callers do not regress. (Stories: P1)
+- **FR-001**: A ranked text-search mode is available where results
+  are returned in a documented, stable ordering by relevance rather
+  than filesystem/enumeration order. (Stories: P1)
+- **FR-002**: A fuzzy text-search mode is available that returns
+  matches for queries that differ from the target by typos or by
+  rearranged word order. (Stories: P1)
+- **FR-003**: The existing text-search regex behavior is preserved
+  so that existing callers do not observe a change in output for the
+  same input. (Stories: P1)
 - **FR-004**: A compound-query capability is available that accepts,
-  at minimum, tag / path-prefix / modification-since / free-text
-  filters combined with AND semantics. (Stories: P2)
-- **FR-005**: A compound query with a filter that pre-excludes the
-  entire vault does not read any note bodies. (Stories: P2)
-- **FR-006**: A tool exists that resolves a wikilink expression
-  (plus its source note) to the concrete target note's vault-relative
-  path, using Obsidian's own link resolver. (Stories: P3)
-- **FR-007**: A tool exists that returns the outgoing links of a
-  given note, distinguishing wikilinks from markdown links.
-  (Stories: P3)
-- **FR-008**: A tool exists that returns a note's structural outline
-  (headings, sections, block IDs, and their positions) *without*
-  returning the note's body text. (Stories: P4)
-- **FR-009**: A tool exists that returns a bounded, ranked list of
-  notes related to a source note using at least the following signals:
-  shared tags, shared outgoing links, shared incoming links.
-  (Stories: P5)
-- **FR-010**: All new tools are strictly read-only and register with
-  the same auto-approval contract as the existing v0.2 read-only tools
-  (no user prompt per invocation). (Stories: P1, P2, P3, P4, P5)
-- **FR-011**: Preamble usage hints teach the model which tool is the
-  cheapest fit for each shape of question, using the existing
-  `vaultToolManifest.ts` inventory pattern. (Stories: P1, P2, P3, P4,
-  P5)
-- **FR-012**: Every new tool has a bounded, documented maximum result
-  size and reports truncation via a `truncated: true` field when the
-  cap is hit. (Stories: P1, P2, P5)
-- **FR-013**: No new persistent index is created; no new runtime
-  network calls are introduced; no new required user configuration is
-  introduced. (Cross-cutting)
-- **FR-014**: When Obsidian's `MetadataCache` has not yet resolved on
-  plugin load, tools that depend on it return a well-formed
-  "not-ready" response rather than throwing or returning silently
-  wrong data. (Stories: P3, P4, P5)
+  at minimum, tag membership, folder-prefix, modified-since, and
+  free-text filters combined with AND semantics. (Stories: P2)
+- **FR-005**: A compound query whose structural filters (tag, folder,
+  or modified-since) exclude the entire vault does not perform any
+  note-body read. (Stories: P2)
+- **FR-006**: The agent can resolve a wiki-link expression (plus the
+  source note in which it appears) to the target note's
+  vault-relative path in one step, using the same resolution rule
+  Obsidian itself applies when the user clicks the link. (Stories: P3)
+- **FR-007**: The agent can retrieve the outgoing links of a given
+  note in one step, and the response distinguishes wikilinks from
+  Markdown links. (Stories: P3)
+- **FR-008**: The agent can retrieve a note's outline — the sequence
+  of headings with their nesting level, section boundaries, and any
+  block identifiers — without receiving the note's body prose in the
+  same response. (Stories: P4)
+- **FR-009**: The agent can retrieve a bounded, ranked list of notes
+  related to a source note, ranked by at least the following
+  signals: shared tags, shared outgoing links, and shared incoming
+  links. (Stories: P5)
+- **FR-010**: All new capabilities added under this feature are
+  purely read-only against the vault and are invoked without a
+  per-invocation user prompt, matching the auto-approval behavior of
+  the plugin's existing read-only vault search capabilities.
+  (Stories: P1, P2, P3, P4, P5)
+- **FR-011**: The instructions the agent receives at session start
+  teach it which capability is the cheapest fit for each shape of
+  question introduced by this feature. (Stories: P1, P2, P3, P4, P5)
+- **FR-012**: Every new capability has a documented maximum result
+  size and, when that cap is hit, its response indicates that the
+  result was truncated. (Stories: P1, P2, P5)
+- **FR-013**: This feature does not introduce a persistent index of
+  vault content, a new runtime network dependency, or a new required
+  user setting. (Cross-cutting; supports all stories P1–P5 by
+  keeping the feature usable on any vault out of the box.)
+- **FR-014**: When Obsidian's initial vault-metadata resolution has
+  not completed, capabilities that depend on that metadata return a
+  well-formed "not-ready" response and do not throw. (Stories: P3,
+  P4, P5)
 
 ### Key Entities
 
-- **Ranked match**: a search result carrying at least a note path, a
-  relevance score with documented ordering semantics, and — where
-  applicable — line-level snippets with match spans.
-- **Compound query filter set**: a JSON object of AND-combined
-  filters over tag membership, path prefix, modification-since
-  timestamp, and free-text.
-- **Note structure**: the outline (headings with levels + positions,
-  section boundaries, block IDs) of a note, *without* the note's body
-  text.
-- **Related-notes signal set**: the collection of features
-  (shared tags, shared outgoing links, shared incoming links) used to
+- **Ranked match**: a search result carrying at least a target note's
+  vault-relative path, a numeric relevance score with documented
+  ordering semantics, and — where applicable — line-level snippets
+  with the character offsets of the matched text.
+- **Compound query filter set**: a set of AND-combined filters over
+  tag membership, folder-prefix, modification-since timestamp, and
+  free-text.
+- **Note outline**: the sequence of a note's headings (with nesting
+  level), section boundaries, and block identifiers — *without* the
+  note's body prose.
+- **Related-notes signal set**: the collection of signals — shared
+  tags, shared outgoing links, and shared incoming links — used to
   rank vault neighbours of a source note.
 
 ### Cross-Cutting / Non-Functional
 
-- All new tools use the same read-only auto-approval contract that
-  today's `search_by_tag`, `search_by_name`, and related v0.2 tools
-  use, so that they can be called freely by the agent without user
-  interstitials.
-- Path handling flows through the existing `VaultPath` module so that
-  vault-escape resistance and Windows/POSIX normalization behavior are
-  inherited rather than re-invented.
-- Existing tools listed in `vaultToolManifest.ts` remain registered
-  and unchanged in name; upgrades to `search_content` are additive on
-  its output schema, not renaming.
+- All new read capabilities are invoked without a per-call user
+  approval prompt, matching the auto-approval behavior the plugin
+  already applies to its existing read-only vault searches.
+- Path handling for any new capability normalises paths using the
+  same rules the plugin already applies to its existing read-only
+  vault tools, so that vault-escape resistance and Windows/POSIX
+  normalization behavior are inherited rather than reintroduced.
+- Existing read capabilities that this feature does not upgrade
+  remain available and unchanged in name and output shape; the
+  upgrade to text search extends the current tool's output rather
+  than replacing it with a differently-named capability.
 
 ## Success Criteria
 
-- **SC-001**: On a seed vault, a ranked text search for a query whose
-  exact literal appears only in a lower-value note but a rearranged
-  form appears in the higher-value note returns the higher-value note
-  first. (FR-001)
-- **SC-002**: On a seed vault, a fuzzy text search for a
-  slightly-misspelled query returns the intended target within the top
-  results. (FR-002)
-- **SC-003**: All existing `search_content` regex-mode tests continue
-  to pass unchanged. (FR-003)
-- **SC-004**: A compound query composed of tag + path-prefix +
-  modified-since + text returns exactly the intersection when tested
-  against a seed vault. (FR-004)
-- **SC-005**: A compound query whose tag filter matches zero notes
-  returns an empty result without any body-content reads observed in
-  the test harness. (FR-005)
-- **SC-006**: For a wikilink whose target is unambiguous, the
-  resolution tool returns that target's vault-relative path. For an
-  unresolvable wikilink, the tool returns an "unresolved" result
-  without throwing. (FR-006)
-- **SC-007**: For a note with N outgoing links, the outlink tool
-  returns N entries with wikilink-vs-markdown distinction populated.
-  (FR-007)
-- **SC-008**: The structural-inspection tool's returned payload for a
-  representative note contains headings, sections, and block IDs, and
-  contains *no* substring drawn from the note's body prose (verified
-  by a substring absence check in tests). (FR-008)
-- **SC-009**: For a source note that shares 3 tags with note A and 1
-  tag with note B (all else equal), related-notes ranks A above B.
-  (FR-009)
-- **SC-010**: Every new tool registered under this feature has
-  `skipPermission: true` per its factory registration, verifiable via
-  a manifest-level assertion. (FR-010)
-- **SC-011**: The preamble assembled at plugin startup lists each
-  new tool with a one-line usage hint sourced from
-  `vaultToolManifest.ts`. (FR-011)
-- **SC-012**: Every new tool has a documented maximum result count
-  and a `truncated` boolean in its output shape; caps are asserted in
-  tests. (FR-012)
-- **SC-013**: No new npm runtime dependency is introduced; no new
-  network call is introduced; no new required user setting is added.
-  (FR-013)
-- **SC-014**: A test simulating "metadata cache not yet resolved"
-  produces a well-formed not-ready result rather than throwing.
-  (FR-014)
+- **SC-001**: On a seed vault constructed for this test, a ranked
+  text search for a two-word query returns a note that contains the
+  words in a rearranged form ranked strictly above a note that
+  contains only one of the two words. (FR-001)
+- **SC-002**: On the same seed vault, a fuzzy text search for a
+  query with one transposed character in a five-character word
+  returns the intended target note in the top three results.
+  (FR-002)
+- **SC-003**: For every existing text-search call shape recorded in
+  the plugin's regression suite prior to this feature, the tool
+  returns the same set of match records — same paths, same line
+  numbers, same snippet substrings — after this feature ships.
+  (FR-003)
+- **SC-004**: On a seed vault, a compound query composed of a tag
+  filter, a folder-prefix filter, a modified-since filter, and a
+  free-text filter returns exactly the set of notes that satisfy all
+  four filters (verified by the test enumerating that set
+  explicitly). (FR-004)
+- **SC-005**: On a seed vault instrumented to count note-body reads,
+  a compound query whose structural filters exclude every note
+  performs zero note-body reads and returns an empty result.
+  (FR-005)
+- **SC-006**: For a wikilink whose target note exists and is
+  unambiguous in the seed vault, the resolution capability returns
+  that target's vault-relative path. For an unresolvable wikilink,
+  it returns a documented "unresolved" response and does not throw.
+  (FR-006)
+- **SC-007**: For a seed-vault note that contains one wikilink and
+  one Markdown link to distinct targets, the outlink capability
+  returns two entries whose link-kind fields identify each target as
+  a wikilink or Markdown link respectively. (FR-007)
+- **SC-008**: For a seed-vault note whose body prose contains a
+  unique sentinel string, the outline capability's returned payload
+  for that note does not contain the sentinel string. (FR-008)
+- **SC-009**: For a source note that shares three tags with note A
+  and one tag with note B (with all other similarity signals equal
+  in the seed vault), the related-notes capability ranks A strictly
+  above B. (FR-009)
+- **SC-010**: For every capability introduced by this feature, the
+  agent invokes it in a session end-to-end test without the plugin
+  emitting a user-approval prompt. (FR-010)
+- **SC-011**: In a session-startup end-to-end test, the instructions
+  the agent receives include one distinguishable usage-hint line per
+  new capability introduced by this feature. (FR-011)
+- **SC-012**: Every new capability has a documented maximum result
+  count. On a seed vault engineered to exceed each cap, the response
+  contains that cap's number of results and a truncation indicator
+  distinguishable from a non-truncated response. (FR-012)
+- **SC-013**: The plugin's manifest and lockfile lists show no net
+  new runtime dependency, and the plugin's setting surface exposes
+  no new required setting, when this feature is shipped. (FR-013)
+- **SC-014**: In a test that simulates Obsidian not having completed
+  its initial metadata resolution, every capability that depends on
+  that metadata returns a documented "not-ready" response and does
+  not throw. (FR-014)
 
 ## Assumptions
 
-- **Existing `search_content` is extended additively rather than
-  renamed.** The tool keeps its name and its today-shaped output; new
-  fields (a numeric `score` and per-match spans) are added, and a new
-  `mode` argument opts into fuzzy or ranked-simple behavior. Regex
-  mode remains identical. Rationale: renaming would churn the
-  preamble, the renderer, and every downstream test for no material
-  gain, and additive extension is what the SDK's tool schema supports
-  cleanly.
-- **`search_by_name` and `resolve_link` coexist.** `resolve_link` is
-  for the exact-wikilink-target case; `search_by_name` is for the
-  ranked-by-basename fuzzy case. Both remain registered.
-- **`related_notes` uses a documented, deterministic signal set —
-  shared tags, shared incoming links, shared outgoing links —
-  weighted by simple counts.** Rationale: keeps the tool auditable
-  and gives us a clear regression target; can be refined later if the
-  model or the user finds it insufficient.
-- **All new tools operate against `metadataCache` and
-  `resolvedLinks`; a text-search tool additionally reads note bodies
-  via `cachedRead` iterated serially to avoid the
-  `Promise.all(files.map(cachedRead))` UI-freeze failure mode
-  documented in the API research.**
-- **Result caps live in one place per tool** (matching the existing
-  `SEARCH_BY_TAG_CAP` / `SEARCH_BY_NAME_CAP` convention in
-  `SearchTools.ts`), so future tuning is a single-file edit.
-- **The v0.9 test suite remains the regression baseline.** No test
-  in the existing 1560-test suite may be deleted or weakened as a
-  result of this feature; new tests are additive.
+- **The existing text-search capability is extended in place rather
+  than renamed.** Its current inputs and outputs continue to work
+  unchanged for existing callers; new inputs and new output fields
+  are added on top. Rationale: renaming would churn every downstream
+  test and message-renderer path for no material user benefit, and
+  additive extension is the least disruptive way to add ranked and
+  fuzzy modes.
+- **The existing name-search capability and the new wikilink-resolution
+  capability coexist.** Wikilink resolution serves the exact-target
+  case; name search serves the fuzzy-basename case; both remain
+  available to the agent.
+- **"Related notes" is ranked by a documented, deterministic signal
+  set — shared tags, shared outgoing links, and shared incoming
+  links, weighted by simple counts.** Rationale: keeps the behavior
+  auditable and gives a clear regression target; the weights can be
+  tuned later if the model or the user finds the ranking
+  unsatisfying, without changing the observable contract.
+- **New capabilities operate against Obsidian's already-resolved
+  vault metadata; a text-search capability additionally reads note
+  bodies, and it does so serially so as not to overwhelm the UI
+  thread on large vaults.**
+- **Each capability's maximum result count is defined in a single
+  location per capability**, matching the pattern already used for
+  the plugin's existing read-only search caps, so that future tuning
+  is a single-file edit.
+- **The plugin's current regression test suite is the baseline no
+  test in that suite is deleted or weakened as a result of this
+  feature; new tests are additive.
 
 ## Scope
 
 In Scope:
-- Upgrading `search_content` with a `mode` argument (`substring` |
-  `simple` | `fuzzy` | `regex`), a `score` field, and per-match
-  spans. Legacy call shape (`{query, regex?}`) preserved.
-- Six new read-only tools per FR-004 – FR-009 (`search_vault`,
-  `resolve_link`, `get_outlinks`, `get_note_structure`,
-  `related_notes`, and — implicit in `search_content` v2 — a
-  fuzzy-mode capability).
-- Preamble updates in `vaultToolManifest.ts` describing each new
-  tool's shape and cheapest use case, and updated tests in
-  `PreambleAssembler.test.ts`.
-- Tests: unit tests per tool plus at least one seed-vault integration
-  scenario per user story.
+- Extending the existing vault text search with a mode selector so
+  callers can opt into ranked-simple or fuzzy behavior in addition to
+  the current substring and regex behavior, plus a numeric relevance
+  score and per-match character spans on results.
+- A new compound-query capability supporting AND-combined tag,
+  folder-prefix, modified-since, and free-text filters (FR-004).
+- New capabilities for wikilink resolution (FR-006), outgoing-link
+  discovery (FR-007), outline inspection (FR-008), and related-notes
+  ranking (FR-009).
+- Updates to the agent's session-start instructions so that each new
+  capability has a usage hint (FR-011).
+- Tests: unit-level coverage for each new capability plus at least
+  one seed-vault integration scenario per user story.
 - Documentation updates in the plugin README and CHANGELOG.
 
 Out of Scope:
-- Any form of precomputed embedding / vector index. (See
-  `proposals/0004-embeddings-vector-search.md`, rejected
-  2026-07-06.)
-- The Dataview inter-plugin tool. (Captured separately as
-  `proposals/0011-dataview-query-tool.md`, PR #13.)
-- New write tools; changes to any existing write tool.
-- Programmatic invocation of Obsidian's built-in Search pane
-  (`openGlobalSearch`) as a returnable tool. It doesn't yield results
-  to callers and is out of the current tool-contract shape.
-- Full-text indexing (e.g., MiniSearch à la Omnisearch). Only worth
-  revisiting if `prepareSimpleSearch` proves too slow in practice.
-- Cross-vault features (only one vault is loaded at a time by
-  Obsidian).
-- UI surfaces beyond what `MessageRenderer` already renders for tool
-  results.
+- Any form of precomputed embedding or vector index. (See
+  `proposals/0004-embeddings-vector-search.md`, rejected 2026-07-06.)
+- Integration with the Dataview community plugin. (Captured
+  separately as `proposals/0011-dataview-query-tool.md`, PR #13.)
+- New or changed write capabilities.
+- Programmatic invocation of Obsidian's built-in Search pane. It
+  does not yield results to callers and does not fit the
+  return-results-to-the-model contract this feature is built around.
+- Full-text indexing. Only worth revisiting if the base capabilities
+  prove too slow in practice.
+- Cross-vault features.
+- New UI surfaces beyond what the plugin's message renderer already
+  renders for tool results.
 
 ## Dependencies
 
-- Obsidian public API surface: `prepareSimpleSearch`,
-  `prepareFuzzySearch`, `renderMatches` / `renderResults` /
-  `sortSearchResults`, `MetadataCache.getFileCache`,
-  `MetadataCache.getFirstLinkpathDest`, `MetadataCache.resolvedLinks`,
-  `getAllTags`, `TFile.stat`. (Verified in
-  `proposals/0010-agent-native-vault-tools.md` research section
-  against `obsidian.d.ts`.)
-- Existing modules: `src/tools/VaultPath.ts` (path resolution),
-  `src/tools/ObsidianApi.ts` (metadata-cache helpers),
-  `src/domain/vaultToolManifest.ts` (inventory + hints),
-  `src/domain/PreambleAssembler.ts` (preamble build + coverage test).
-- No new npm dependency.
+- Obsidian's public plugin API surface for search helpers, metadata
+  cache, resolved-link graph, and file stat information, as
+  inventoried in `proposals/0010-agent-native-vault-tools.md`
+  against the current `obsidian.d.ts`.
+- No new npm runtime dependency (FR-013).
 
 ## Risks & Mitigations
 
-- **Risk**: `prepareFuzzySearch` slows the UI on very large vaults.
+- **Risk**: Fuzzy search runs slowly on very large vaults.
   Impact: chat feels laggy while a fuzzy query scans thousands of
   notes.
-  Mitigation: hard match cap identical to today's `SEARCH_BY_TAG_CAP`
-  bounds the worst case; short-circuit early on high-score matches;
-  yield to the event loop between file reads.
-- **Risk**: Extending `search_content` additively drifts callers'
-  understanding of the tool output over time.
-  Mitigation: fields are additive; existing fields keep their names
-  and types; tests assert both legacy and new fields on every call.
-- **Risk**: `related_notes` produces low-value output on
-  sparsely-linked vaults, causing the agent to spam it needlessly.
-  Mitigation: preamble hint scopes the tool to "notes near this one"
-  usage; documented signal set is deterministic and inspectable so
-  regressions are obvious; return an empty result rather than falling
-  back to an arbitrary set (SC per FR-009).
-- **Risk**: The `metadataCache` staleness window at plugin load
-  produces silently-wrong data if not handled.
-  Mitigation: FR-014 requires an explicit "not-ready" response and
-  SC-014 asserts it in tests; hook `metadataCache.on('resolved', ...)`
-  during plugin bootstrap.
-- **Risk**: `search_content` v2 subtly changes ranking of an existing
-  scripted caller's use case.
-  Mitigation: the default `mode` for `search_content` remains
-  `substring` (unchanged behavior); ranked/fuzzy modes are opt-in via
-  the new `mode` argument.
+  Mitigation: apply the same result-size cap the plugin's existing
+  read-only searches already use; short-circuit once the cap is
+  reached; yield to the UI thread between note reads.
+- **Risk**: Extending the existing text search additively drifts
+  callers' understanding of the output over time.
+  Mitigation: existing output fields keep their names, positions,
+  and types; new fields are additive; regression tests assert both
+  legacy and new fields on every call. (SC-003.)
+- **Risk**: Related-notes ranking produces low-value output on
+  sparsely-linked vaults, and the agent invokes it anyway.
+  Mitigation: the session-start usage hint scopes the capability to
+  the "notes near this one" question; the ranking signals are
+  documented and deterministic so unexpected orderings are
+  reproducible; the capability returns an empty result rather than
+  falling back to an arbitrary set. (FR-009, SC-009.)
+- **Risk**: Vault metadata may not have finished its initial
+  resolution when the agent invokes a metadata-dependent capability.
+  Mitigation: FR-014 requires a well-formed not-ready response and
+  SC-014 asserts it.
+- **Risk**: The upgraded text search subtly changes ranking of an
+  existing scripted caller's use case.
+  Mitigation: the default mode of the text-search capability
+  preserves current behavior; ranked and fuzzy modes are opt-in via
+  the new mode input. (SC-003.)
 
 ## References
 
