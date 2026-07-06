@@ -118,7 +118,7 @@ Verification approach:
   text search to the Phase 1 helper (FR-004, FR-005).
 - [x] **Phase 4: related_notes** — Shared-tags + shared-outlinks +
   shared-backlinks ranking; bounded, deterministic (FR-009).
-- [ ] **Phase 5: Preamble hints, docs, and version bump** — Add
+- [x] **Phase 5: Preamble hints, docs, and version bump** — Add
   manifest entries + hints (FR-011); update README, CHANGELOG, and
   `Docs.md`; bump plugin version to v0.10.0.
 

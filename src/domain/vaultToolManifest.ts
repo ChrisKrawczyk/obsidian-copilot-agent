@@ -42,7 +42,7 @@ export const V01_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "search_content",
-    hint: "Full-text search across vault markdown for a literal phrase.",
+    hint: "Full-text search across vault markdown. mode: 'substring' (default, literal), 'regex' (JS pattern), 'fuzzy' (Obsidian scorer). Returns match spans for precise re-reads.",
     readOnly: true,
   },
   {
@@ -173,37 +173,35 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "search_vault",
-    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note.",
+    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note. Capped at 100 results.",
     readOnly: true,
   },
 ];
 
 /**
- * v0.10 Phase 2 structural navigation tools. All read-only,
- * `skipPermission: true`. Hint text is a placeholder here; Phase 5
- * refines the wording for the preamble inventory (FR-011).
+ * v0.10 Phase 2 + Phase 4 structural navigation tools. All read-only,
+ * `skipPermission: true`. Hint text refined in Phase 5 for the
+ * session-start preamble inventory (FR-011 / SC-011).
  */
-// FR-011 hint refined in Phase 5.
 export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "resolve_link",
-    hint: "Resolve a wikilink or markdown link to its target vault path (source-aware, matches Obsidian's own click behavior).",
+    hint: "Resolve a wikilink or markdown link to its target vault path, source-aware (matches Obsidian's own click behavior). Distinguishes unresolved vs. metadata-cache-not-ready.",
     readOnly: true,
   },
   {
     name: "get_outlinks",
-    hint: "List outgoing links + embeds for a note. Distinguishes wikilink vs markdown-link kinds; includes resolvedPath when known.",
+    hint: "List a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes resolvedPath when Obsidian can resolve the target. Capped at 200.",
     readOnly: true,
   },
   {
     name: "get_note_structure",
-    hint: "Return a note's headings + sections + block IDs (line numbers) WITHOUT body prose. Cheap structural inspection.",
+    hint: "Return a note's headings + sections + block IDs with line numbers — NO body prose. Use before read_file to plan a targeted read. Capped at 500 items.",
     readOnly: true,
   },
   {
     name: "related_notes",
-    // FR-011 hint refined in Phase 5.
-    hint: "Rank vault neighbours of a note by shared tags + shared outlinks + shared backlinks. Signal-weighted score with per-signal counts.",
+    hint: "Rank vault neighbours of a note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts.",
     readOnly: true,
   },
 ];
