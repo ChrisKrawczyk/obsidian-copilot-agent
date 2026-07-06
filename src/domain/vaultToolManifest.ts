@@ -165,10 +165,35 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
 ];
 
+/**
+ * v0.10 Phase 2 structural navigation tools. All read-only,
+ * `skipPermission: true`. Hint text is a placeholder here; Phase 5
+ * refines the wording for the preamble inventory (FR-011).
+ */
+// FR-011 hint refined in Phase 5.
+export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
+  {
+    name: "resolve_link",
+    hint: "Resolve a wikilink or markdown link to its target vault path (source-aware, matches Obsidian's own click behavior).",
+    readOnly: true,
+  },
+  {
+    name: "get_outlinks",
+    hint: "List outgoing links + embeds for a note. Distinguishes wikilink vs markdown-link kinds; includes resolvedPath when known.",
+    readOnly: true,
+  },
+  {
+    name: "get_note_structure",
+    hint: "Return a note's headings + sections + block IDs (line numbers) WITHOUT body prose. Cheap structural inspection.",
+    readOnly: true,
+  },
+];
+
 /** All tool entries combined, in inventory presentation order. */
 export const ALL_VAULT_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   ...READ_NOTE_TOOL_ENTRIES,
   ...V03_READ_TOOL_ENTRIES,
+  ...NAVIGATE_TOOL_ENTRIES,
   ...WRITE_NOTE_TOOL_ENTRIES,
   ...V01_TOOL_ENTRIES,
 ];
@@ -178,6 +203,9 @@ export const READ_NOTE_TOOL_NAMES = READ_NOTE_TOOL_ENTRIES.map((e) => e.name);
 
 /** v0.3 Phase 2 read-only search-tool names. */
 export const V03_READ_TOOL_NAMES = V03_READ_TOOL_ENTRIES.map((e) => e.name);
+
+/** v0.10 Phase 2 structural navigation tool names. */
+export const NAVIGATE_TOOL_NAMES = NAVIGATE_TOOL_ENTRIES.map((e) => e.name);
 
 /** Phase 4/5 mutating + workspace tool names (excludes read-equivalent `open_note`). */
 export const WRITE_NOTE_TOOL_NAMES = WRITE_NOTE_TOOL_ENTRIES.filter(

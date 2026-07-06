@@ -109,7 +109,7 @@ Verification approach:
   Preserve every existing caller; add opt-in `mode`, score, and
   per-match char spans. Highest regression risk (FR-003 / SC-003),
   which is why it lands first.
-- [ ] **Phase 2: Structural tools (resolve_link, get_outlinks,
+- [x] **Phase 2: Structural tools (resolve_link, get_outlinks,
   get_note_structure)** — Three metadata-cache-only tools; no body
   reads; small, low-risk surface for FR-006 / FR-007 / FR-008.
 - [ ] **Phase 3: search_vault compound query** — AND-combined tag /
