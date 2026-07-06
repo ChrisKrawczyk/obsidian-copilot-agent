@@ -421,10 +421,15 @@ export async function searchVaultImpl(
     }
   }
 
-  // Step 2: folder-prefix filter. Normalize folder input so trailing
-  // slashes, backslashes, and mixed separators all match the same set.
+  // Step 2: folder-prefix filter. Normalize folder input so leading/
+  // trailing slashes, backslashes, and mixed separators all match the
+  // same set. Vault-relative paths never have a leading slash, so a
+  // caller-supplied "/Work" must be treated as "Work".
   if (folder) {
-    const normalized = folder.replace(/\\/g, "/").replace(/\/+$/, "");
+    const normalized = folder
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "");
     const prefix = normalized === "" ? "" : `${normalized}/`;
     if (prefix !== "") {
       candidates = candidates.filter((f) => f.path.startsWith(prefix));

@@ -509,6 +509,31 @@ describe("searchVaultImpl", () => {
     expect(reads.count).toBe(0);
   });
 
+  it("normalizes folder input with leading/trailing slashes and backslashes", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "Work/a.md", content: "sunset", mtime: 1000 },
+        { path: "Personal/b.md", content: "sunset", mtime: 1000 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    // Each variant should match the same "Work" prefix — leading slash,
+    // trailing slash, backslashes, and combinations must all resolve
+    // to the vault-relative form.
+    for (const variant of ["Work", "/Work", "Work/", "/Work/", "\\Work\\"]) {
+      const r = (await searchVaultImpl(
+        { folder: variant },
+        api,
+        vault,
+      )) as Extract<SearchVaultResult, { ok: true }>;
+      expect(r.ok).toBe(true);
+      expect(r.matches.map((m) => m.path)).toEqual(["Work/a.md"]);
+    }
+  });
+
   it("short-circuits on folder-only filter that excludes every note (SC-005 folder branch)", async () => {
     const { api } = makeFixture({ notes: [] });
     const reads = { count: 0 };
