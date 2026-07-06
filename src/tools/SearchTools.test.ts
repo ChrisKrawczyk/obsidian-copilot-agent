@@ -582,4 +582,37 @@ describe("searchVaultImpl", () => {
     expect(r.ok).toBe(true);
     expect(r.matches.map((m) => m.path)).toEqual(["new.md"]);
   });
+
+  it("tag + text is a tag-filtered ranked text search over the whole vault", async () => {
+    // The tag reduces the candidate set BEFORE the text search
+    // touches any body — untagged notes with the same text must NOT
+    // appear in the results.
+    const { api } = makeFixture({
+      notes: [
+        { path: "keep.md", tags: ["project"] },
+        { path: "skip.md", tags: ["other"] },
+      ],
+    });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "keep.md", content: "the sunset is warm", mtime: 100 },
+        { path: "skip.md", content: "the sunset is warm", mtime: 100 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { tag: "project", text: "sunset", textMode: "simple" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    // Both files contain the word, but only the tagged one should
+    // appear because the tag filter shrank the candidate set first.
+    expect(r.matches.map((m) => m.path)).toEqual(["keep.md"]);
+    // Ranked mode → score + spans populated.
+    expect(typeof r.matches[0].score).toBe("number");
+    expect(Array.isArray(r.matches[0].spans)).toBe(true);
+  });
 });
