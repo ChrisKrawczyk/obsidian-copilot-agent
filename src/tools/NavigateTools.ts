@@ -543,8 +543,6 @@ export function relatedNotesImpl(
     // Backlink overlap: files that link to candidate AND are in source's
     // backlink set.
     let backlinkOverlap = 0;
-    const candTargets = resolvedLinks[f.path] ? undefined : undefined;
-    void candTargets;
     for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
       if (srcPath === sourcePath) continue;
       if (srcPath === f.path) continue;
