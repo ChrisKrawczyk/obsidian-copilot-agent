@@ -168,6 +168,43 @@ describe("resolveLinkImpl", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
   });
+
+  it("returns metadata-cache-not-ready when the source note is un-indexed (cache warming)", () => {
+    // Source path exists in vault but its metadata cache entry is
+    // missing — treated as a warmup state per FR-014.
+    const files: TFileLike[] = [
+      { path: "src.md", extension: "md" },
+      { path: "target.md", extension: "md" },
+    ];
+    const vault = {
+      getMarkdownFiles: () => files,
+      getFileByPath: (p: string) => files.find((f) => f.path === p) ?? null,
+      getAbstractFileByPath: (p: string) =>
+        files.find((f) => f.path === p) ?? null,
+    } as unknown as ReadToolsVault;
+    const app: AppLike = {
+      vault,
+      metadataCache: {
+        // Cache warmup: no file has an entry yet.
+        getFileCache: () => null,
+        // Resolver exists but resolves nothing yet.
+        getFirstLinkpathDest: (linkpath: string) => {
+          // Simulate: resolver returns null for the link but resolves
+          // the source path itself (path-exists probe used by the
+          // impl to distinguish warmup from real misses).
+          if (linkpath === "src.md") return files[0];
+          return null;
+        },
+      },
+    };
+    const api = new ObsidianApi(app);
+    const r = resolveLinkImpl(
+      { link: "[[target]]", sourcePath: "src.md" },
+      api,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
+  });
 });
 
 // ---- get_outlinks ------------------------------------------------------
@@ -248,6 +285,25 @@ describe("getOutlinksImpl", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
   });
+
+  it("returns metadata-cache-not-ready when the file exists but has no cache entry (FR-014 warmup)", () => {
+    // File is in vault but Obsidian hasn't cached it yet.
+    const files: TFileLike[] = [{ path: "a.md", extension: "md" }];
+    const vault = {
+      getMarkdownFiles: () => files,
+      getFileByPath: (p: string) => files.find((f) => f.path === p) ?? null,
+      getAbstractFileByPath: (p: string) =>
+        files.find((f) => f.path === p) ?? null,
+    } as unknown as ReadToolsVault;
+    const app: AppLike = {
+      vault,
+      metadataCache: { getFileCache: () => null },
+    };
+    const api = new ObsidianApi(app);
+    const r = getOutlinksImpl({ path: "a.md" }, api, vault);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
+  });
 });
 
 // ---- get_note_structure -----------------------------------------------
@@ -316,6 +372,24 @@ describe("getNoteStructureImpl", () => {
       notes: [{ path: "a.md" }],
       noMetadataCache: true,
     });
+    const r = getNoteStructureImpl({ path: "a.md" }, api, vault);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");
+  });
+
+  it("returns metadata-cache-not-ready when the file exists but has no cache entry (FR-014 warmup)", () => {
+    const files: TFileLike[] = [{ path: "a.md", extension: "md" }];
+    const vault = {
+      getMarkdownFiles: () => files,
+      getFileByPath: (p: string) => files.find((f) => f.path === p) ?? null,
+      getAbstractFileByPath: (p: string) =>
+        files.find((f) => f.path === p) ?? null,
+    } as unknown as ReadToolsVault;
+    const app: AppLike = {
+      vault,
+      metadataCache: { getFileCache: () => null },
+    };
+    const api = new ObsidianApi(app);
     const r = getNoteStructureImpl({ path: "a.md" }, api, vault);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("metadata-cache-not-ready");

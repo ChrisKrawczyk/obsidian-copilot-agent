@@ -181,7 +181,35 @@ export function resolveLinkImpl(
   if (r.reason === "metadata-cache-not-ready") {
     return { ok: false, reason: "metadata-cache-not-ready" };
   }
+  // FR-014: distinguish "cache not ready yet" from "genuinely
+  // unresolved". If the source note itself exists in the vault but
+  // Obsidian has no cache entry for it yet, the resolver is almost
+  // certainly returning null because the metadata index is still
+  // warming — surface that as the retryable not-ready reason instead
+  // of the terminal `unresolved`.
+  if (isSourceCacheWarming(parsed.sourcePath, api)) {
+    return { ok: false, reason: "metadata-cache-not-ready" };
+  }
   return { ok: false, reason: "unresolved" };
+}
+
+function isSourceCacheWarming(sourcePath: string, api: ObsidianApi): boolean {
+  const file = lookupFileByApi(sourcePath, api);
+  if (!file) return false;
+  const cacheR = api.getFileCache(file);
+  // `not-found` here means the file is in the vault but the metadata
+  // cache hasn't populated an entry for it yet.
+  return !cacheR.ok && cacheR.reason === "not-found";
+}
+
+function lookupFileByApi(path: string, api: ObsidianApi): TFileLike | null {
+  // We don't have direct vault access here, so use the resolver as a
+  // path-existence probe: if getFirstLinkpathDest resolves the exact
+  // path to a file, we know the file exists. When the resolver isn't
+  // available, we can't tell — return null and fall back to the
+  // default "unresolved" answer.
+  const r = api.resolveLinkPath(path, path);
+  return r.ok ? r.value : null;
 }
 
 export function getOutlinksImpl(
@@ -197,7 +225,13 @@ export function getOutlinksImpl(
   if (!file) return { ok: false, reason: "not-found" };
   const cacheR = api.getFileCache(file);
   if (!cacheR.ok) {
-    if (cacheR.reason === "index-unavailable") {
+    // FR-014: file exists in vault but metadata cache is either
+    // completely unavailable or hasn't populated this file yet.
+    // Both are retryable warmup states, not terminal "not found".
+    if (
+      cacheR.reason === "index-unavailable" ||
+      cacheR.reason === "not-found"
+    ) {
       return { ok: false, reason: "metadata-cache-not-ready" };
     }
     return { ok: false, reason: "not-found" };
@@ -249,7 +283,13 @@ export function getNoteStructureImpl(
   if (!file) return { ok: false, reason: "not-found" };
   const cacheR = api.getFileCache(file);
   if (!cacheR.ok) {
-    if (cacheR.reason === "index-unavailable") {
+    // FR-014: same reasoning as getOutlinksImpl — a null cache for a
+    // file that exists in the vault is a warmup state, not a
+    // terminal miss.
+    if (
+      cacheR.reason === "index-unavailable" ||
+      cacheR.reason === "not-found"
+    ) {
       return { ok: false, reason: "metadata-cache-not-ready" };
     }
     return { ok: false, reason: "not-found" };
