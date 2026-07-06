@@ -58,9 +58,11 @@ Six new agent-native capabilities land in the plugin:
 
 1. `search_content` extended additively with new opt-in `mode`
    (`substring` (default, current behavior), `simple`, `fuzzy`,
-   `regex`), new optional `score` field, per-match char spans, and
-   optional `pathPrefix` / `caseSensitive` filters. Legacy calls that
-   don't pass `mode` remain byte-for-byte compatible.
+   `regex`), new optional `score` field, and per-match char spans.
+   Folder filtering and case sensitivity are NOT added here —
+   compound filtering is the responsibility of `search_vault`.
+   Legacy calls that don't pass `mode` remain byte-for-byte
+   compatible.
 2. `search_vault` — compound tag × folder-prefix × modified-since ×
    text filter with AND semantics and short-circuit when structural
    filters exclude the vault.
@@ -142,22 +144,25 @@ caller's output remains byte-for-byte identical. Introduce
 
 ### Changes Required
 
-- **`src/tools/ObsidianApi.ts`**: extend the wrapped `metadataCache`
-  and app surfaces to expose `prepareSimpleSearch(query)` and
-  `prepareFuzzySearch(query)` passthroughs (both return
-  `(text) => {score, matches:[[start,end],...]} | null`). Add matching
-  fields to `AppLike` and the wrapper's public accessor. Keep the
-  wrapper narrow — no logic, just plumbing.
-- **`src/test/obsidianMock.ts`**: add `prepareSimpleSearch` and
-  `prepareFuzzySearch` implementations sufficient for unit tests
-  (whitespace-AND substring for simple; simple char-subsequence for
-  fuzzy). Score does not need to match Obsidian exactly — tests
-  assert ordering, not absolute values.
+- **`src/tools/ObsidianApi.ts`**: no wrapper changes are needed for
+  the ranked/fuzzy search helpers — `prepareSimpleSearch` and
+  `prepareFuzzySearch` are top-level exports of the `obsidian`
+  module (`node_modules/obsidian/obsidian.d.ts:5210, 5218`) and are
+  imported directly by `ReadTools.ts`. In test/Node contexts where
+  the `obsidian` module is aliased to `src/test/obsidianMock.ts`
+  (`vitest.config.ts:4-10`), the mock provides equivalent exports.
+- **`src/test/obsidianMock.ts`**: add top-level exports
+  `prepareSimpleSearch` and `prepareFuzzySearch` sufficient for
+  unit tests (whitespace-AND substring for simple; simple
+  char-subsequence for fuzzy — matching Obsidian's documented
+  semantics). Score does not need to match Obsidian exactly —
+  tests assert ordering, not absolute values.
 - **`src/tools/ReadTools.ts`**:
   - Extend `search_content` JSON schema (still
     `additionalProperties: false`): add optional `mode:
-    "substring"|"simple"|"fuzzy"|"regex"`, optional
-    `pathPrefix: string`, optional `caseSensitive: boolean`.
+    "substring"|"simple"|"fuzzy"|"regex"`. No other new inputs are
+    added — folder-prefix / tag / modified-since / case-sensitivity
+    remain the responsibility of `search_vault` (Phase 3).
     When `mode` is omitted, behavior matches the current
     "substring" default (unless `regex: true` is set, in which case
     regex mode is chosen for back-compat with the current `regex`
@@ -171,18 +176,17 @@ caller's output remains byte-for-byte identical. Introduce
     sorted by descending `score` (tiebreak: current stable
     iteration order — path, then line). Substring/regex modes keep
     their existing filesystem enumeration order.
-  - Add `pathPrefix` filter: applied as a
-    `path.startsWith(normalizedPrefix)` check after
-    `resolveVaultPath` normalization; matches existing normalization
-    for `find_backlinks` and `vault_tree`.
-  - Add `caseSensitive`: applies to substring and simple modes;
-    ignored for fuzzy (Obsidian's fuzzy is inherently
-    case-insensitive) and for regex (caller controls via inline
-    flags).
   - Preserve `MAX_SEARCH_MATCHES=50` and `SNIPPET_RADIUS=80` for
     all modes; keep the existing `total >= MAX_SEARCH_MATCHES * 4`
     early-out for substring/regex, and apply the same "keep-top-50
     ranked, truncate rest" behavior for simple/fuzzy.
+  - Refactor: extract the file-iteration and match-collection loop
+    into a reusable `searchInFiles(files, query, options)` helper
+    that accepts an optional `limit` overriding
+    `MAX_SEARCH_MATCHES`. `searchContentImpl` becomes a thin
+    wrapper that passes the full vault and the default limit. This
+    is the seam Phase 3's `search_vault` uses to enforce a
+    different cap (see Finding C resolution in Phase 3).
   - Serial file iteration is preserved (yields to UI thread on
     large vaults).
 - **Tests** (`src/tools/ReadTools.test.ts`): add cases —
@@ -191,17 +195,15 @@ caller's output remains byte-for-byte identical. Introduce
   no `spans`) — this is the SC-003 anchor;
   (b) `mode: "simple"` returns descending-score ordering with
   whitespace-AND semantics and `spans` populated;
-  (c) `mode: "fuzzy"` returns top-K on a typo query (transposed
-  char in a five-char word) that would return zero in substring
-  mode;
-  (d) `pathPrefix: "Work/"` excludes matches outside the prefix
-  in every mode;
-  (e) `caseSensitive: true` on substring / simple modes;
-  (f) cap + truncation flag behavior identical to existing
-  behavior;
-  (g) mock passthroughs on `ObsidianApi` return the expected
-  interface;
-  (h) invalid regex still returns the existing
+  (c) `mode: "fuzzy"` returns top-K on a query with a single
+  dropped character (per SC-002 — subsequence-matchable via
+  `prepareFuzzySearch`);
+  (d) cap + truncation flag behavior identical to existing
+  behavior for the default limit; `searchInFiles` with an
+  overriding limit caps at that override instead;
+  (e) mock top-level `prepareSimpleSearch` / `prepareFuzzySearch`
+  exports return the expected interface;
+  (f) invalid regex still returns the existing
   `Invalid regex` error shape.
 
 ### Success Criteria
@@ -220,8 +222,8 @@ caller's output remains byte-for-byte identical. Introduce
 - [ ] `mode: "simple"` on a two-word query returns a note that
   contains the words in rearranged form above a note that contains
   only one of the words (SC-001).
-- [ ] `mode: "fuzzy"` on a typo query returns the intended note in
-  the top three results (SC-002).
+- [ ] `mode: "fuzzy"` on a query with a single dropped character
+  (per SC-002) returns the intended note in the top three results.
 
 ---
 
@@ -240,10 +242,12 @@ is roughly the size of one existing tool.
 - **`src/tools/NavigateTools.ts`** (new file, mirrors
   `SearchTools.ts` structure — a small factory `createNavigateTools`
   returning three `defineTool` entries):
-  - `resolve_link`: params `{link: string, sourcePath?: string}`;
-    delegates to `metadataCache.getFirstLinkpathDest(link,
-    sourcePath ?? "")` via a new `ObsidianApi.resolveLinkPath`
-    helper. Returns `{ok:true, target:{path}}` on success or
+  - `resolve_link`: params `{link: string, sourcePath: string}`
+    (both required — spec FR-006 mandates source-aware resolution
+    to match Obsidian's own click rule); delegates to
+    `metadataCache.getFirstLinkpathDest(link, sourcePath)` via a
+    new `ObsidianApi.resolveLinkPath` helper. Returns
+    `{ok:true, target:{path}}` on success or
     `{ok:false, reason:"unresolved"|"invalid-link"|
     "metadata-cache-not-ready"}`.
   - `get_outlinks`: params `{path: string}`; reads
@@ -334,20 +338,20 @@ short-circuit when structural filters exclude every note.
      truncated:false, shortCircuited:true}` without any body
      reads. Add an in-test spy on `vault.cachedRead` /
      `vault.read` to prove zero reads (SC-005 anchor).
-  5. If `text` is supplied, run the Phase 1 text-search helper
-     scoped to the working set, with the requested `textMode`
-     (default `"substring"`).
+  5. If `text` is supplied, call the Phase 1 `searchInFiles`
+     helper against the filtered working set, passing
+     `limit: SEARCH_VAULT_CAP` so this tool's cap governs (rather
+     than `search_content`'s default `MAX_SEARCH_MATCHES`) and
+     passing the requested `textMode` (default `"substring"`).
   6. When `tag` is supplied and the metadata cache is not yet
      populated (per `ObsidianApi`'s discriminated-union `reason:
      "metadata-cache-not-ready"`), return the structured
      not-ready result instead of throwing (FR-014 / SC-014).
-- **`src/tools/ReadTools.ts`**: extract the file-iteration and
-  match-collection loop from `searchContentImpl` into a reusable
-  `searchInFiles(files, query, options)` helper so Phase 3 can
-  reuse it against a filtered file list; existing
-  `searchContentImpl` becomes a thin wrapper.
 - **Caps**: `SEARCH_VAULT_CAP = 100` defined at the top of
-  `SearchTools.ts` (documented per FR-012).
+  `SearchTools.ts` (documented per FR-012). The Phase 1
+  `searchInFiles` helper accepts this via its `limit` option; the
+  helper's own default remains `MAX_SEARCH_MATCHES = 50` for legacy
+  `search_content` callers.
 - **`src/domain/vaultToolManifest.ts`**: add `search_vault` to
   `V03_READ_TOOL_ENTRIES` (or a new `COMPOUND_TOOL_ENTRIES` array,
   chosen at implementation time based on how the manifest names
@@ -357,8 +361,9 @@ short-circuit when structural filters exclude every note.
   (SC-004); empty-structural short-circuit performs zero
   `cachedRead`/`read` calls (SC-005); tag-only + text behaves
   as tag-filtered text search over the whole vault; modified-since
-  filter excludes older files; cap + truncation flag; each
-  `textMode` value is exercised; `metadata-cache-not-ready`
+  filter excludes older files; cap at `SEARCH_VAULT_CAP=100` (not
+  50) with truncation flag on a vault engineered to exceed it;
+  each `textMode` value is exercised; `metadata-cache-not-ready`
   response when tag filter is supplied and the cache is not yet
   populated (SC-014).
 
@@ -441,9 +446,9 @@ Bounded, deterministic, and no first-run indexing.
 ### Objective
 
 Land the user-facing surface changes: refine the preamble hint
-lines for all six new capabilities (FR-011 / SC-011), update
-README + CHANGELOG, write `Docs.md`, and bump the plugin version
-to v0.10.0.
+lines for the five new capabilities plus the updated
+`search_content` hint (FR-011 / SC-011), update README + CHANGELOG,
+write `Docs.md`, and bump the plugin version to v0.10.0.
 
 ### Changes Required
 
@@ -453,9 +458,14 @@ to v0.10.0.
   used by existing entries in `V03_READ_TOOL_ENTRIES` (see
   `src/domain/vaultToolManifest.ts:150-166`).
 - **`src/domain/PreambleAssembler.test.ts`** (or the equivalent
-  test file if named differently): assert each of the six new
-  tool names appears exactly once in the assembled preamble and
-  each has a distinguishable hint line (SC-011).
+  test file if named differently): assert the five new tool names
+  (`search_vault`, `resolve_link`, `get_outlinks`,
+  `get_note_structure`, `related_notes`) each appear exactly once
+  in the assembled preamble with a distinguishable hint line, and
+  that the existing `search_content` entry's hint text is present
+  and updated (not newly added). This matches SC-011's "per new
+  capability introduced" wording, since `search_content` is an
+  in-place extension rather than a new tool.
 - **`manifest.json`** and **`package.json`**: bump `version` to
   `0.10.0` following the release convention documented in
   `RELEASING.md`.

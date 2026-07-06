@@ -64,10 +64,11 @@ agent's search returns note A above note B on a single tool call.
 
 Acceptance Scenarios:
 1. Given a vault where a query's exact literal string appears in note
-   A but a rearranged / hyphenated form appears in note B, When the
-   agent issues a ranked text search for the plain query, Then note B
-   is returned with a higher score than note A even though its exact
-   substring doesn't match.
+   B but a rearranged / hyphenated form of the same two words appears
+   in note A, When the agent issues a ranked text search for the plain
+   query, Then note A is returned with a higher score than note B —
+   the complete-but-rearranged match ranks above the partial exact
+   match.
 2. Given a query that would return zero substring matches, When the
    agent issues a fuzzy variant, Then the tool returns the closest
    candidates ranked by score with match-span information the agent
@@ -231,9 +232,12 @@ Acceptance Scenarios:
   name each new capability introduced by this feature and describe,
   in one line each, the shape of user question that capability
   answers. (Stories: P1, P2, P3, P4, P5)
-- **FR-012**: Every new capability has a documented maximum result
-  size and, when that cap is hit, its response indicates that the
-  result was truncated. (Stories: P1, P2, P5)
+- **FR-012**: Every new capability that can return more than one
+  result has a documented maximum result size and, when that cap
+  is hit, its response indicates that the result was truncated.
+  Single-result capabilities (such as wiki-link resolution)
+  document their bounded return shape but do not carry a
+  truncation indicator. (Stories: P1, P2, P5)
 - **FR-013**: This feature does not introduce a persistent index of
   vault content, a new runtime network call, or a new required
   user-configurable setting. (Cross-cutting; supports all stories
@@ -280,9 +284,9 @@ Acceptance Scenarios:
   words in a rearranged form ranked strictly above a note that
   contains only one of the two words. (FR-001)
 - **SC-002**: On the same seed vault, a fuzzy text search for a
-  query with one transposed character in a five-character word
-  returns the intended target note in the top three results.
-  (FR-002)
+  query with a single dropped character (for example, "helo"
+  against a target that contains "hello") returns the intended
+  target note in the top three results. (FR-002)
 - **SC-003**: For every existing text-search call shape recorded in
   the plugin's regression suite prior to this feature, the tool
   returns the same set of match records — same paths, same line
@@ -319,10 +323,12 @@ Acceptance Scenarios:
 - **SC-011**: In a session-startup end-to-end test, the instructions
   the agent receives include one distinguishable usage-hint line per
   new capability introduced by this feature. (FR-011)
-- **SC-012**: Every new capability has a documented maximum result
-  count. On a seed vault engineered to exceed each cap, the response
-  contains that cap's number of results and a truncation indicator
-  distinguishable from a non-truncated response. (FR-012)
+- **SC-012**: Every new capability that can return more than one
+  result has a documented maximum result count. On a seed vault
+  engineered to exceed each cap, the response contains that cap's
+  number of results and a truncation indicator distinguishable
+  from a non-truncated response. Single-result capabilities are
+  exempt from truncation indicators. (FR-012)
 - **SC-013**: The feature is usable on a freshly-installed plugin
   against any vault without introducing a first-run indexing step,
   a first-run network call, or a new required user-configurable
