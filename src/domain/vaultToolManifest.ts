@@ -186,22 +186,22 @@ export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "resolve_link",
-    hint: "Resolve a wikilink or markdown link to its target vault path, source-aware (matches Obsidian's own click behavior). Distinguishes unresolved vs. metadata-cache-not-ready.",
+    hint: "Resolve a wikilink or markdown link to its target vault path, source-aware (matches Obsidian's own click behavior). Distinguishes unresolved vs. metadata-cache-not-ready. Call directly with the raw link text — no need to pre-scan with search_by_name / vault_tree.",
     readOnly: true,
   },
   {
     name: "get_outlinks",
-    hint: "List a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes resolvedPath when Obsidian can resolve the target. Capped at 200.",
+    hint: "List a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes resolvedPath when Obsidian can resolve the target. Capped at 200. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
     readOnly: true,
   },
   {
     name: "get_note_structure",
-    hint: "Return a note's headings + sections + block IDs with line numbers — NO body prose. Use before read_file to plan a targeted read. Capped at 500 items.",
+    hint: "Return a note's headings + sections + block IDs with line numbers — NO body prose. Use before read_file to plan a targeted read. Capped at 500 items. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
     readOnly: true,
   },
   {
     name: "related_notes",
-    hint: "Rank vault neighbours of a note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts.",
+    hint: "Rank vault neighbours of a note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
     readOnly: true,
   },
 ];
