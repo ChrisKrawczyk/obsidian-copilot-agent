@@ -106,9 +106,9 @@ Verification approach:
 ## Phase Status
 
 - [ ] **Phase 1: search_content v2 (additive modes + spans)** —
-  Preserve every existing caller; add opt-in `mode`, `pathPrefix`,
-  `caseSensitive`, score, and per-match char spans. Highest
-  regression risk (FR-003 / SC-003), which is why it lands first.
+  Preserve every existing caller; add opt-in `mode`, score, and
+  per-match char spans. Highest regression risk (FR-003 / SC-003),
+  which is why it lands first.
 - [ ] **Phase 2: Structural tools (resolve_link, get_outlinks,
   get_note_structure)** — Three metadata-cache-only tools; no body
   reads; small, low-risk surface for FR-006 / FR-007 / FR-008.
@@ -135,12 +135,14 @@ Verification approach:
 ### Objective
 
 Extend `search_content` in place so callers can opt into `simple`
-(ranked, whitespace-AND) and `fuzzy` (character-sequence) modes,
-receive a numeric `score` and per-match `spans`, and optionally
-filter by `pathPrefix` and `caseSensitive`, while every existing
-caller's output remains byte-for-byte identical. Introduce
-`prepareSimpleSearch` / `prepareFuzzySearch` passthroughs on
-`ObsidianApi`.
+(ranked, whitespace-AND) and `fuzzy` (character-subsequence) modes
+and receive a numeric `score` plus per-match `spans`, while every
+existing caller's output remains byte-for-byte identical. Compound
+filtering (folder / tag / modified-since / case-sensitivity) is
+NOT introduced here — it lives in `search_vault` (Phase 3).
+`prepareSimpleSearch` / `prepareFuzzySearch` are imported directly
+from the `obsidian` module (top-level exports); no `ObsidianApi`
+wrapper changes are needed for them.
 
 ### Changes Required
 
