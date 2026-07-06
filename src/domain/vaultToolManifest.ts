@@ -173,7 +173,7 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "search_vault",
-    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note. Capped at 100 results.",
+    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note. Capped at 100 results; when `totalIsLowerBound` is true the `total` field is an underestimate.",
     readOnly: true,
   },
 ];

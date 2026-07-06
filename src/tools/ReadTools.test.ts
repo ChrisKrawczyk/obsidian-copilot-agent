@@ -295,6 +295,24 @@ describe("searchInFiles", () => {
     expect(r.matches[0].spans!.length).toBeGreaterThan(0);
   });
 
+  test("simple mode two-word AND query returns ranked matches (SC-001)", async () => {
+    // spec.md contains "The foo widget supports bar." — both words on
+    // the same line. notes.md has "bar baz" — only one word. The
+    // whitespace-AND simple matcher must return only spec.md.
+    const vault = makeVault();
+    const files = vault.getMarkdownFiles!();
+    const r = await searchInFiles(files, "foo bar", vault, { mode: "simple" });
+    expect(r.matches.length).toBe(1);
+    expect(r.matches[0].path).toBe("projects/alpha/spec.md");
+    expect(typeof r.matches[0].score).toBe("number");
+    expect(r.matches[0].spans!.length).toBeGreaterThan(0);
+    // Re-ordered tokens ("bar foo") still hit the same line because
+    // simple search is order-independent (whitespace AND).
+    const r2 = await searchInFiles(files, "bar foo", vault, { mode: "simple" });
+    expect(r2.matches.length).toBe(1);
+    expect(r2.matches[0].path).toBe("projects/alpha/spec.md");
+  });
+
   test("respects overridden limit and reports truncation", async () => {
     const vault = makeVault();
     const files = vault.getMarkdownFiles!();

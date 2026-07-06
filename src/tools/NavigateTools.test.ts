@@ -500,6 +500,35 @@ describe("relatedNotesImpl", () => {
     expect(cand).toBeDefined();
     expect(cand!.signals.backlink).toBe(1);
   });
+
+  it("scores shared-outlink overlap (SC-009 outlink signal)", () => {
+    // src.md and cand.md both link to shared.md → outlinkOverlap = 1.
+    const { api, vault } = makeFixture({
+      notes: [
+        {
+          path: "src.md",
+          links: [{ link: "shared", original: "[[shared]]" }],
+        },
+        {
+          path: "cand.md",
+          links: [{ link: "shared", original: "[[shared]]" }],
+        },
+        { path: "shared.md" },
+      ],
+      resolvedLinks: {
+        "src.md": { "shared.md": 1 },
+        "cand.md": { "shared.md": 1 },
+      },
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cand = r.related.find((e) => e.path === "cand.md");
+    expect(cand).toBeDefined();
+    expect(cand!.signals.outlink).toBe(1);
+    expect(cand!.signals.tag).toBe(0);
+    expect(cand!.signals.backlink).toBe(0);
+  });
 });
 
 // ---- factory ----------------------------------------------------------

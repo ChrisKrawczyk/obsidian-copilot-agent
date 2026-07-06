@@ -439,6 +439,9 @@ export interface SearchInFilesResult {
   matches: SearchMatch[];
   totalMatches: number;
   truncated: boolean;
+  /** True when the underlying scanner stopped counting matches early,
+   *  meaning `totalMatches` is a lower bound rather than an exact tally. */
+  totalIsLowerBound?: boolean;
 }
 
 export async function searchInFiles(
@@ -489,6 +492,7 @@ async function searchInFilesUnranked(
   const matches: SearchMatch[] = [];
   let total = 0;
   let truncated = false;
+  let totalIsLowerBound = false;
 
   outer: for (const f of files) {
     try {
@@ -527,12 +531,20 @@ async function searchInFilesUnranked(
         });
       } else {
         truncated = true;
-        if (total >= limit * 4) break outer;
+        if (total >= limit * 4) {
+          totalIsLowerBound = true;
+          break outer;
+        }
       }
     }
   }
 
-  return { matches, totalMatches: total, truncated };
+  return {
+    matches,
+    totalMatches: total,
+    truncated,
+    totalIsLowerBound: totalIsLowerBound || undefined,
+  };
 }
 
 async function searchInFilesRanked(
@@ -545,9 +557,28 @@ async function searchInFilesRanked(
   const prepared =
     mode === "simple" ? prepareSimpleSearch(query) : prepareFuzzySearch(query);
 
-  const all: SearchMatch[] = [];
+  // Bound the amount of stored ranked work. Rather than accumulating
+  // every matching line across the whole vault and sorting at the end,
+  // we keep at most RANKED_WORKING_MULTIPLIER * limit candidates and
+  // evict the lowest-score entry when a new match would exceed that.
+  // This preserves the top-`limit` ranked results while keeping memory
+  // and sort cost O(limit) rather than O(vault-matches).
+  const RANKED_WORKING_MULTIPLIER = 4;
+  const workingCap = Math.max(1, limit * RANKED_WORKING_MULTIPLIER);
+  const working: SearchMatch[] = [];
+  let totalConsidered = 0;
+  let truncated = false;
+  let totalIsLowerBound = false;
 
-  for (const f of files) {
+  const cmp = (a: SearchMatch, b: SearchMatch) => {
+    const ds = (b.score ?? 0) - (a.score ?? 0);
+    if (ds !== 0) return ds;
+    if (a.path < b.path) return -1;
+    if (a.path > b.path) return 1;
+    return a.line - b.line;
+  };
+
+  outer: for (const f of files) {
     try {
       resolveVaultPath(f.path, vault);
     } catch {
@@ -571,34 +602,56 @@ async function searchInFilesRanked(
       const line = lines[i];
       const result = prepared(line);
       if (!result || result.matches.length === 0) continue;
+      totalConsidered++;
       const firstIdx = result.matches[0][0];
       const start = Math.max(0, firstIdx - SNIPPET_RADIUS);
       const end = Math.min(line.length, firstIdx + SNIPPET_RADIUS);
-      all.push({
+      const entry: SearchMatch = {
         path: f.path,
         line: i + 1,
         snippet: line.slice(start, end),
         score: result.score,
         spans: result.matches.map(([s, e]) => [s, e] as [number, number]),
-      });
+      };
+      if (working.length < workingCap) {
+        working.push(entry);
+      } else {
+        // Only bother if the new entry could beat the current worst.
+        // Full sort of `working` is O(workingCap log workingCap) which
+        // is bounded; we keep it simple and correct.
+        working.sort(cmp);
+        const worst = working[working.length - 1];
+        if (cmp(entry, worst) < 0) {
+          working[working.length - 1] = entry;
+          truncated = true;
+        } else {
+          truncated = true;
+        }
+      }
+      // Yield periodically on very large vaults so the UI thread isn't
+      // pinned. Every 1000 considered matches we release control.
+      if (totalConsidered % 1000 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+        if (totalConsidered > 100000) {
+          // Extreme safety break — a pathologically broad query on a
+          // 100k-note vault shouldn't be allowed to freeze the plugin
+          // even with the working-cap in place.
+          truncated = true;
+          totalIsLowerBound = true;
+          break outer;
+        }
+      }
     }
   }
 
-  // Rank by score desc; stable secondary ordering by path asc, then
-  // line asc, so tests can pin an exact sequence.
-  all.sort((a, b) => {
-    const ds = (b.score ?? 0) - (a.score ?? 0);
-    if (ds !== 0) return ds;
-    if (a.path < b.path) return -1;
-    if (a.path > b.path) return 1;
-    return a.line - b.line;
-  });
+  working.sort(cmp);
 
-  const truncated = all.length > limit;
+  const finalTruncated = truncated || working.length > limit;
   return {
-    matches: truncated ? all.slice(0, limit) : all,
-    totalMatches: all.length,
-    truncated,
+    matches: finalTruncated ? working.slice(0, limit) : working,
+    totalMatches: totalConsidered,
+    truncated: finalTruncated,
+    totalIsLowerBound: totalIsLowerBound || undefined,
   };
 }
 

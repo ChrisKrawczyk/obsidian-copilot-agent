@@ -2,6 +2,7 @@ import { defineTool, type Tool } from "@github/copilot-sdk";
 import type { ReadToolsVault, TFileLike } from "./ReadTools";
 import { ObsidianApi, type FileCacheLike, collectFileTagsForFallback } from "./ObsidianApi";
 import { NAVIGATE_TOOL_NAMES } from "../domain/vaultToolManifest";
+import { resolveVaultPath, toVaultRelative, VaultPathError } from "./VaultPath";
 
 export { NAVIGATE_TOOL_NAMES };
 
@@ -274,7 +275,9 @@ export function getOutlinksImpl(
   if (typeof parsed.path !== "string" || parsed.path.length === 0) {
     return { ok: false, reason: "not-found" };
   }
-  const file = lookupFile(parsed.path, vault);
+  const normalized = normalizeVaultPath(parsed.path, vault);
+  if (normalized === null) return { ok: false, reason: "not-found" };
+  const file = lookupFile(normalized, vault);
   if (!file) return { ok: false, reason: "not-found" };
   const cacheR = api.getFileCache(file);
   if (!cacheR.ok) {
@@ -300,7 +303,7 @@ export function getOutlinksImpl(
     const target = stripLinkFormatting(linkText);
     if (target.length === 0) return;
     const entry: OutlinkEntry = { target, kind };
-    const resolved = api.resolveLinkPath(target, parsed.path as string);
+    const resolved = api.resolveLinkPath(target, normalized);
     if (resolved.ok) {
       entry.resolvedPath = resolved.value.path;
     }
@@ -317,7 +320,7 @@ export function getOutlinksImpl(
   const truncated = entries.length > MAX_OUTLINKS;
   return {
     ok: true,
-    path: parsed.path as string,
+    path: normalized,
     outlinks: truncated ? entries.slice(0, MAX_OUTLINKS) : entries,
     truncated,
   };
@@ -332,7 +335,9 @@ export function getNoteStructureImpl(
   if (typeof parsed.path !== "string" || parsed.path.length === 0) {
     return { ok: false, reason: "not-found" };
   }
-  const file = lookupFile(parsed.path, vault);
+  const normalized = normalizeVaultPath(parsed.path, vault);
+  if (normalized === null) return { ok: false, reason: "not-found" };
+  const file = lookupFile(normalized, vault);
   if (!file) return { ok: false, reason: "not-found" };
   const cacheR = api.getFileCache(file);
   if (!cacheR.ok) {
@@ -383,7 +388,7 @@ export function getNoteStructureImpl(
     const trimmedBlocks = blocks.slice(0, Math.max(0, budget));
     return {
       ok: true,
-      path: parsed.path as string,
+      path: normalized,
       headings: trimmedHeadings,
       sections: trimmedSections,
       blocks: trimmedBlocks,
@@ -392,7 +397,7 @@ export function getNoteStructureImpl(
   }
   return {
     ok: true,
-    path: parsed.path as string,
+    path: normalized,
     headings,
     sections,
     blocks,
@@ -401,6 +406,26 @@ export function getNoteStructureImpl(
 }
 
 // ---- helpers ---------------------------------------------------------
+
+function normalizeVaultPath(
+  raw: string,
+  vault: ReadToolsVault,
+): string | null {
+  // If the vault has no adapter (test/fixture scenarios) skip
+  // normalization — the downstream `lookupFile` still gates by
+  // exact-path existence, so we don't lose containment guarantees.
+  const hasAdapter =
+    typeof (vault as { adapter?: { getBasePath?: () => string } })
+      .adapter?.getBasePath === "function";
+  if (!hasAdapter) return raw;
+  try {
+    const abs = resolveVaultPath(raw, vault);
+    return toVaultRelative(abs, vault);
+  } catch (e) {
+    if (e instanceof VaultPathError) return null;
+    return null;
+  }
+}
 
 function lookupFile(
   path: string,
@@ -454,7 +479,9 @@ export function relatedNotesImpl(
   if (typeof parsed.path !== "string" || parsed.path.length === 0) {
     return { ok: false, reason: "not-found" };
   }
-  const sourcePath = parsed.path;
+  const normalized = normalizeVaultPath(parsed.path, vault);
+  if (normalized === null) return { ok: false, reason: "not-found" };
+  const sourcePath = normalized;
   const cap =
     typeof parsed.limit === "number" && parsed.limit > 0
       ? Math.min(Math.floor(parsed.limit), RELATED_NOTES_CAP)
@@ -503,15 +530,37 @@ export function relatedNotesImpl(
 
   // Source backlinks (files that link TO source).
   const sourceBacklinks = new Set<string>();
+  // Precompute reverse-link map ONCE: targetPath → Set<sourcePath>. This
+  // turns the per-candidate backlink-overlap check into an O(1) map
+  // lookup + set-intersection over the candidate's incoming linkers,
+  // instead of scanning the full resolvedLinks map for every candidate.
+  // Also lets us track candidate cache-warmup state cheaply.
+  const backlinksByTarget = new Map<string, Set<string>>();
   for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
-    if (srcPath === sourcePath) continue;
-    if (targets && targets[sourcePath]) sourceBacklinks.add(srcPath);
+    if (!targets) continue;
+    for (const t of Object.keys(targets)) {
+      let s = backlinksByTarget.get(t);
+      if (!s) {
+        s = new Set<string>();
+        backlinksByTarget.set(t, s);
+      }
+      s.add(srcPath);
+    }
+    if (srcPath !== sourcePath && targets[sourcePath]) {
+      sourceBacklinks.add(srcPath);
+    }
   }
 
   const files =
     (typeof vault.getMarkdownFiles === "function"
       ? vault.getMarkdownFiles()
       : []) ?? [];
+
+  // FR-014: if ANY candidate's per-file cache is unavailable during
+  // scoring, we would silently under-report tag/outlink overlap and
+  // return an ok:true result that lies about the ranking. Track that
+  // and surface metadata-cache-not-ready.
+  let anyCandidateCacheMissing = false;
 
   const scored: RelatedNoteEntry[] = [];
   for (const f of files) {
@@ -538,16 +587,22 @@ export function relatedNotesImpl(
       for (const t of candOutlinks) {
         if (sourceOutlinks.has(t)) outlinkOverlap++;
       }
+    } else if (
+      cR.reason === "index-unavailable" ||
+      cR.reason === "not-found"
+    ) {
+      anyCandidateCacheMissing = true;
     }
 
-    // Backlink overlap: files that link to candidate AND are in source's
-    // backlink set.
+    // Backlink overlap: intersect candidate's incoming linkers with
+    // source's incoming linkers, using the precomputed reverse map.
     let backlinkOverlap = 0;
-    for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
-      if (srcPath === sourcePath) continue;
-      if (srcPath === f.path) continue;
-      if (!targets || !targets[f.path]) continue;
-      if (sourceBacklinks.has(srcPath)) backlinkOverlap++;
+    const candBackers = backlinksByTarget.get(f.path);
+    if (candBackers) {
+      for (const b of candBackers) {
+        if (b === sourcePath || b === f.path) continue;
+        if (sourceBacklinks.has(b)) backlinkOverlap++;
+      }
     }
 
     const score =
@@ -563,6 +618,10 @@ export function relatedNotesImpl(
         backlink: backlinkOverlap,
       },
     });
+  }
+
+  if (anyCandidateCacheMissing) {
+    return { ok: false, reason: "metadata-cache-not-ready" };
   }
 
   scored.sort((a, b) => {

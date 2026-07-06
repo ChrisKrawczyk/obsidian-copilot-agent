@@ -328,8 +328,21 @@ export type SearchVaultResult =
   | {
       ok: true;
       matches: SearchVaultMatch[];
+      /**
+       * Approximate total match count. When `totalIsLowerBound` is
+       * true, this is a lower bound — the underlying substring pass
+       * stops counting early to keep large-vault queries responsive.
+       */
       total: number;
       truncated: boolean;
+      /**
+       * True iff `total` may under-report the true match count because
+       * the underlying scanner stopped counting after a cheap
+       * early-exit ceiling. Callers who need an exact tally should
+       * re-issue the query without a text filter or with a narrower
+       * structural filter.
+       */
+      totalIsLowerBound?: boolean;
       /** True iff a structural filter reduced the working set to zero
        *  BEFORE any body reads were attempted (SC-005). */
       shortCircuited: boolean;
@@ -408,10 +421,14 @@ export async function searchVaultImpl(
     }
   }
 
-  // Step 2: folder-prefix filter.
+  // Step 2: folder-prefix filter. Normalize folder input so trailing
+  // slashes, backslashes, and mixed separators all match the same set.
   if (folder) {
-    const prefix = folder.endsWith("/") ? folder : `${folder}/`;
-    candidates = candidates.filter((f) => f.path.startsWith(prefix));
+    const normalized = folder.replace(/\\/g, "/").replace(/\/+$/, "");
+    const prefix = normalized === "" ? "" : `${normalized}/`;
+    if (prefix !== "") {
+      candidates = candidates.filter((f) => f.path.startsWith(prefix));
+    }
   }
 
   // Step 3: modified-since filter.
@@ -457,6 +474,7 @@ export async function searchVaultImpl(
       matches,
       total: r.totalMatches,
       truncated: r.truncated,
+      totalIsLowerBound: r.totalIsLowerBound,
       shortCircuited: false,
     };
   }

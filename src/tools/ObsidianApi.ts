@@ -382,7 +382,13 @@ export class ObsidianApi {
       const files = this.app.vault.getMarkdownFiles();
       for (const file of files) {
         const cache = mc.getFileCache(file);
-        if (!cache) continue;
+        if (!cache) {
+          // FR-014: any file with a null cache entry means the
+          // metadata index is still warming — return partial tallies
+          // would silently under-report the vault. Surface the
+          // retryable not-ready state instead.
+          return { ok: false, reason: "metadata-cache-not-ready" };
+        }
         for (const t of collectFileTagsForFallback(cache)) {
           tally[t] = (tally[t] ?? 0) + 1;
         }
@@ -419,7 +425,11 @@ export class ObsidianApi {
       const matches: TFileLike[] = [];
       for (const file of files) {
         const cache = mc.getFileCache(file);
-        if (!cache) continue;
+        if (!cache) {
+          // FR-014: partial results would silently under-report the
+          // filtered file set. Surface the retryable not-ready state.
+          return { ok: false, reason: "metadata-cache-not-ready" };
+        }
         const fileTags = collectFileTagsForFallback(cache);
         if (fileTags.has(target)) {
           matches.push(file);

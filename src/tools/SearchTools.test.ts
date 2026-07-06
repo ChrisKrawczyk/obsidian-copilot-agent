@@ -509,6 +509,48 @@ describe("searchVaultImpl", () => {
     expect(reads.count).toBe(0);
   });
 
+  it("short-circuits on folder-only filter that excludes every note (SC-005 folder branch)", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [
+        { path: "Work/a.md", content: "sunset", mtime: 1000 },
+        { path: "Personal/b.md", content: "sunset", mtime: 1000 },
+      ],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      { folder: "Empty", text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(0);
+    expect(r.shortCircuited).toBe(true);
+    expect(reads.count).toBe(0);
+  });
+
+  it("short-circuits on modifiedSince-only filter that excludes every note (SC-005 mtime branch)", async () => {
+    const { api } = makeFixture({ notes: [] });
+    const reads = { count: 0 };
+    const vault = makeFsVault(
+      [{ path: "a.md", content: "sunset", mtime: 1000 }],
+      reads,
+    );
+    (api as unknown as { app: AppLike }).app.vault = vault;
+    const r = (await searchVaultImpl(
+      // Future mtime — no note qualifies.
+      { modifiedSinceMs: 99999999, text: "sunset" },
+      api,
+      vault,
+    )) as Extract<SearchVaultResult, { ok: true }>;
+    expect(r.ok).toBe(true);
+    expect(r.matches).toHaveLength(0);
+    expect(r.shortCircuited).toBe(true);
+    expect(reads.count).toBe(0);
+  });
+
   it("respects SEARCH_VAULT_CAP (not the search_content default of 50)", async () => {
     const total = SEARCH_VAULT_CAP + 20;
     const files = Array.from({ length: total }, (_, i) => ({
