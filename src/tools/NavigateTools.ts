@@ -1,6 +1,6 @@
 import { defineTool, type Tool } from "@github/copilot-sdk";
 import type { ReadToolsVault, TFileLike } from "./ReadTools";
-import { ObsidianApi, type FileCacheLike } from "./ObsidianApi";
+import { ObsidianApi, type FileCacheLike, collectFileTagsForFallback } from "./ObsidianApi";
 import { NAVIGATE_TOOL_NAMES } from "../domain/vaultToolManifest";
 
 export { NAVIGATE_TOOL_NAMES };
@@ -9,6 +9,14 @@ export { NAVIGATE_TOOL_NAMES };
 export const MAX_OUTLINKS = 200;
 /** Hard cap on total headings + sections + blocks in `get_note_structure`. */
 export const MAX_STRUCTURE_ITEMS = 500;
+/** Hard cap on `related_notes` results. */
+export const RELATED_NOTES_CAP = 20;
+/** Weight for shared-tag overlap in the related-notes score. */
+export const W_TAG = 3;
+/** Weight for shared-outlink overlap in the related-notes score. */
+export const W_LINK = 2;
+/** Weight for shared-backlink overlap in the related-notes score. */
+export const W_BACK = 1;
 
 // ---- result shapes ---------------------------------------------------
 
@@ -64,6 +72,25 @@ export type GetNoteStructureResult =
       ok: false;
       reason: "not-found" | "metadata-cache-not-ready";
     };
+
+export interface RelatedSignals {
+  tag: number;
+  outlink: number;
+  backlink: number;
+}
+export interface RelatedNoteEntry {
+  path: string;
+  score: number;
+  signals: RelatedSignals;
+}
+export type RelatedNotesResult =
+  | {
+      ok: true;
+      source: string;
+      related: RelatedNoteEntry[];
+      truncated: boolean;
+    }
+  | { ok: false; reason: "not-found" | "metadata-cache-not-ready" };
 
 // ---- factory ---------------------------------------------------------
 
@@ -147,6 +174,32 @@ export function createNavigateTools(
       },
       skipPermission: true,
       handler: async (args: unknown) => getNoteStructureImpl(args, api, vault),
+    }),
+
+    defineTool("related_notes", {
+      description:
+        "Rank vault neighbours of a source note by shared tags " +
+        `(weight ${W_TAG}), shared outgoing links (weight ${W_LINK}), ` +
+        `and shared incoming links (weight ${W_BACK}). Returns up to ` +
+        `${RELATED_NOTES_CAP} results with per-signal counts. Score-0 ` +
+        "neighbours are omitted.",
+      parameters: {
+        type: "object",
+        required: ["path"],
+        properties: {
+          path: {
+            type: "string",
+            description: "Vault-relative path of the source note. Required.",
+          },
+          limit: {
+            type: "number",
+            description: `Maximum results to return (default ${RELATED_NOTES_CAP}).`,
+          },
+        },
+        additionalProperties: false,
+      },
+      skipPermission: true,
+      handler: async (args: unknown) => relatedNotesImpl(args, api, vault),
     }),
   ];
 }
@@ -388,4 +441,142 @@ function stripLinkFormatting(link: string): string {
   const hash = s.indexOf("#");
   if (hash >= 0) s = s.slice(0, hash);
   return s.trim();
+}
+
+// ---- related_notes ---------------------------------------------------
+
+export function relatedNotesImpl(
+  args: unknown,
+  api: ObsidianApi,
+  vault: ReadToolsVault,
+): RelatedNotesResult {
+  const parsed = (args ?? {}) as { path?: unknown; limit?: unknown };
+  if (typeof parsed.path !== "string" || parsed.path.length === 0) {
+    return { ok: false, reason: "not-found" };
+  }
+  const sourcePath = parsed.path;
+  const cap =
+    typeof parsed.limit === "number" && parsed.limit > 0
+      ? Math.min(Math.floor(parsed.limit), RELATED_NOTES_CAP)
+      : RELATED_NOTES_CAP;
+
+  const sourceFile = lookupFile(sourcePath, vault);
+  if (!sourceFile) return { ok: false, reason: "not-found" };
+
+  // Source cache — warmup detection mirrors get_outlinks.
+  const sourceCacheR = api.getFileCache(sourceFile);
+  if (!sourceCacheR.ok) {
+    if (
+      sourceCacheR.reason === "index-unavailable" ||
+      sourceCacheR.reason === "not-found"
+    ) {
+      return { ok: false, reason: "metadata-cache-not-ready" };
+    }
+    return { ok: false, reason: "not-found" };
+  }
+  const sourceCache = sourceCacheR.value;
+
+  // resolvedLinks — needed for backlinks and to resolve outlinks.
+  const rlR = api.getResolvedLinks();
+  if (!rlR.ok) {
+    return { ok: false, reason: "metadata-cache-not-ready" };
+  }
+  const resolvedLinks = rlR.value;
+
+  // Source tags.
+  const sourceTags = collectFileTagsForFallback(sourceCache);
+
+  // Source outlinks (resolved target paths).
+  const sourceOutlinks = new Set<string>();
+  for (const l of sourceCache.links ?? []) {
+    const cleaned = stripLinkFormatting(l.link ?? l.original ?? "");
+    if (!cleaned) continue;
+    const r = api.resolveLinkPath(cleaned, sourcePath);
+    if (r.ok) sourceOutlinks.add(r.value.path);
+  }
+  for (const e of sourceCache.embeds ?? []) {
+    const cleaned = stripLinkFormatting(e.link ?? e.original ?? "");
+    if (!cleaned) continue;
+    const r = api.resolveLinkPath(cleaned, sourcePath);
+    if (r.ok) sourceOutlinks.add(r.value.path);
+  }
+
+  // Source backlinks (files that link TO source).
+  const sourceBacklinks = new Set<string>();
+  for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
+    if (srcPath === sourcePath) continue;
+    if (targets && targets[sourcePath]) sourceBacklinks.add(srcPath);
+  }
+
+  const files =
+    (typeof vault.getMarkdownFiles === "function"
+      ? vault.getMarkdownFiles()
+      : []) ?? [];
+
+  const scored: RelatedNoteEntry[] = [];
+  for (const f of files) {
+    if (!f || typeof f.path !== "string") continue;
+    if (f.path === sourcePath) continue;
+
+    // Candidate tags + outlinks require the candidate's file cache.
+    const cR = api.getFileCache(f);
+    let tagOverlap = 0;
+    let outlinkOverlap = 0;
+    if (cR.ok) {
+      const cand = cR.value;
+      const candTags = collectFileTagsForFallback(cand);
+      for (const t of candTags) {
+        if (sourceTags.has(t)) tagOverlap++;
+      }
+      const candOutlinks = new Set<string>();
+      for (const l of cand.links ?? []) {
+        const cleaned = stripLinkFormatting(l.link ?? l.original ?? "");
+        if (!cleaned) continue;
+        const r = api.resolveLinkPath(cleaned, f.path);
+        if (r.ok) candOutlinks.add(r.value.path);
+      }
+      for (const t of candOutlinks) {
+        if (sourceOutlinks.has(t)) outlinkOverlap++;
+      }
+    }
+
+    // Backlink overlap: files that link to candidate AND are in source's
+    // backlink set.
+    let backlinkOverlap = 0;
+    const candTargets = resolvedLinks[f.path] ? undefined : undefined;
+    void candTargets;
+    for (const [srcPath, targets] of Object.entries(resolvedLinks)) {
+      if (srcPath === sourcePath) continue;
+      if (srcPath === f.path) continue;
+      if (!targets || !targets[f.path]) continue;
+      if (sourceBacklinks.has(srcPath)) backlinkOverlap++;
+    }
+
+    const score =
+      tagOverlap * W_TAG + outlinkOverlap * W_LINK + backlinkOverlap * W_BACK;
+    if (score <= 0) continue;
+
+    scored.push({
+      path: f.path,
+      score,
+      signals: {
+        tag: tagOverlap,
+        outlink: outlinkOverlap,
+        backlink: backlinkOverlap,
+      },
+    });
+  }
+
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.path.localeCompare(b.path);
+  });
+
+  const truncated = scored.length > cap;
+  return {
+    ok: true,
+    source: sourcePath,
+    related: scored.slice(0, cap),
+    truncated,
+  };
 }

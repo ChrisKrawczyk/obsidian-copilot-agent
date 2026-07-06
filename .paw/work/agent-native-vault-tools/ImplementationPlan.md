@@ -116,7 +116,7 @@ Verification approach:
   folder-prefix / modified-since / text filter with short-circuit
   when structural filters exclude the vault; delegates ranked/fuzzy
   text search to the Phase 1 helper (FR-004, FR-005).
-- [ ] **Phase 4: related_notes** — Shared-tags + shared-outlinks +
+- [x] **Phase 4: related_notes** — Shared-tags + shared-outlinks +
   shared-backlinks ranking; bounded, deterministic (FR-009).
 - [ ] **Phase 5: Preamble hints, docs, and version bump** — Add
   manifest entries + hints (FR-011); update README, CHANGELOG, and

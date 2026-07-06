@@ -4,8 +4,10 @@ import {
   resolveLinkImpl,
   getOutlinksImpl,
   getNoteStructureImpl,
+  relatedNotesImpl,
   MAX_OUTLINKS,
   MAX_STRUCTURE_ITEMS,
+  RELATED_NOTES_CAP,
   NAVIGATE_TOOL_NAMES,
 } from "./NavigateTools";
 import {
@@ -24,11 +26,17 @@ interface FixtureSpec {
     headings?: Array<{ heading: string; level: number; line: number }>;
     sections?: Array<{ type: string; line: number }>;
     blocks?: Array<{ id: string; line: number }>;
+    tags?: string[];
+    frontmatter?: { tags?: string[] | string };
   }>;
   /** When true, drop the native getFirstLinkpathDest to simulate an old / warming cache. */
   noResolver?: boolean;
   /** When true, drop metadataCache entirely. */
   noMetadataCache?: boolean;
+  /** Optional resolvedLinks map: { sourcePath: { targetPath: count } }. */
+  resolvedLinks?: Record<string, Record<string, number>>;
+  /** When true, omit `resolvedLinks` field entirely (simulate not-ready). */
+  noResolvedLinks?: boolean;
 }
 
 function makeFixture(spec: FixtureSpec): {
@@ -64,6 +72,8 @@ function makeFixture(spec: FixtureSpec): {
         };
       }
     }
+    if (n.tags) c.tags = n.tags.map((t) => ({ tag: t }));
+    if (n.frontmatter) c.frontmatter = n.frontmatter as unknown as never;
     fileCaches.set(n.path, c);
   }
 
@@ -88,6 +98,7 @@ function makeFixture(spec: FixtureSpec): {
         vault,
         metadataCache: {
           getFileCache: (file) => fileCaches.get(file.path) ?? null,
+          ...(spec.noResolvedLinks ? {} : { resolvedLinks: spec.resolvedLinks ?? {} }),
           ...(spec.noResolver
             ? {}
             : {
@@ -396,17 +407,113 @@ describe("getNoteStructureImpl", () => {
   });
 });
 
+// ---- related_notes ----------------------------------------------------
+
+describe("relatedNotesImpl", () => {
+  it("ranks notes with more shared tags higher (SC-009)", () => {
+    const { api, vault } = makeFixture({
+      notes: [
+        { path: "src.md", tags: ["#a", "#b", "#c"] },
+        { path: "hi.md", tags: ["#a", "#b", "#c"] },
+        { path: "lo.md", tags: ["#a"] },
+      ],
+      resolvedLinks: {},
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.related.map((e) => e.path)).toEqual(["hi.md", "lo.md"]);
+    expect(r.related[0].signals.tag).toBe(3);
+    expect(r.related[1].signals.tag).toBe(1);
+    expect(r.related[0].score).toBeGreaterThan(r.related[1].score);
+  });
+
+  it("returns empty related list when source has no signals", () => {
+    const { api, vault } = makeFixture({
+      notes: [
+        { path: "src.md" },
+        { path: "a.md", tags: ["#x"] },
+      ],
+      resolvedLinks: {},
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.related).toEqual([]);
+    expect(r.truncated).toBe(false);
+  });
+
+  it("caps results at RELATED_NOTES_CAP and reports truncated", () => {
+    const notes: FixtureSpec["notes"] = [{ path: "src.md", tags: ["#t"] }];
+    for (let i = 0; i < RELATED_NOTES_CAP + 5; i++) {
+      notes.push({ path: `n${i.toString().padStart(3, "0")}.md`, tags: ["#t"] });
+    }
+    const { api, vault } = makeFixture({ notes, resolvedLinks: {} });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.related).toHaveLength(RELATED_NOTES_CAP);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("excludes the source note itself from results", () => {
+    const { api, vault } = makeFixture({
+      notes: [
+        { path: "src.md", tags: ["#a", "#b"] },
+        { path: "other.md", tags: ["#a"] },
+      ],
+      resolvedLinks: {},
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.related.some((e) => e.path === "src.md")).toBe(false);
+  });
+
+  it("returns metadata-cache-not-ready when resolvedLinks index is missing (SC-014)", () => {
+    const { api, vault } = makeFixture({
+      notes: [{ path: "src.md", tags: ["#a"] }, { path: "b.md", tags: ["#a"] }],
+      noResolvedLinks: true,
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("metadata-cache-not-ready");
+  });
+
+  it("scores backlink overlap when candidate shares an incoming linker with source", () => {
+    // linker.md links to both src.md and cand.md — that's a shared backlink.
+    const { api, vault } = makeFixture({
+      notes: [
+        { path: "src.md" },
+        { path: "cand.md" },
+        { path: "linker.md" },
+      ],
+      resolvedLinks: {
+        "linker.md": { "src.md": 1, "cand.md": 1 },
+      },
+    });
+    const r = relatedNotesImpl({ path: "src.md" }, api, vault);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cand = r.related.find((e) => e.path === "cand.md");
+    expect(cand).toBeDefined();
+    expect(cand!.signals.backlink).toBe(1);
+  });
+});
+
 // ---- factory ----------------------------------------------------------
 
 describe("createNavigateTools", () => {
-  it("registers three tools with the expected names and skipPermission", () => {
+  it("registers all NAVIGATE_TOOL_NAMES with skipPermission", () => {
     const { api, vault } = makeFixture({ notes: [{ path: "a.md" }] });
     const tools = createNavigateTools(api, vault);
-    expect(tools).toHaveLength(3);
+    expect(tools).toHaveLength(NAVIGATE_TOOL_NAMES.length);
     for (const name of NAVIGATE_TOOL_NAMES) {
       const t = tools.find((x) => x.name === name)!;
       expect(t).toBeDefined();
       expect(t.skipPermission).toBe(true);
     }
+    expect(NAVIGATE_TOOL_NAMES).toContain("related_notes");
   });
 });

@@ -200,6 +200,12 @@ export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     hint: "Return a note's headings + sections + block IDs (line numbers) WITHOUT body prose. Cheap structural inspection.",
     readOnly: true,
   },
+  {
+    name: "related_notes",
+    // FR-011 hint refined in Phase 5.
+    hint: "Rank vault neighbours of a note by shared tags + shared outlinks + shared backlinks. Signal-weighted score with per-signal counts.",
+    readOnly: true,
+  },
 ];
 
 /** All tool entries combined, in inventory presentation order. */
