@@ -20,18 +20,20 @@ human answers with a five-second query in the Obsidian search bar.
 The strategic bet is that stronger navigation for the agent, using
 the same signals a human uses when reading their own notes, is a
 better investment than an opaque similarity index. The user's
-observable result: shorter, more accurate answers to vault questions,
-with fewer wrong-note detours; a natural experience following
-`[[wiki-links]]`; and the ability to phrase questions the way a
-person would ("things I wrote about sunset last week under Work/")
-without having to translate them into a sequence of separate searches.
+observable result: correct-answer-first ranked search on ambiguously
+worded questions, tolerance for typos and word-order differences,
+single-step wikilink follow-through, and the ability to phrase
+questions the way a person would ("things I wrote about sunset last
+week under Work/") without translating them into a sequence of
+separate searches.
 
 ## Objectives
 
 - The agent can find notes about a topic even when the query wording
   and note wording don't match verbatim.
-- The agent can tolerate small typos and word-order differences in
-  the user's query.
+- The agent can return the intended target for a query that differs
+  from the target text by a single-character typo or by rearranged
+  word order.
 - The agent can answer questions that combine topical, structural,
   and time filters in a single step, rather than a multi-turn
   intersection.
@@ -71,8 +73,8 @@ Acceptance Scenarios:
    candidates ranked by score with match-span information the agent
    can cite.
 3. Given a query that matches nothing at all, When the tool returns an
-   empty result, Then the response is well-formed (empty match list,
-   no error, `truncated: false`).
+   empty result, Then the response is well-formed (an empty match
+   list and an indication that the result was not truncated).
 
 ### User Story P2 – Compound query composed in one tool call
 
@@ -114,9 +116,8 @@ Acceptance Scenarios:
    vault-relative path when Obsidian's link resolver would resolve it,
    or a clear "unresolved" result when it wouldn't.
 2. Given a note path, When the agent asks for its outgoing links,
-   Then the result lists each outgoing link's target and
-   distinguishes wikilinks from markdown links (mirror of the existing
-   `find_backlinks` shape).
+   Then the result lists each outgoing link's target and identifies
+   whether each link is a wikilink or a Markdown link.
 
 ### User Story P4 – Structural inspection without a full read
 
@@ -159,32 +160,33 @@ Acceptance Scenarios:
 
 ### Edge Cases
 
-- **Very large vaults**: search modes that are documented as
-  computationally expensive must not freeze the UI thread and must
-  respect the same result-size caps that already exist for the
-  plugin's other read-only search tools.
-- **Vault metadata not fully loaded yet**: any tool that depends on
-  Obsidian's resolved metadata (link graph, tag index, note outline)
-  must return a well-formed "not ready" response — not throw and not
-  return silently wrong data — until Obsidian has finished its
-  initial resolution pass.
-- **Legacy behavior of existing text search**: existing callers of
-  the current text-search tool may pass a regex today; the upgraded
-  tool must preserve that behavior identically for those callers.
+- **Vaults exceeding ten thousand markdown notes**: search modes
+  documented as computationally expensive must remain responsive
+  (must not block the UI thread) and must respect a documented
+  result-size cap.
+- **Vault metadata not fully loaded yet**: any capability that
+  depends on Obsidian's resolved metadata (link graph, tag index,
+  note outline) must return a well-formed "not ready" response
+  rather than throwing or returning silently wrong data, until
+  Obsidian has finished its initial resolution pass.
+- **Regex behavior preserved for existing callers**: existing
+  callers of the current text-search capability may pass a regex
+  today; the upgraded capability must return an identical output
+  set for those callers.
 - **A wikilink Obsidian itself resolves ambiguously** (for example,
   two notes sharing the same basename in different folders): the
-  resolution tool returns whatever Obsidian's own resolver picks,
-  without inventing a different tiebreaker.
-- **Compound query with an impossible combination** (for example, a
-  tag filter and a folder filter with no intersection): the tool
-  short-circuits without reading any note bodies and returns an
-  empty result.
-- **Very large notes**: structural inspection returns outline
-  information only, and returns none of the note's body prose, at
-  any note size.
+  resolution capability returns whatever Obsidian's own resolver
+  picks, without introducing a different tiebreaker.
+- **Compound query with an empty intersection** (for example, a
+  tag filter and a folder filter that select no common note): the
+  capability performs zero note-body reads and returns an empty
+  result.
+- **Notes exceeding one hundred kilobytes in size**: outline
+  inspection returns outline information only and returns none of
+  the note's body prose at any note size.
 - **Windows path separators**: all path-shaped inputs and outputs
   remain vault-relative in the same normalized form the plugin
-  already produces for its existing read tools.
+  already produces for its existing read capabilities.
 
 ## Requirements
 
@@ -226,15 +228,16 @@ Acceptance Scenarios:
   the plugin's existing read-only vault search capabilities.
   (Stories: P1, P2, P3, P4, P5)
 - **FR-011**: The instructions the agent receives at session start
-  teach it which capability is the cheapest fit for each shape of
-  question introduced by this feature. (Stories: P1, P2, P3, P4, P5)
+  name each new capability introduced by this feature and describe,
+  in one line each, the shape of user question that capability
+  answers. (Stories: P1, P2, P3, P4, P5)
 - **FR-012**: Every new capability has a documented maximum result
   size and, when that cap is hit, its response indicates that the
   result was truncated. (Stories: P1, P2, P5)
 - **FR-013**: This feature does not introduce a persistent index of
-  vault content, a new runtime network dependency, or a new required
-  user setting. (Cross-cutting; supports all stories P1–P5 by
-  keeping the feature usable on any vault out of the box.)
+  vault content, a new runtime network call, or a new required
+  user-configurable setting. (Cross-cutting; supports all stories
+  P1–P5 by keeping the feature usable on any vault out of the box.)
 - **FR-014**: When Obsidian's initial vault-metadata resolution has
   not completed, capabilities that depend on that metadata return a
   well-formed "not-ready" response and do not throw. (Stories: P3,
@@ -320,9 +323,11 @@ Acceptance Scenarios:
   count. On a seed vault engineered to exceed each cap, the response
   contains that cap's number of results and a truncation indicator
   distinguishable from a non-truncated response. (FR-012)
-- **SC-013**: The plugin's manifest and lockfile lists show no net
-  new runtime dependency, and the plugin's setting surface exposes
-  no new required setting, when this feature is shipped. (FR-013)
+- **SC-013**: The feature is usable on a freshly-installed plugin
+  against any vault without introducing a first-run indexing step,
+  a first-run network call, or a new required user-configurable
+  setting; and it introduces no new external service the plugin
+  needs to reach at runtime. (FR-013)
 - **SC-014**: In a test that simulates Obsidian not having completed
   its initial metadata resolution, every capability that depends on
   that metadata returns a documented "not-ready" response and does
@@ -362,32 +367,36 @@ Acceptance Scenarios:
 ## Scope
 
 In Scope:
-- Extending the existing vault text search with a mode selector so
-  callers can opt into ranked-simple or fuzzy behavior in addition to
-  the current substring and regex behavior, plus a numeric relevance
-  score and per-match character spans on results.
+- Extending the existing vault text search so callers can opt into
+  ranked-simple or fuzzy behavior in addition to the current
+  substring and regex behavior, and so results carry a numeric
+  relevance score and per-match character spans (FR-001, FR-002,
+  FR-003).
 - A new compound-query capability supporting AND-combined tag,
-  folder-prefix, modified-since, and free-text filters (FR-004).
-- New capabilities for wikilink resolution (FR-006), outgoing-link
-  discovery (FR-007), outline inspection (FR-008), and related-notes
-  ranking (FR-009).
-- Updates to the agent's session-start instructions so that each new
-  capability has a usage hint (FR-011).
-- Tests: unit-level coverage for each new capability plus at least
-  one seed-vault integration scenario per user story.
-- Documentation updates in the plugin README and CHANGELOG.
+  folder-prefix, modified-since, and free-text filters (FR-004,
+  FR-005).
+- A new capability for wikilink resolution (FR-006).
+- A new capability for outgoing-link discovery (FR-007).
+- A new capability for note-outline inspection (FR-008).
+- A new capability for related-notes ranking (FR-009).
+- Updates to the agent's session-start instructions so every new
+  capability has a usage description (FR-011).
+- Test coverage for each new capability plus at least one
+  seed-vault integration scenario per user story.
+- User-facing documentation updates so users know what the feature
+  changed and how to use it.
 
 Out of Scope:
-- Any form of precomputed embedding or vector index. (See
-  `proposals/0004-embeddings-vector-search.md`, rejected 2026-07-06.)
-- Integration with the Dataview community plugin. (Captured
-  separately as `proposals/0011-dataview-query-tool.md`, PR #13.)
+- Any form of precomputed embedding or vector index. (Rationale
+  captured in the precursor proposal noted under References.)
+- Integration with any third-party community plugin. (Captured as a
+  separate follow-up under References.)
 - New or changed write capabilities.
 - Programmatic invocation of Obsidian's built-in Search pane. It
-  does not yield results to callers and does not fit the
-  return-results-to-the-model contract this feature is built around.
-- Full-text indexing. Only worth revisiting if the base capabilities
-  prove too slow in practice.
+  does not return results to callers and does not fit the
+  return-results-to-the-agent contract this feature is built
+  around.
+- Full-text indexing.
 - Cross-vault features.
 - New UI surfaces beyond what the plugin's message renderer already
   renders for tool results.
@@ -395,45 +404,43 @@ Out of Scope:
 ## Dependencies
 
 - Obsidian's public plugin API surface for search helpers, metadata
-  cache, resolved-link graph, and file stat information, as
-  inventoried in `proposals/0010-agent-native-vault-tools.md`
-  against the current `obsidian.d.ts`.
-- No new npm runtime dependency (FR-013).
+  cache, resolved-link graph, and file stat information.
+- No new external service or npm runtime dependency (FR-013).
 
 ## Risks & Mitigations
 
-- **Risk**: Fuzzy search runs slowly on very large vaults.
-  Impact: chat feels laggy while a fuzzy query scans thousands of
-  notes.
+- **Risk**: Fuzzy search remains responsive on very large vaults.
+  Impact: chat becomes unresponsive while a fuzzy query scans
+  thousands of notes.
   Mitigation: apply the same result-size cap the plugin's existing
   read-only searches already use; short-circuit once the cap is
   reached; yield to the UI thread between note reads.
 - **Risk**: Extending the existing text search additively drifts
   callers' understanding of the output over time.
   Mitigation: existing output fields keep their names, positions,
-  and types; new fields are additive; regression tests assert both
-  legacy and new fields on every call. (SC-003.)
-- **Risk**: Related-notes ranking produces low-value output on
-  sparsely-linked vaults, and the agent invokes it anyway.
-  Mitigation: the session-start usage hint scopes the capability to
-  the "notes near this one" question; the ranking signals are
-  documented and deterministic so unexpected orderings are
-  reproducible; the capability returns an empty result rather than
-  falling back to an arbitrary set. (FR-009, SC-009.)
+  and types; new fields are additive; regression coverage asserts
+  both legacy and new fields on every call. (SC-003.)
+- **Risk**: Related-notes ranking returns an empty or nearly-empty
+  set on sparsely-linked vaults, and the agent invokes it anyway.
+  Mitigation: the session-start usage description scopes the
+  capability to the "notes near this one" question; the ranking
+  signals are documented and deterministic so unexpected orderings
+  are reproducible; the capability returns an empty result rather
+  than falling back to an arbitrary set. (FR-009, SC-009.)
 - **Risk**: Vault metadata may not have finished its initial
   resolution when the agent invokes a metadata-dependent capability.
-  Mitigation: FR-014 requires a well-formed not-ready response and
+  Mitigation: FR-014 requires a well-formed not-ready response;
   SC-014 asserts it.
 - **Risk**: The upgraded text search subtly changes ranking of an
   existing scripted caller's use case.
-  Mitigation: the default mode of the text-search capability
-  preserves current behavior; ranked and fuzzy modes are opt-in via
-  the new mode input. (SC-003.)
+  Mitigation: the default behavior of the text-search capability
+  is unchanged; ranked and fuzzy behaviors are opt-in. (SC-003.)
 
 ## References
 
-- Proposal: `proposals/0010-agent-native-vault-tools.md` (PR #12)
-- Companion proposal (deferred): `proposals/0011-dataview-query-tool.md`
-  (PR #13)
-- Rejected precursor: `proposals/0004-embeddings-vector-search.md`
-- WorkflowContext: `.paw/work/agent-native-vault-tools/WorkflowContext.md`
+- Related proposal: `proposals/0010-agent-native-vault-tools.md` — background,
+  API research inventory, and design sketch supporting this feature (PR #12).
+- Companion deferred proposal: `proposals/0011-dataview-query-tool.md` —
+  captures a follow-up integration deferred from this feature's scope (PR #13).
+- Rejected precursor: `proposals/0004-embeddings-vector-search.md` — the
+  precomputed-embeddings alternative that this feature replaces.
