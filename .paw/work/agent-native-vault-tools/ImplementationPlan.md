@@ -320,6 +320,7 @@ short-circuit when structural filters exclude every note.
     text?: string, textMode?: "substring"|"simple"|"fuzzy",
     limit?: number }
   ```
+  The `defineTool` entry sets `skipPermission: true` (FR-010).
   Handler flow (short-circuit is the SC-005 anchor):
   1. Enumerate candidate files. If `tag` supplied, use
      `findFilesByTag` (`src/tools/ObsidianApi.ts:326-362`); else
@@ -336,6 +337,10 @@ short-circuit when structural filters exclude every note.
   5. If `text` is supplied, run the Phase 1 text-search helper
      scoped to the working set, with the requested `textMode`
      (default `"substring"`).
+  6. When `tag` is supplied and the metadata cache is not yet
+     populated (per `ObsidianApi`'s discriminated-union `reason:
+     "metadata-cache-not-ready"`), return the structured
+     not-ready result instead of throwing (FR-014 / SC-014).
 - **`src/tools/ReadTools.ts`**: extract the file-iteration and
   match-collection loop from `searchContentImpl` into a reusable
   `searchInFiles(files, query, options)` helper so Phase 3 can
@@ -353,7 +358,9 @@ short-circuit when structural filters exclude every note.
   `cachedRead`/`read` calls (SC-005); tag-only + text behaves
   as tag-filtered text search over the whole vault; modified-since
   filter excludes older files; cap + truncation flag; each
-  `textMode` value is exercised.
+  `textMode` value is exercised; `metadata-cache-not-ready`
+  response when tag filter is supplied and the cache is not yet
+  populated (SC-014).
 
 ### Success Criteria
 
@@ -383,8 +390,9 @@ Bounded, deterministic, and no first-run indexing.
 ### Changes Required
 
 - **`src/tools/NavigateTools.ts`** (extend the file from Phase 2):
-  add `related_notes` params `{path: string, limit?: number}` and
-  handler flow:
+  add `related_notes` params `{path: string, limit?: number}`.
+  The `defineTool` entry sets `skipPermission: true` (FR-010).
+  Handler flow:
   1. Look up source note via `resolveVaultPath` + `lookupTFile`.
   2. Extract source `tags` (via existing helper in
      `src/tools/ObsidianApi.ts:265-324`) and source `outlinks`
@@ -402,13 +410,18 @@ Bounded, deterministic, and no first-run indexing.
   5. Cap at `RELATED_NOTES_CAP = 20`; return `{ok:true, source,
      related:[{path, score, signals:{tag, outlink, backlink}}],
      truncated}`.
+  6. When `metadataCache.resolvedLinks` or the tag inventory is
+     not yet populated, return `{ok:false, reason:
+     "metadata-cache-not-ready"}` rather than throwing
+     (FR-014 / SC-014).
 - **`src/domain/vaultToolManifest.ts`**: append `related_notes`
   to the same manifest array Phase 2 added.
 - **Tests** (`src/tools/NavigateTools.test.ts`): add cases —
   ranking assertion where source shares 3 tags with A and 1 tag
   with B ranks A strictly above B (SC-009); empty result when
   source has no tags/links; cap + truncation flag; excludes the
-  source itself from results.
+  source itself from results; `metadata-cache-not-ready` response
+  when `resolvedLinks`/tag inventory is not populated (SC-014).
 
 ### Success Criteria
 
@@ -466,6 +479,11 @@ to v0.10.0.
 - [ ] Typecheck: `npm run typecheck`
 - [ ] Preamble test asserts one distinguishable hint line per new
   capability (SC-011).
+- [ ] Session-plumbing test invokes each of the six new / upgraded
+  capabilities against a fixture session and asserts no
+  user-approval prompt is emitted (SC-010) — patterned on the
+  existing permission-callback coverage referenced in
+  `CodeResearch.md` (`src/sdk/AgentSession.ts:1864-2010`).
 - [ ] Schema check: `npm run schema:check` (no schema changes
   expected, but the check is part of the release verification
   pattern).
