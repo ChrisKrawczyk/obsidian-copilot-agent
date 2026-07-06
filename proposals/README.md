@@ -36,3 +36,4 @@ Short design docs for future work items. One file per proposal.
 | 0005 | Track upstream MCP filesystem `slice(7)` fix       | Draft  |
 | 0006 | Tool picker & scope-aware credential resolution    | Draft  |
 | 0007 | Importable / exportable MCP server preset packs    | Draft  |
+| 0011 | Dataview inter-plugin query tool                   | Draft  |
