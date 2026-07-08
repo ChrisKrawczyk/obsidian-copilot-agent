@@ -113,7 +113,7 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "edit_note",
-    hint: "Edit an existing note in append, prepend, or replace mode. Preserves unsaved-editor-conflict guard.",
+    hint: "Edit an existing note in append, prepend, or replace mode. Preserves unsaved-editor-conflict guard. IMPORTANT: `replace` overwrites the whole note — do NOT issue parallel `edit_note replace` calls against the same path (only one write survives). Serialize them, or use `append`/`prepend` when preserving existing content matters.",
     readOnly: false,
   },
   {

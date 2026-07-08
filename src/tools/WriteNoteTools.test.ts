@@ -597,6 +597,19 @@ describe("createWriteNoteTools factory", () => {
     );
     expect(skipFlags).toEqual([false, false, true, false, false, false, false]);
   });
+
+  test("edit_note SDK description warns against parallel replace calls (FR-007)", () => {
+    const world = makeWorld();
+    const deps = makeDeps(world);
+    const tools = createWriteNoteTools(deps);
+    const editNote = tools.find(
+      (t) => (t as unknown as { name: string }).name === "edit_note",
+    );
+    expect(editNote).toBeDefined();
+    const description = (editNote as unknown as { description: string })
+      .description;
+    expect(description).toMatch(/parallel\s+`edit_note replace`/);
+  });
 });
 
 describe("create_daily_note path equivalence (gate ↔ handler)", () => {

@@ -724,7 +724,11 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         "Modify an existing markdown note in the Obsidian vault by " +
         "appending, prepending, or replacing its content. Path is " +
         "vault-relative. Fails if the note does not exist or has " +
-        "unsaved changes in an open editor.",
+        "unsaved changes in an open editor. IMPORTANT: `replace` " +
+        "overwrites the whole note — do NOT issue parallel " +
+        "`edit_note replace` calls against the same path (only one " +
+        "write survives). Serialize them, or use `append`/`prepend` " +
+        "when preserving existing content matters.",
       parameters: {
         type: "object",
         properties: {

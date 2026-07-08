@@ -196,6 +196,15 @@ describe("assemblePreamble", () => {
     );
   });
 
+  it("edit_note hint warns against parallel replace calls (FR-007)", () => {
+    // The rendered preamble tool-inventory block must include the
+    // guidance that steers the model away from issuing parallel
+    // `edit_note replace` calls against the same path.
+    expect(VAULT_TOOL_INVENTORY_BLOCK).toMatch(
+      /parallel\s+`edit_note replace`/,
+    );
+  });
+
   it("custom mode emits the body verbatim when no placeholders are present", () => {
     const out = assemblePreamble({
       ...baseInput,
