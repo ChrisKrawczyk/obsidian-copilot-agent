@@ -62,14 +62,24 @@ Three fake vaults exercise these paths (`src/tools/WriteNoteTools.test.ts:88-106
 - **`src/tools/ObsidianApi.ts`**:
   - Extend `AppLike.vault` with the same optional `process` field.
   - Add `processNote(file, fn): Promise<ApiResult<string>>` next to `modifyNote` (`src/tools/ObsidianApi.ts:737-757`). Contract: `index-unavailable` when host lacks `process`; `native-failed` on throw; on success, `{ ok: true, value: writtenContent }`.
-- **`src/tools/WriteTools.ts`**: Add a small helper `processFileImpl(rawPath, fn, deps)` that runs alongside `editFileImpl` (does not replace it). Same signature contract as `editFileImpl` (returns `ok`/`error`/`undoId`), but delegates the modify to `deps.vault.process(file, fn)` and captures `before`/`after` from the callback input + return for undo journal. Keeps the unsaved-editor-conflict guard as a pre-call step. Falls back to legacy `editFileImpl` if `deps.vault.process` is absent (defense in depth for exotic fakes; production always has it).
+- **`src/tools/WriteTools.ts`**: Add a small helper `processFileImpl(rawPath, fn, deps)` that runs alongside `editFileImpl` (does not replace it). Same signature contract as `editFileImpl` (returns `ok`/`error`/`undoId`), but delegates the modify to `deps.vault.process(file, fn)` and captures `before`/`after` from the callback input + return for undo journal. Explicit contract:
+    - Callback signature: `(data: string) => string`. Runs inside the atomic section.
+    - Callback MAY throw a typed `ProcessAbort` error to abort the write with no on-disk change and no undo entry; `processFileImpl` catches it and returns `{ ok: false, error: <message>, aborted: true }`.
+    - When the callback returns a string equal to its input (no-op), `processFileImpl` skips undo journal recording and returns `{ ok: true, changed: false, undoId: undefined }`.
+    - Keeps the unsaved-editor-conflict guard as a pre-call step (async, cannot live inside the sync callback).
+    - Falls back to legacy `editFileImpl` semantics *only* if `deps.vault.process` is absent (defense in depth for exotic fakes; production always has it).
 - **Fakes (three files)**: Add a `process(file, fn)` implementation to each fake vault, keyed by path with a per-path `Promise` chain to serialize concurrent calls deterministically. This ensures the fakes correctly simulate atomic semantics so the new regression tests reflect real production behavior.
   - `src/tools/WriteNoteTools.test.ts` (shared `makeDeps`)
   - `src/tools/UpdateTask.test.ts` (local `makeDeps`)
   - `src/tools/WriteTools.test.ts` (`makeVault`)
 - **Tests**:
   - `src/tools/ObsidianApi.test.ts`: `processNote` forwards to `vault.process`; returns `index-unavailable` when absent; returns `native-failed` on throw; returns the written string on success.
-  - `src/tools/WriteTools.test.ts`: `processFileImpl` records undo with `before` from callback input and `after` from callback return; falls back to `editFileImpl` when `process` absent; propagates the dirty-editor-conflict rejection.
+  - `src/tools/WriteTools.test.ts`:
+    - `processFileImpl` records undo with `before` from callback input and `after` from callback return
+    - `processFileImpl` skips undo when callback returns unchanged input (no-op)
+    - `processFileImpl` propagates a thrown `ProcessAbort` as `{ ok: false, aborted: true }` and does NOT write or record undo
+    - `processFileImpl` falls back to `editFileImpl` when `process` absent
+    - `processFileImpl` propagates the dirty-editor-conflict rejection (pre-write guard)
 
 ### Success Criteria:
 
@@ -100,6 +110,7 @@ Three fake vaults exercise these paths (`src/tools/WriteNoteTools.test.ts:88-106
   - New: 5 parallel `edit_note` `append` calls against the same note → file contains all 5 appended blocks in some order, no losses.
   - New: 3 parallel `edit_note` `prepend` calls → all 3 prepends survive.
   - New: 3 parallel `insert_into_active_note` `append` calls on the disk-fallback branch → all 3 land.
+  - New (cross-file, satisfies SC-002 shape): 10 parallel `edit_note append` calls each targeting a DIFFERENT note → all 10 files are updated; the fake vault's per-path serialization queue never has more than 1 entry (i.e., no cross-file serialization).
   - Assertion: pre-existing tests for `editNoteImpl` still pass unchanged.
   - Assertion: `replace` mode still goes through the modify path (fake vault records `modify` calls; `process` calls are counted only for append/prepend).
 
@@ -117,22 +128,34 @@ Three fake vaults exercise these paths (`src/tools/WriteNoteTools.test.ts:88-106
 
 ## Phase 3: Migrate create_task and update_task
 
-**Objective**: Fix the remaining two racy sites.
+**Objective**: Fix the remaining two racy sites, including the missing-target race for `create_task`.
 
 ### Changes Required:
 
 - **`src/tools/WriteNoteTools.ts`** (`createTaskImpl`, lines 517-673):
-  - The existing-target append branch (lines 601-650) uses `processFileImpl` for the read+append+write step.
-  - The missing-target branch (create the target file first) remains unchanged. Once the file exists, the append re-enters the atomic path.
-  - `existingTargetCreated`, `createUndoId`, `undoSurface` semantics preserved.
+  - The existing-target append branch (lines 601-650) uses `processFileImpl` for the read+append+write step. Undo `before` comes from the callback input; no stale-snapshot risk.
+  - **Missing-target race fix**: `createFileImpl` currently throws if the file already exists (i.e., a concurrent caller created it between the lookup and the create). Wrap the create-target step in a "create-or-tolerate-exists" pattern:
+    - Attempt `createFileImpl(targetPath, seed, deps)`.
+    - If it fails with an existence-conflict error (from `deps.vault.create` returning "already exists"), re-lookup the file; if now present, proceed to the atomic append branch. Set `existingTargetCreated = false` in this case (we did not create it — the concurrent caller did).
+    - If create succeeds, `existingTargetCreated = true` and `createUndoId` is set as today.
+    - Then unconditionally re-enter the atomic append branch through `processFileImpl`.
+  - `existingTargetCreated`, `createUndoId`, `undoSurface` semantics preserved for the caller.
+- **`src/tools/WriteTools.ts`** (`createFileImpl`): No signature change. Add a narrow error path: if `vault.create` throws with a message including "exists"/`EEXIST`/`Filesystem` conflict indicators, return `{ ok: false, error: <message>, alreadyExists: true }` so callers can distinguish. This is a minor extension of the current error contract; existing callers that only check `ok` are unaffected.
 - **`src/tools/UpdateTask.ts`** (`updateTaskImpl`, lines 100-171):
-  - Move the entire compute step (split lines → identify target line → parse task → apply patch → join) *inside* the `processFileImpl` callback. If target line is not found or parse fails inside the callback, the callback returns the original data unchanged and the outer function reports the appropriate error via a captured status object (side-channel from the callback).
-  - Rationale: the read must be atomic with the line-identification step so two concurrent updaters see each other's edits.
+  - Move the entire compute step (split lines → identify target line → parse task → apply patch → join) *inside* the `processFileImpl` callback.
+  - Error handling uses the `ProcessAbort` mechanism from Phase 1 — the callback throws a typed abort when:
+    - The target line cannot be found (`reason: "line_not_found"` or `"index_out_of_range"`)
+    - The identified line is not parseable as a task (`reason: "not_a_task"`)
+  - `processFileImpl` catches the abort, writes nothing, records no undo, and returns `{ ok: false, aborted: true, error: <reason> }`. `updateTaskImpl` maps that back to the tool's public result shape (`{ ok: false, reason: ... }`) — semantically identical to today's behavior.
+  - No-op patch (patched line === original) results in the callback returning input unchanged; `processFileImpl` skips undo (via the no-op rule from Phase 1). `updateTaskImpl` reports `{ ok: true, changed: false, ... }` matching today's behavior at lines 143-153.
 - **Tests** (`src/tools/WriteNoteTools.test.ts`, `src/tools/UpdateTask.test.ts`):
-  - New: 5 parallel `create_task` calls to same target → 5 distinct task lines in file.
+  - New (SC-001 shape, satisfies "100 concurrent → 100 distinct"): 100 parallel `create_task` calls to same target → 100 distinct task lines in file.
+  - New: 5 parallel `create_task` calls where the target file does not yet exist → all 5 tasks present, file created exactly once (assert exactly one `createFileImpl` produced the file; other 4 tolerated the exists-error and joined the atomic path).
   - New: 3 parallel `create_task` calls with different formats (Tasks plugin off/on) → all 3 land with the correct format each.
   - New: 3 parallel `update_task` calls each patching a different task line in same file → all 3 patches persist.
-  - New: 2 parallel `update_task` calls targeting the SAME line with non-overlapping field patches → resulting line has both patches applied (or last-field-wins for overlapping fields; document actual behavior).
+  - New: 2 parallel `update_task` calls targeting the SAME line with non-overlapping field patches → resulting line has both patches applied (or last-field-wins for overlapping fields; the test documents the observed behavior).
+  - New: `update_task` when target line has been deleted between the pre-read and the process callback → returns `{ ok: false, reason: "line_not_found" }` with no write and no undo entry recorded.
+  - New (SC-002 shape): 100 parallel `create_task` calls each targeting a DIFFERENT note → all 100 succeed; wall-clock ≤ 2× a single-call baseline (measured via `performance.now()` before/after the `Promise.all`, with a generous ceiling to avoid flakiness on slow CI).
   - Assertion: existing tests unchanged.
 
 ### Success Criteria:
