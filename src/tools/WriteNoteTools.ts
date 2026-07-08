@@ -3,6 +3,7 @@ import {
   createFileImpl,
   editFileImpl,
   hasUnsavedEditorChanges,
+  processFileImpl,
   type WriteToolsDeps,
 } from "./WriteTools";
 import { lookupTFile, toVaultRelative, resolveVaultPath, VaultPathError } from "./VaultPath";
@@ -136,6 +137,46 @@ export async function editNoteImpl(
   content: string,
   deps: WriteNoteToolsDeps,
 ): Promise<NoteWriteResult> {
+  // Append/prepend: use the atomic RMW primitive so parallel calls
+  // to the same note never lose an update. The callback composes
+  // the new content from the value observed *inside* the atomic
+  // section, and processFileImpl records undo before/after from
+  // that same observation.
+  if (mode === "append" || mode === "prepend") {
+    let abs: string;
+    try {
+      abs = resolveVaultPath(rawPath, deps.vault);
+    } catch (err) {
+      if (err instanceof VaultPathError) return { ok: false, error: err.message };
+      throw err;
+    }
+    const vaultRel = toVaultRelative(abs, deps.vault);
+    // Preserve the note-flavored "does not exist" error text.
+    if (!lookupTFile(vaultRel, deps.vault)) {
+      return {
+        ok: false,
+        error: `Note "${vaultRel}" does not exist. Use create_note to add it.`,
+      };
+    }
+    const r = await processFileImpl(
+      rawPath,
+      (data) => (mode === "append" ? data + content : content + data),
+      deps,
+    );
+    if (!r.ok) return { ok: false, error: r.error };
+    return {
+      ok: true,
+      kind: "edit_note",
+      path: vaultRel,
+      ...(r.changed ? { undoId: r.undoId } : {}),
+      undoSurface: "journal",
+      usedFallback: false,
+    };
+  }
+
+  // Replace: last-writer-wins is the documented behavior (users may
+  // intentionally overwrite). Keep the pre-existing modifyNote +
+  // editFileImpl fallback path.
   let abs: string;
   try {
     abs = resolveVaultPath(rawPath, deps.vault);
@@ -152,7 +193,6 @@ export async function editNoteImpl(
     };
   }
   const file = fileUnknown as TFileLike;
-  // Read current content so we can compose append/prepend/replace.
   let before: string;
   try {
     if (deps.vault.read) {
@@ -169,21 +209,8 @@ export async function editNoteImpl(
     };
   }
 
-  let after: string;
-  if (mode === "append") {
-    after = before + content;
-  } else if (mode === "prepend") {
-    after = content + before;
-  } else {
-    after = content;
-  }
+  const after = content;
 
-  // Try the richer ObsidianApi.modifyNote surface first; if it fails
-  // (`index-unavailable` or `native-failed`) fall through to
-  // editFileImpl which also enforces the unsaved-editor-conflict
-  // guard. We replicate the guard HERE before the richer-surface
-  // attempt so a dirty open editor isn't silently overwritten on
-  // the happy path either.
   const conflict = await hasUnsavedEditorChanges(
     vaultRel,
     before,

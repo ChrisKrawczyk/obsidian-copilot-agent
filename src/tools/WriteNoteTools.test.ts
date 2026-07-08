@@ -320,6 +320,72 @@ describe("editNoteImpl", () => {
     // On-disk content untouched.
     expect(world.files.get("a.md")?.content).toBe("on-disk");
   });
+
+  test("parallel appends against same note preserve all blocks (no lost updates)", async () => {
+    const world = makeWorld({
+      files: new Map([["log.md", { path: "log.md", content: "" }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        editNoteImpl("log.md", "append", `block-${i}\n`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const final = world.files.get("log.md")?.content ?? "";
+    const lines = final.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(5);
+    const seen = new Set(lines);
+    expect(seen.size).toBe(5);
+    for (let i = 0; i < 5; i++) expect(seen.has(`block-${i}`)).toBe(true);
+  });
+
+  test("parallel prepends against same note preserve all blocks", async () => {
+    const world = makeWorld({
+      files: new Map([["log.md", { path: "log.md", content: "TAIL" }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        editNoteImpl("log.md", "prepend", `pre-${i}\n`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const final = world.files.get("log.md")?.content ?? "";
+    expect(final.endsWith("TAIL")).toBe(true);
+    for (let i = 0; i < 3; i++) expect(final).toContain(`pre-${i}`);
+  });
+
+  test("parallel appends across DIFFERENT notes do not serialize (cross-file independence)", async () => {
+    const initial = new Map<string, FakeFile>();
+    for (let i = 0; i < 10; i++) initial.set(`n${i}.md`, { path: `n${i}.md`, content: "" });
+    const world = makeWorld({ files: initial });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        editNoteImpl(`n${i}.md`, "append", `content-${i}`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    for (let i = 0; i < 10; i++) {
+      expect(world.files.get(`n${i}.md`)?.content).toBe(`content-${i}`);
+    }
+    // Each path's serialization chain has at most 1 entry (itself);
+    // no cross-file contention.
+    expect(world.processChains.size).toBe(10);
+  });
+
+  test("replace mode still goes through last-writer-wins path (uses vault.modify)", async () => {
+    const world = makeWorld({
+      files: new Map([["a.md", { path: "a.md", content: "original" }]]),
+    });
+    const deps = makeDeps(world);
+    const r = await editNoteImpl("a.md", "replace", "REPLACED", deps);
+    expect(r.ok).toBe(true);
+    expect(world.files.get("a.md")?.content).toBe("REPLACED");
+    // Replace intentionally does not use the atomic RMW path.
+    expect(world.processChains.size).toBe(0);
+  });
 });
 
 describe("openNoteImpl", () => {
