@@ -322,6 +322,23 @@ describe("processFileImpl", () => {
     expect(entry?.after).toBe("ORIG + fallback");
   });
 
+  test("fallback path honors ProcessAbort", async () => {
+    const deps = makeDeps({ "inbox/x.md": "KEEP" });
+    (deps.vault as { process?: unknown }).process = undefined;
+    const r = await processFileImpl(
+      "inbox/x.md",
+      () => {
+        throw new ProcessAbort("nothing to do");
+      },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.aborted).toBe(true);
+    expect(r.error).toMatch(/nothing to do/);
+    expect(deps.files.get("inbox/x.md")).toBe("KEEP");
+  });
+
   test("parallel same-path callers see linearized before/after (no lost updates)", async () => {
     const deps = makeDeps({ "inbox/log.md": "" });
     const N = 20;

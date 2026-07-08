@@ -332,16 +332,21 @@ export async function processFileImpl(
     if (!deps.vault.modify) {
       return { ok: false, error: "Vault adapter does not support process() or modify()." };
     }
-    const nextContent = fn(preSnapshot);
+    let nextContent: string;
+    try {
+      nextContent = fn(preSnapshot);
+    } catch (err) {
+      if (err instanceof ProcessAbort) {
+        return { ok: false, error: err.message, aborted: true };
+      }
+      throw err;
+    }
     if (nextContent === preSnapshot) {
       return { ok: true, kind: "modify", path: vaultRel, changed: false };
     }
     try {
       await deps.vault.modify(file, nextContent);
     } catch (err) {
-      if (err instanceof ProcessAbort) {
-        return { ok: false, error: err.message, aborted: true };
-      }
       return {
         ok: false,
         error: `Modify failed: ${(err as Error).message || String(err)}`,
