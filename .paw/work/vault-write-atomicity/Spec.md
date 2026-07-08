@@ -29,7 +29,7 @@ The fix must guarantee that every successful tool call's changes persist to disk
 **Acceptance Scenarios**:
 1. Given an empty daily note, When 5 concurrent `create_task` calls target it, Then all 5 task lines appear in the file after the last call resolves.
 2. Given a daily note with existing tasks, When 3 concurrent `create_task` calls append new tasks, Then the existing tasks are preserved and all 3 new tasks appear.
-3. Given N concurrent calls, When they all report `ok: true`, Then the file contains exactly N new task lines (no duplicates, no losses).
+3. Given N concurrent calls, When they all report success, Then the file contains exactly N new task lines (no duplicates, no losses).
 
 ### User Story P2 – Batched task updates don't clobber each other
 
