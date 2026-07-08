@@ -69,8 +69,9 @@ The fix must guarantee that every successful tool call's changes persist to disk
 - FR-004: The `hasUnsavedEditorChanges` guard MUST continue to reject writes when the target file has unsaved changes in an open editor. (Edge case)
 - FR-005: The atomicity guarantee applies to these tools: `create_task`, `update_task`, `edit_note` (append/prepend modes), `insert_into_active_note` (disk-fallback path). (Stories: P1, P2, P3)
 - FR-006: `edit_note replace` mode is documented as last-writer-wins by intent; no atomicity guarantee is added. (Edge case)
-- FR-007: The fix MUST NOT change the plugin's `manifest.json` `minAppVersion` requirement. (Compatibility)
-- FR-008: Undo journal entries recorded by the affected tools MUST remain valid after the fix — a single undo click reverses the tool's effect exactly as before. (Stories: P1, P2, P3)
+- FR-007: The `edit_note` tool hint MUST steer the model away from parallel `replace` calls against the same file. Concretely: the hint states that `replace` overwrites the entire note and that concurrent `replace` invocations against the same path drop all but one write; the model should serialize them or use `append`/`prepend` instead. (Edge case)
+- FR-008: The fix MUST NOT change the plugin's `manifest.json` `minAppVersion` requirement. (Compatibility)
+- FR-009: Undo journal entries recorded by the affected tools MUST remain valid after the fix — a single undo click reverses the tool's effect exactly as before. (Stories: P1, P2, P3)
 
 ### Key Entities
 
@@ -88,7 +89,8 @@ The fix must guarantee that every successful tool call's changes persist to disk
 - SC-003: The plugin's existing test suite passes without modification to production-code contracts (test additions permitted; test rewrites for behavior changes are not). (FR-003)
 - SC-004: A deterministic-parallelism regression test exercises the race on the *pre-fix* code (fails) and the post-fix code (passes) for each of the four affected tools. (FR-005)
 - SC-005: An `edit_note` call against a note with a dirty open editor is still rejected with the unsaved-editor-conflict error. (FR-004)
-- SC-006: The `manifest.json` `minAppVersion` remains `1.5.0`. (FR-007)
+- SC-006: The `edit_note` tool hint contains explicit anti-parallel-replace guidance and is exercised by a snapshot/assertion test on the vault-tool manifest. (FR-007)
+- SC-007: The `manifest.json` `minAppVersion` remains `1.5.0`. (FR-008)
 
 ## Assumptions
 
@@ -105,6 +107,7 @@ The fix must guarantee that every successful tool call's changes persist to disk
 - `edit_note` write path for `append` and `prepend` modes (`editNoteImpl` / `editFileImpl` in `WriteNoteTools.ts` / `WriteTools.ts`)
 - `insert_into_active_note` disk-fallback path (transitively through `editNoteImpl`)
 - Test coverage for the four sites, exercising deterministic parallelism
+- Tool-hint update for `edit_note` steering the model away from parallel `replace` calls
 - CHANGELOG entry
 - Point release (v0.10.2)
 
