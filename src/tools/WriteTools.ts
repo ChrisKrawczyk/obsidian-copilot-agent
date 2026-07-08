@@ -75,6 +75,15 @@ interface WriteResult<T extends "create" | "modify" | "delete"> {
 interface WriteError {
   ok: false;
   error: string;
+  /**
+   * Set by `createFileImpl` when the create failed specifically
+   * because the target already exists (either detected by pre-lookup
+   * or by the vault adapter rejecting a racy create). Callers that
+   * need to distinguish "you tried to overwrite" from other create
+   * failures — notably `create_task`'s create-or-tolerate-exists
+   * flow — can key on this without brittle string matching.
+   */
+  alreadyExists?: true;
 }
 
 export type CreateFileResult = WriteResult<"create"> | WriteError;
@@ -100,6 +109,7 @@ export async function createFileImpl(
     return {
       ok: false,
       error: `File "${vaultRel}" already exists. Use edit_file to modify it.`,
+      alreadyExists: true,
     };
   }
   if (!deps.vault.create) {
@@ -108,9 +118,27 @@ export async function createFileImpl(
   try {
     await deps.vault.create(vaultRel, content ?? "");
   } catch (err) {
+    const message = (err as Error).message || String(err);
+    // Detect the racy exists-conflict: another caller (or a
+    // background reindex) created the target between our lookup and
+    // the adapter's create. Obsidian's built-in adapter surfaces this
+    // as an error whose message mentions "exists" or contains the
+    // path already; some fake adapters throw with node's EEXIST.
+    // Keep the pattern narrow to avoid mis-classifying unrelated
+    // errors (e.g. permission failures).
+    const looksLikeExistsConflict =
+      /already exists|file exists|exists at|EEXIST/i.test(message) &&
+      !/no such file/i.test(message);
+    if (looksLikeExistsConflict) {
+      return {
+        ok: false,
+        error: `File "${vaultRel}" already exists (created by a concurrent operation).`,
+        alreadyExists: true,
+      };
+    }
     return {
       ok: false,
-      error: `Create failed: ${(err as Error).message || String(err)}`,
+      error: `Create failed: ${message}`,
     };
   }
   const entry: UndoEntry = deps.undoJournal.record({

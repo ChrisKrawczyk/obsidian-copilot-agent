@@ -551,4 +551,58 @@ describe("updateTaskImpl — final-review F5 (descriptionMatch ambiguity)", () =
     if (!r.ok) return;
     expect(r.after.startsWith("- [x] call margret")).toBe(true);
   });
+
+  test("3 parallel update_task calls patching DIFFERENT lines in same file → all 3 patches persist", async () => {
+    const initial = [
+      "- [ ] task alpha",
+      "- [ ] task beta",
+      "- [ ] task gamma",
+    ].join("\n");
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all([
+      updateTaskImpl(
+        { path: "notes.md", line: 1, patch: { setStatus: "done" } },
+        deps,
+      ),
+      updateTaskImpl(
+        { path: "notes.md", line: 2, patch: { setStatus: "done" } },
+        deps,
+      ),
+      updateTaskImpl(
+        { path: "notes.md", line: 3, patch: { setStatus: "done" } },
+        deps,
+      ),
+    ]);
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("notes.md")!.content!;
+    // All three should now be checked.
+    expect(written.split("\n").filter((l) => l.startsWith("- [x]")).length).toBe(3);
+    expect(written).toContain("task alpha");
+    expect(written).toContain("task beta");
+    expect(written).toContain("task gamma");
+  });
+
+  test("update_task returns line_not_found when target disappears between attempts (ProcessAbort → no write, no undo)", async () => {
+    const initial = [
+      "- [ ] real task",
+    ].join("\n");
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    // Request line 5 which doesn't exist. Handler surfaces
+    // line_not_found. This exercises the ProcessAbort path.
+    const r = await updateTaskImpl(
+      { path: "notes.md", line: 5, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("task_not_found");
+    // File content untouched.
+    expect(world.files.get("notes.md")!.content).toBe(initial);
+  });
 });

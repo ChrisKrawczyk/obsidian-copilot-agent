@@ -586,10 +586,6 @@ export async function createTaskImpl(
   // (no re-entry into the gated SDK tool surface). See Phase 5 plan
   // line 281.
   let existingTargetCreated = false;
-  // Capture the create-entry undoId when we made the target; this is
-  // what we surface so a single undo deletes the whole file (the user
-  // had no task target before this call). When the target already
-  // existed, we surface the modify-entry undoId from the append.
   let createUndoId: string | undefined;
   const existing = lookupTFile(targetPath, deps.vault);
   if (existing === null) {
@@ -613,7 +609,23 @@ export async function createTaskImpl(
       ? (await readDailyNoteTemplateForTask(deps)) ?? ""
       : "";
     const created = await createFileImpl(targetPath, seed, deps);
-    if (!created.ok) {
+    if (created.ok) {
+      existingTargetCreated = true;
+      createUndoId = created.undoId;
+    } else if (created.alreadyExists) {
+      // A concurrent create_task (or manual create) beat us to it.
+      // Re-lookup and proceed to the atomic append branch. We did not
+      // create the file, so existingTargetCreated stays false and no
+      // create-undo entry is surfaced.
+      if (lookupTFile(targetPath, deps.vault) === null) {
+        return {
+          ok: false,
+          targetPath,
+          formatSource,
+          error: `Task target "${targetPath}" claimed to exist but re-lookup failed.`,
+        };
+      }
+    } else {
       return {
         ok: false,
         targetPath,
@@ -621,74 +633,40 @@ export async function createTaskImpl(
         error: `Failed to create task target "${targetPath}": ${created.error}`,
       };
     }
-    existingTargetCreated = true;
-    createUndoId = created.undoId;
   }
 
-  // Read current content so we can append the task line. The target
-  // was either pre-existing or just created above.
-  const targetFile = lookupTFile(targetPath, deps.vault);
-  if (targetFile === null) {
-    return {
-      ok: false,
-      targetPath,
-      formatSource,
-      error: `Task target "${targetPath}" disappeared after creation.`,
-    };
-  }
-  let current = "";
-  try {
-    if (deps.vault.read) {
-      current = await deps.vault.read(targetFile as TFileLike);
-    } else if (deps.vault.cachedRead) {
-      current = await deps.vault.cachedRead(targetFile as TFileLike);
-    }
-  } catch (err) {
-    return {
-      ok: false,
-      targetPath,
-      formatSource,
-      error: `Failed to read task target before append: ${(err as Error).message || String(err)}`,
-    };
-  }
-
-  // Respect the unsaved-editor-conflict guard from edit_note: refuse
-  // to overwrite when a dirty editor for this path exists.
-  const conflict = await hasUnsavedEditorChanges(
+  // Atomic append via Vault.process. The callback observes the exact
+  // on-disk content at the moment of the write, composes the new
+  // content (respecting a trailing newline), and returns it. Under
+  // parallel create_task calls to the same target, this is what
+  // prevents lost updates.
+  const appendResult = await processFileImpl(
     targetPath,
-    current,
-    deps.workspace,
+    (current) => {
+      const separator =
+        current.length === 0 || current.endsWith("\n") ? "" : "\n";
+      return `${current}${separator}${taskLine}\n`;
+    },
+    deps,
   );
-  if (conflict) {
-    return {
-      ok: false,
-      targetPath,
-      formatSource,
-      error: `Task target "${targetPath}" has unsaved changes in an open editor. Save or discard them, then try again.`,
-    };
-  }
-
-  // Ensure the inserted line stands on its own line. If the existing
-  // content is non-empty and doesn't already end with `\n`, we insert
-  // one before the task line.
-  const separator = current.length === 0 || current.endsWith("\n") ? "" : "\n";
-  const nextContent = `${current}${separator}${taskLine}\n`;
-
-  const edited = await editFileImpl(targetPath, nextContent, deps);
-  if (!edited.ok) {
+  if (!appendResult.ok) {
     return {
       ok: false,
       targetPath,
       formatSource,
       existingTargetCreated,
-      error: edited.error,
+      error: appendResult.error,
     };
   }
 
   // Prefer the create-entry undoId when we made the file (one click
   // reverts the entire operation). Otherwise surface the append's
-  // modify-entry undoId so undo just removes the task line.
-  const undoId = createUndoId ?? edited.undoId;
+  // modify-entry undoId so undo just removes the task line. In the
+  // no-op edge case (unlikely: append always changes content),
+  // fall back to the create undo if present.
+  const undoId =
+    createUndoId ??
+    (appendResult.changed ? appendResult.undoId : undefined);
 
   return {
     ok: true,

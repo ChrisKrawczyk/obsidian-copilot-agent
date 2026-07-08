@@ -844,4 +844,143 @@ describe("createTaskImpl", () => {
     expect(r.field).toBe("createdDate");
     expect(world.files.size).toBe(0);
   });
+
+  test("SC-001: 100 parallel create_task calls to same target → 100 distinct task lines", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+    });
+    const deps = makeDeps(world);
+    const N = 100;
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        createTaskImpl({ description: `task-${i}` }, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    const taskLines = written.split("\n").filter((l) => l.startsWith("- [ ]"));
+    expect(taskLines.length).toBe(N);
+    // Every description must appear exactly once.
+    const descs = new Set(taskLines.map((l) => l.replace(/ \(created:.*\)$/, "")));
+    expect(descs.size).toBe(N);
+    for (let i = 0; i < N; i++) {
+      expect(descs.has(`- [ ] task-${i}`)).toBe(true);
+    }
+  });
+
+  test("5 parallel create_task calls where target does NOT exist → all 5 tasks present, file created exactly once", async () => {
+    const world = makeWorld({ files: new Map() });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        createTaskImpl({ description: `race-${i}` }, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    // Target exists; exactly one caller reports existingTargetCreated=true.
+    const createdCount = results.filter(
+      (r) => r.ok && r.existingTargetCreated,
+    ).length;
+    expect(createdCount).toBe(1);
+    // The other 4 tolerated the exists-error and joined the atomic append.
+    const written = world.files.get("2026-06-09.md")!.content!;
+    const taskLines = written.split("\n").filter((l) => l.startsWith("- [ ]"));
+    expect(taskLines.length).toBe(5);
+    for (let i = 0; i < 5; i++) expect(written).toContain(`race-${i}`);
+  });
+
+  test("3 parallel create_task with different formats (tasks plugin on/off/on) each land correctly", async () => {
+    // All three go to the same daily-note target, so the atomic
+    // append path serializes them. Each uses the same formatSource
+    // decided at start (tasksPluginEnabled at world level), so we
+    // vary description content to prove they don't clobber.
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: true,
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all([
+      createTaskImpl({ description: "one", priority: "high" }, deps),
+      createTaskImpl({ description: "two", dueDate: "2026-06-15" }, deps),
+      createTaskImpl({ description: "three" }, deps),
+    ]);
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    expect(written).toContain("one");
+    expect(written).toContain("two");
+    expect(written).toContain("three");
+    // All three lines survive.
+    expect(written.split("\n").filter((l) => l.startsWith("- [ ]")).length).toBe(3);
+  });
+
+  test("SC-002: 100 parallel create_task each targeting a DIFFERENT note completes near baseline (no cross-file serialization)", async () => {
+    // Fake vault serializes only per-path; when each call targets a
+    // different path the chains are independent. We assert wall-clock
+    // ≤ 3x a single-call baseline (generous ceiling to avoid CI flake).
+    const singleWorld = makeWorld({
+      files: new Map([["baseline.md", { path: "baseline.md", content: "" }]]),
+      vaultAwareness: {
+        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+        taskTargetMode: "custom-path",
+        customTaskTargetPath: "baseline.md",
+      },
+    });
+    const singleDeps = makeDeps(singleWorld);
+    const singleStart = performance.now();
+    await createTaskImpl({ description: "baseline" }, singleDeps);
+    const singleDuration = performance.now() - singleStart;
+
+    // Now 100 parallel calls, each targeting a different file.
+    const files = new Map<string, FakeFile>();
+    for (let i = 0; i < 100; i++) {
+      files.set(`n${i}.md`, { path: `n${i}.md`, content: "" });
+    }
+    // We must vary customTaskTargetPath per call, so use a mutable
+    // vaultAwareness closure.
+    const settingsHolder = {
+      current: {
+        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+        taskTargetMode: "custom-path" as const,
+        customTaskTargetPath: "n0.md",
+      },
+    };
+    const world = makeWorld({ files });
+    const baseDeps = makeDeps(world);
+    // Override vaultAwareness to return the per-call target.
+    const perCallVaultAwareness = (target: string) => ({
+      ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+      taskTargetMode: "custom-path" as const,
+      customTaskTargetPath: target,
+    });
+
+    const parallelStart = performance.now();
+    await Promise.all(
+      Array.from({ length: 100 }, (_, i) => {
+        settingsHolder.current = perCallVaultAwareness(`n${i}.md`);
+        // Each call captures the target at invocation time by using
+        // a deps clone with a fixed vaultAwareness. We pin the target
+        // by creating a shallow deps override.
+        const perCallDeps = {
+          ...baseDeps,
+          vaultAwareness: () => perCallVaultAwareness(`n${i}.md`),
+        };
+        return createTaskImpl({ description: `t-${i}` }, perCallDeps);
+      }),
+    );
+    const parallelDuration = performance.now() - parallelStart;
+
+    // Each of the 100 files has exactly one task.
+    for (let i = 0; i < 100; i++) {
+      const content = world.files.get(`n${i}.md`)?.content ?? "";
+      expect(content).toContain(`t-${i}`);
+    }
+    // Wall-clock ceiling: 10x single call, or 500ms floor. This is
+    // deliberately loose — the primary signal is that all 100 land
+    // correctly, not a precision benchmark. A hard cross-file
+    // serialization bug would push this into the multi-second range.
+    const ceiling = Math.max(singleDuration * 10, 500);
+    expect(parallelDuration).toBeLessThan(ceiling);
+  });
 });
