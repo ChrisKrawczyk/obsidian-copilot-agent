@@ -44,6 +44,8 @@ interface FakeWorld {
   editorBuffer: string;
   editorCursor: { line: number; ch: number };
   openCalls: string[];
+  /** Per-path serialization chains for atomic vault.process() emulation. */
+  processChains: Map<string, Promise<unknown>>;
   /** Optional Daily Notes plugin config (folder/format/template). */
   dailyNotesConfig?: { folder?: string; format?: string; template?: string };
   /** Whether the Obsidian Tasks community plugin is enabled. */
@@ -103,6 +105,24 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
         if (f) f.content = data;
         else world.files.set(file.path, { path: file.path, content: data });
       },
+      process: async (file: TFileLike, fn: (data: string) => string) => {
+        // Serialize per-path to mimic Obsidian's atomic RMW.
+        const p = file.path;
+        const prev = world.processChains.get(p) ?? Promise.resolve();
+        const run = prev.then(async () => {
+          const cur = world.files.get(p)?.content ?? "";
+          const next = fn(cur);
+          const existing = world.files.get(p);
+          if (existing) existing.content = next;
+          else world.files.set(p, { path: p, content: next });
+          return next;
+        });
+        world.processChains.set(
+          p,
+          run.catch(() => undefined),
+        );
+        return run;
+      },
     } as unknown as AppLike["vault"],
     workspace: {
       markdownViewSymbol: sym,
@@ -152,6 +172,7 @@ function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
     editorBuffer: "",
     editorCursor: { line: 0, ch: 0 },
     openCalls: [],
+    processChains: new Map(),
     ...opts,
   };
 }

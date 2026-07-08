@@ -119,6 +119,10 @@ export interface AppLike {
   vault: ReadToolsVault & {
     create?: (path: string, data: string) => Promise<unknown>;
     modify?: (file: TFileLike, data: string) => Promise<void>;
+    process?: (
+      file: TFileLike,
+      fn: (data: string) => string,
+    ) => Promise<string>;
   };
   workspace?: {
     getActiveFile?: () => TFileLike | null;
@@ -751,6 +755,33 @@ export class ObsidianApi {
     try {
       await vault.modify(file, content);
       return { ok: true, value: undefined };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
+   * Atomic read-modify-write on a note via Obsidian's `Vault.process`
+   * (`@since 1.1.0`). The callback runs synchronously inside the
+   * atomic section; the host serializes concurrent `process` calls
+   * against the same file, eliminating lost-update races.
+   *
+   * Returns the written string on success. `index-unavailable` when
+   * the host lacks `process` (should not happen at minAppVersion
+   * 1.5.0, but defended for exotic test doubles). `native-failed`
+   * on any thrown error from the host.
+   */
+  async processNote(
+    file: TFileLike,
+    fn: (data: string) => string,
+  ): Promise<ApiResult<string>> {
+    const vault = this.app.vault;
+    if (!vault || typeof vault.process !== "function") {
+      return { ok: false, reason: "index-unavailable" };
+    }
+    try {
+      const written = await vault.process(file, fn);
+      return { ok: true, value: written };
     } catch (e) {
       return { ok: false, reason: "native-failed", cause: e };
     }

@@ -766,6 +766,51 @@ describe("ObsidianApi.getDailyNotesConfig / isCommunityPluginEnabled", () => {
       if (!r.ok) expect(r.reason).toBe("index-unavailable");
     });
 
+    test("processNote: forwards to vault.process and returns written string", async () => {
+      const calls: Array<{ path: string; before: string }> = [];
+      const fakeFile: TFileLike = { path: "foo.md" };
+      const app: AppLike = {
+        vault: {
+          adapter: { getBasePath: () => tmpRoot },
+          process: async (file: TFileLike, fn: (data: string) => string) => {
+            const before = "OLD";
+            calls.push({ path: file.path, before });
+            return fn(before);
+          },
+        } as unknown as AppLike["vault"],
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.processNote(fakeFile, (data) => data + " + NEW");
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value).toBe("OLD + NEW");
+      expect(calls).toEqual([{ path: "foo.md", before: "OLD" }]);
+    });
+
+    test("processNote: index-unavailable when vault has no process()", async () => {
+      const app: AppLike = {
+        vault: { adapter: { getBasePath: () => tmpRoot } },
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.processNote({ path: "x.md" }, (d) => d);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("index-unavailable");
+    });
+
+    test("processNote: native-failed when vault.process throws", async () => {
+      const app: AppLike = {
+        vault: {
+          adapter: { getBasePath: () => tmpRoot },
+          process: async () => {
+            throw new Error("boom");
+          },
+        } as unknown as AppLike["vault"],
+      };
+      const api = new ObsidianApi(app);
+      const r = await api.processNote({ path: "x.md" }, (d) => d);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("native-failed");
+    });
+
     test("isActiveFileReadOnly: false when no editor is active", () => {
       const app: AppLike = {
         vault: { adapter: { getBasePath: () => tmpRoot } },

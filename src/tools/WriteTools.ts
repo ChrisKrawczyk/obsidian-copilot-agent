@@ -26,6 +26,21 @@ export interface WriteToolsVault extends ReadToolsVault {
    */
   createFolder?: (path: string) => Promise<unknown>;
   modify?: (file: TFileLike, content: string) => Promise<unknown>;
+  /**
+   * Atomic read-modify-write on a note. Obsidian's `Vault.process`
+   * primitive (`@since 1.1.0`) — reads the current file content,
+   * invokes `fn` synchronously with that content, then atomically
+   * writes the returned string back. Concurrent `process` calls
+   * against the same file are serialized by the host, eliminating
+   * lost-update races when multiple tool calls target the same note
+   * in parallel. Optional so exotic test fakes can omit it; the
+   * higher-level helpers fall back to legacy `read` + `modify` when
+   * absent.
+   */
+  process?: (
+    file: TFileLike,
+    fn: (data: string) => string,
+  ) => Promise<string>;
   delete?: (file: TFileLike, system?: boolean) => Promise<void>;
   trash?: (file: TFileLike, system?: boolean) => Promise<void>;
 }
@@ -200,6 +215,192 @@ export async function editFileImpl(
     after: content ?? "",
   });
   return { ok: true, kind: "modify", path: vaultRel, undoId: entry.id };
+}
+
+/**
+ * Sentinel error thrown from inside a `processFileImpl` callback to
+ * abort the atomic RMW cleanly. The write is not performed and no
+ * undo entry is recorded. `processFileImpl` catches this error and
+ * returns `{ ok: false, aborted: true, error: <reason> }`.
+ *
+ * Callers use this when a mid-computation invariant fails (target
+ * line disappeared, content became unparseable, etc.) so the outer
+ * tool can surface a structured error without leaving a stale write
+ * or a bogus undo entry on the journal.
+ */
+export class ProcessAbort extends Error {
+  readonly _processAbort = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "ProcessAbort";
+  }
+}
+
+/**
+ * Result shape for `processFileImpl`. `ok: true, changed: false`
+ * indicates the callback returned unchanged content (no-op) — no
+ * write occurred and no undo entry was recorded. `ok: false,
+ * aborted: true` indicates the callback threw a `ProcessAbort`.
+ */
+export type ProcessFileResult =
+  | { ok: true; kind: "modify"; path: string; changed: true; undoId: string }
+  | { ok: true; kind: "modify"; path: string; changed: false }
+  | { ok: false; error: string; aborted?: boolean };
+
+/**
+ * Atomic read-modify-write via Obsidian's `Vault.process` primitive.
+ * The callback runs synchronously inside the atomic section; async
+ * pre-write work (path resolution, dirty-editor guard) happens
+ * before entering the atomic section.
+ *
+ * Semantics:
+ * - Callback signature: `(data: string) => string`. `data` is the
+ *   current on-disk content observed atomically.
+ * - Return the same string unchanged for a no-op; no write, no undo.
+ * - Throw `new ProcessAbort(reason)` to abort with no write and no
+ *   undo; the outer result is `{ ok: false, aborted: true, error }`.
+ * - Any other throw is surfaced as a native failure.
+ *
+ * Undo `before` is the value passed into the callback (captured
+ * inside the atomic section); `after` is the string the callback
+ * returns. This guarantees the undo entry reflects the exact
+ * transition that landed on disk, even under contention.
+ *
+ * Falls back to the legacy `editFileImpl` path when the vault does
+ * not expose `process` — a defense-in-depth for exotic fakes;
+ * production always has it.
+ */
+export async function processFileImpl(
+  rawPath: string,
+  fn: (data: string) => string,
+  deps: WriteToolsDeps,
+): Promise<ProcessFileResult> {
+  let abs: string;
+  try {
+    abs = resolveVaultPath(rawPath, deps.vault);
+  } catch (err) {
+    if (err instanceof VaultPathError) return { ok: false, error: err.message };
+    throw err;
+  }
+  const vaultRel = toVaultRelative(abs, deps.vault);
+  const fileUnknown = lookupTFile(vaultRel, deps.vault);
+  if (!fileUnknown) {
+    return {
+      ok: false,
+      error: `File "${vaultRel}" does not exist. Use create_file to add it.`,
+    };
+  }
+  const file = fileUnknown as TFileLike;
+
+  // Pre-atomic dirty-editor guard. Snapshot the current on-disk
+  // content once for the comparison; the atomic section that follows
+  // will re-observe it anyway, but the guard runs on the pre-atomic
+  // snapshot so we don't need an async check inside the sync
+  // callback (which `Vault.process` doesn't allow).
+  let preSnapshot: string;
+  try {
+    if (deps.vault.read) {
+      preSnapshot = await deps.vault.read(file);
+    } else if (deps.vault.cachedRead) {
+      preSnapshot = await deps.vault.cachedRead(file);
+    } else {
+      return { ok: false, error: "Vault adapter does not support read()." };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Read failed before process: ${(err as Error).message || String(err)}`,
+    };
+  }
+  const conflict = await hasUnsavedEditorChanges(
+    vaultRel,
+    preSnapshot,
+    deps.workspace,
+  );
+  if (conflict) {
+    return {
+      ok: false,
+      error: `File "${vaultRel}" has unsaved changes in an open editor. Save or discard them, then try again.`,
+    };
+  }
+
+  // Fallback to legacy read+modify when the host lacks `process`.
+  // Correctness under parallel calls is not guaranteed on this path,
+  // but production always has `process`, so this is only for exotic
+  // test fakes that opt into the legacy behavior.
+  if (typeof deps.vault.process !== "function") {
+    if (!deps.vault.modify) {
+      return { ok: false, error: "Vault adapter does not support process() or modify()." };
+    }
+    const nextContent = fn(preSnapshot);
+    if (nextContent === preSnapshot) {
+      return { ok: true, kind: "modify", path: vaultRel, changed: false };
+    }
+    try {
+      await deps.vault.modify(file, nextContent);
+    } catch (err) {
+      if (err instanceof ProcessAbort) {
+        return { ok: false, error: err.message, aborted: true };
+      }
+      return {
+        ok: false,
+        error: `Modify failed: ${(err as Error).message || String(err)}`,
+      };
+    }
+    const entry = deps.undoJournal.record({
+      kind: "modify",
+      scope: "vault",
+      path: vaultRel,
+      before: preSnapshot,
+      after: nextContent,
+    });
+    return { ok: true, kind: "modify", path: vaultRel, changed: true, undoId: entry.id };
+  }
+
+  // Atomic RMW via Obsidian's Vault.process. Capture before/after
+  // inside the callback so the undo entry reflects the exact
+  // transition that landed on disk.
+  let observedBefore = "";
+  let observedAfter = "";
+  let aborted: ProcessAbort | null = null;
+  try {
+    await deps.vault.process(file, (data) => {
+      observedBefore = data;
+      try {
+        const next = fn(data);
+        observedAfter = next;
+        return next;
+      } catch (err) {
+        if (err instanceof ProcessAbort) {
+          aborted = err;
+          // Return unchanged to avoid a spurious write; the outer
+          // catch handles the abort.
+          observedAfter = data;
+          return data;
+        }
+        throw err;
+      }
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Process failed: ${(err as Error).message || String(err)}`,
+    };
+  }
+  if (aborted !== null) {
+    return { ok: false, error: (aborted as ProcessAbort).message, aborted: true };
+  }
+  if (observedAfter === observedBefore) {
+    return { ok: true, kind: "modify", path: vaultRel, changed: false };
+  }
+  const entry = deps.undoJournal.record({
+    kind: "modify",
+    scope: "vault",
+    path: vaultRel,
+    before: observedBefore,
+    after: observedAfter,
+  });
+  return { ok: true, kind: "modify", path: vaultRel, changed: true, undoId: entry.id };
 }
 
 export async function deleteFileImpl(

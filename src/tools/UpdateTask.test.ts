@@ -33,6 +33,7 @@ interface FakeWorld {
   basePath: string;
   vaultAwareness?: VaultAwarenessSettings;
   now: Date;
+  processChains: Map<string, Promise<unknown>>;
 }
 
 function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
@@ -40,6 +41,7 @@ function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
     files: new Map(),
     basePath: tmpRoot,
     now: new Date(2026, 5, 9, 12, 0, 0),
+    processChains: new Map(),
     ...opts,
   };
 }
@@ -62,6 +64,23 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
         const f = world.files.get(file.path);
         if (f) f.content = data;
         else world.files.set(file.path, { path: file.path, content: data });
+      },
+      process: async (file: TFileLike, fn: (data: string) => string) => {
+        const p = file.path;
+        const prev = world.processChains.get(p) ?? Promise.resolve();
+        const run = prev.then(async () => {
+          const cur = world.files.get(p)?.content ?? "";
+          const next = fn(cur);
+          const existing = world.files.get(p);
+          if (existing) existing.content = next;
+          else world.files.set(p, { path: p, content: next });
+          return next;
+        });
+        world.processChains.set(
+          p,
+          run.catch(() => undefined),
+        );
+        return run;
       },
     } as unknown as AppLike["vault"],
     workspace: {
