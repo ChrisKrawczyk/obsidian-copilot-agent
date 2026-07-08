@@ -218,11 +218,6 @@ import.
 
 ## A note on parallel writes (v0.10.2+)
 
-The write tools listed in the session-start preamble (`create_task`,
-`update_task`, `edit_note`, `insert_into_active_note`) route through
-Obsidian's atomic `Vault.process` primitive as of v0.10.2, so the agent
-can safely issue them in parallel against the same note — e.g. five
-`create_task` calls against the same daily note now produce five
-tasks, not one. **The one exception is `edit_note` in `replace` mode**,
-which remains last-writer-wins by design; the manifest hint tells the
-model not to parallelize replace calls to the same path.
+As of v0.10.2, `create_task`, `update_task`, and `edit_note`
+append/prepend are safe under parallel writes to the same note; `edit_note`
+replace remains last-writer-wins and should be serialized.
