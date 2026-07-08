@@ -3,6 +3,28 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.2] - 2026-07-08
+
+Bug-fix release: eliminates a lost-update race in parallel vault writes. When the agent issued multiple write calls to the same note in parallel (e.g. five `create_task` calls to the same daily note), only the last writer's change survived and the rest were silently dropped. All read-modify-write vault mutations now run through Obsidian's atomic `Vault.process` primitive.
+
+### Fixed
+
+- **`create_task` under parallel invocation.** Five parallel `create_task` calls against the same daily note now produce five task entries, not one. Both the existing-target append and the missing-target "who creates the daily note first" race are covered; exactly one caller reports `existingTargetCreated: true` when the note has to be created. (`src/tools/WriteNoteTools.ts` — `createTaskImpl`.)
+- **`update_task` under parallel invocation.** Concurrent status/field patches against different tasks in the same note all land; concurrent non-overlapping field patches against the same task line both land. The split → identify → patch → join compute step now runs inside the atomic callback. (`src/tools/UpdateTask.ts`.)
+- **`edit_note` in `append` and `prepend` modes.** Parallel appends/prepends to the same note are now serialized atomically, in enqueue order. `edit_note` in `replace` mode is intentionally unchanged — replace is documented as last-writer-wins because the user may be intentionally overwriting.
+- **`insert_into_active_note` disk-fallback path.** Picks up the fix transitively through its delegation to `edit_note`.
+
+### Changed
+
+- **Preamble hint for `edit_note` (FR-007).** The tool manifest and the SDK `defineTool("edit_note")` description now explicitly warn the model against issuing parallel `edit_note replace` calls on the same path, since replace remains last-writer-wins. `append` / `prepend` and the other write tools (`create_task`, `update_task`) are now safe to parallelize on the same target. (`src/domain/vaultToolManifest.ts`, `src/tools/WriteNoteTools.ts`.)
+
+### Under the hood
+
+- New `processFileImpl` helper in `src/tools/WriteTools.ts` wraps `Vault.process` with the plugin's unsaved-editor guard, undo journal accounting, no-op skip, and a `ProcessAbort` bail-out mechanism. `Vault.process` is Obsidian's atomic read-modify-write primitive (@since Obsidian 1.1.0; plugin already requires 1.5.0, no floor bump).
+- Test fake vaults gained a per-path `Promise`-chained `process()` implementation so concurrent-call regression tests are deterministic.
+- 24 new tests added (10 parallel append, 100-way `create_task` linearization, 100-way cross-file wall-clock guard, missing-target race, same-line non-overlapping patches, FR-007 hint assertions). 1629 tests total, all passing.
+
+
 ## [0.10.1] - 2026-07-06
 
 Quality release: dependency refresh and README install guidance. No functional changes to plugin behavior.
