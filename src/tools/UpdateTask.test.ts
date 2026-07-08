@@ -33,6 +33,7 @@ interface FakeWorld {
   basePath: string;
   vaultAwareness?: VaultAwarenessSettings;
   now: Date;
+  processChains: Map<string, Promise<unknown>>;
 }
 
 function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
@@ -40,6 +41,7 @@ function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
     files: new Map(),
     basePath: tmpRoot,
     now: new Date(2026, 5, 9, 12, 0, 0),
+    processChains: new Map(),
     ...opts,
   };
 }
@@ -62,6 +64,23 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
         const f = world.files.get(file.path);
         if (f) f.content = data;
         else world.files.set(file.path, { path: file.path, content: data });
+      },
+      process: async (file: TFileLike, fn: (data: string) => string) => {
+        const p = file.path;
+        const prev = world.processChains.get(p) ?? Promise.resolve();
+        const run = prev.then(async () => {
+          const cur = world.files.get(p)?.content ?? "";
+          const next = fn(cur);
+          const existing = world.files.get(p);
+          if (existing) existing.content = next;
+          else world.files.set(p, { path: p, content: next });
+          return next;
+        });
+        world.processChains.set(
+          p,
+          run.catch(() => undefined),
+        );
+        return run;
       },
     } as unknown as AppLike["vault"],
     workspace: {
@@ -531,5 +550,90 @@ describe("updateTaskImpl — final-review F5 (descriptionMatch ambiguity)", () =
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.after.startsWith("- [x] call margret")).toBe(true);
+  });
+
+  test("3 parallel update_task calls patching DIFFERENT lines in same file → all 3 patches persist", async () => {
+    const initial = [
+      "- [ ] task alpha",
+      "- [ ] task beta",
+      "- [ ] task gamma",
+    ].join("\n");
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all([
+      updateTaskImpl(
+        { path: "notes.md", line: 1, patch: { setStatus: "done" } },
+        deps,
+      ),
+      updateTaskImpl(
+        { path: "notes.md", line: 2, patch: { setStatus: "done" } },
+        deps,
+      ),
+      updateTaskImpl(
+        { path: "notes.md", line: 3, patch: { setStatus: "done" } },
+        deps,
+      ),
+    ]);
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("notes.md")!.content!;
+    // All three should now be checked.
+    expect(written.split("\n").filter((l) => l.startsWith("- [x]")).length).toBe(3);
+    expect(written).toContain("task alpha");
+    expect(written).toContain("task beta");
+    expect(written).toContain("task gamma");
+  });
+
+  test("2 parallel update_task calls on SAME line with non-overlapping fields → both patches persist", async () => {
+    const initial = "- [ ] task alpha";
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    const [r1, r2] = await Promise.all([
+      updateTaskImpl(
+        { path: "notes.md", line: 1, patch: { setPriority: "high" } },
+        deps,
+      ),
+      updateTaskImpl(
+        {
+          path: "notes.md",
+          line: 1,
+          patch: { setDueDate: "2026-06-15" },
+        },
+        deps,
+      ),
+    ]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    const written = world.files.get("notes.md")!.content!;
+    // Both markers survive because processFileImpl serializes same-
+    // path callbacks; the second callback re-parses the first's
+    // patched line before layering its own patch.
+    expect(written).toContain("(priority: high)");
+    expect(written).toContain("(due: 2026-06-15)");
+    expect(written).toContain("task alpha");
+  });
+
+  test("update_task returns task_not_found for an out-of-range line via ProcessAbort (no write, no undo)", async () => {
+    const initial = [
+      "- [ ] real task",
+    ].join("\n");
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    // Request line 5 which doesn't exist. Handler surfaces
+    // line_not_found. This exercises the ProcessAbort path.
+    const r = await updateTaskImpl(
+      { path: "notes.md", line: 5, patch: { setStatus: "done" } },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("task_not_found");
+    // File content untouched.
+    expect(world.files.get("notes.md")!.content).toBe(initial);
   });
 });

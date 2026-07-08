@@ -215,3 +215,9 @@ import.
 - **No Dataview integration.** A DQL-facing tool is a possible future
   addition (proposal `#0011`), separate from this release.
 - **No writes.** Every tool listed here is read-only and auto-approved.
+
+For the vault write tools (`create_task`, `update_task`, `edit_note`,
+`insert_into_active_note`) and their v0.10.2 concurrency semantics,
+see the `CHANGELOG` v0.10.2 entry. In short: append/prepend and the
+task tools are now safe under parallel writes to the same note;
+`edit_note` in `replace` mode remains last-writer-wins by design.

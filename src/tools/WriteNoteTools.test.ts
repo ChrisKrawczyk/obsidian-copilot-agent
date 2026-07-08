@@ -44,6 +44,8 @@ interface FakeWorld {
   editorBuffer: string;
   editorCursor: { line: number; ch: number };
   openCalls: string[];
+  /** Per-path serialization chains for atomic vault.process() emulation. */
+  processChains: Map<string, Promise<unknown>>;
   /** Optional Daily Notes plugin config (folder/format/template). */
   dailyNotesConfig?: { folder?: string; format?: string; template?: string };
   /** Whether the Obsidian Tasks community plugin is enabled. */
@@ -103,6 +105,24 @@ function makeDeps(world: FakeWorld): WriteNoteToolsDeps {
         if (f) f.content = data;
         else world.files.set(file.path, { path: file.path, content: data });
       },
+      process: async (file: TFileLike, fn: (data: string) => string) => {
+        // Serialize per-path to mimic Obsidian's atomic RMW.
+        const p = file.path;
+        const prev = world.processChains.get(p) ?? Promise.resolve();
+        const run = prev.then(async () => {
+          const cur = world.files.get(p)?.content ?? "";
+          const next = fn(cur);
+          const existing = world.files.get(p);
+          if (existing) existing.content = next;
+          else world.files.set(p, { path: p, content: next });
+          return next;
+        });
+        world.processChains.set(
+          p,
+          run.catch(() => undefined),
+        );
+        return run;
+      },
     } as unknown as AppLike["vault"],
     workspace: {
       markdownViewSymbol: sym,
@@ -152,6 +172,7 @@ function makeWorld(opts: Partial<FakeWorld> = {}): FakeWorld {
     editorBuffer: "",
     editorCursor: { line: 0, ch: 0 },
     openCalls: [],
+    processChains: new Map(),
     ...opts,
   };
 }
@@ -298,6 +319,72 @@ describe("editNoteImpl", () => {
     if (!r.ok) expect(r.error).toMatch(/unsaved changes/i);
     // On-disk content untouched.
     expect(world.files.get("a.md")?.content).toBe("on-disk");
+  });
+
+  test("parallel appends against same note preserve all blocks (no lost updates)", async () => {
+    const world = makeWorld({
+      files: new Map([["log.md", { path: "log.md", content: "" }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        editNoteImpl("log.md", "append", `block-${i}\n`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const final = world.files.get("log.md")?.content ?? "";
+    const lines = final.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(5);
+    const seen = new Set(lines);
+    expect(seen.size).toBe(5);
+    for (let i = 0; i < 5; i++) expect(seen.has(`block-${i}`)).toBe(true);
+  });
+
+  test("parallel prepends against same note preserve all blocks", async () => {
+    const world = makeWorld({
+      files: new Map([["log.md", { path: "log.md", content: "TAIL" }]]),
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 3 }, (_, i) =>
+        editNoteImpl("log.md", "prepend", `pre-${i}\n`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const final = world.files.get("log.md")?.content ?? "";
+    expect(final.endsWith("TAIL")).toBe(true);
+    for (let i = 0; i < 3; i++) expect(final).toContain(`pre-${i}`);
+  });
+
+  test("parallel appends across DIFFERENT notes do not serialize (cross-file independence)", async () => {
+    const initial = new Map<string, FakeFile>();
+    for (let i = 0; i < 10; i++) initial.set(`n${i}.md`, { path: `n${i}.md`, content: "" });
+    const world = makeWorld({ files: initial });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        editNoteImpl(`n${i}.md`, "append", `content-${i}`, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    for (let i = 0; i < 10; i++) {
+      expect(world.files.get(`n${i}.md`)?.content).toBe(`content-${i}`);
+    }
+    // Each path's serialization chain has at most 1 entry (itself);
+    // no cross-file contention.
+    expect(world.processChains.size).toBe(10);
+  });
+
+  test("replace mode still goes through last-writer-wins path (uses vault.modify)", async () => {
+    const world = makeWorld({
+      files: new Map([["a.md", { path: "a.md", content: "original" }]]),
+    });
+    const deps = makeDeps(world);
+    const r = await editNoteImpl("a.md", "replace", "REPLACED", deps);
+    expect(r.ok).toBe(true);
+    expect(world.files.get("a.md")?.content).toBe("REPLACED");
+    // Replace intentionally does not use the atomic RMW path.
+    expect(world.processChains.size).toBe(0);
   });
 });
 
@@ -509,6 +596,19 @@ describe("createWriteNoteTools factory", () => {
       (t) => (t as unknown as { skipPermission?: boolean }).skipPermission ?? false,
     );
     expect(skipFlags).toEqual([false, false, true, false, false, false, false]);
+  });
+
+  test("edit_note SDK description warns against parallel replace calls (FR-007)", () => {
+    const world = makeWorld();
+    const deps = makeDeps(world);
+    const tools = createWriteNoteTools(deps);
+    const editNote = tools.find(
+      (t) => (t as unknown as { name: string }).name === "edit_note",
+    );
+    expect(editNote).toBeDefined();
+    const description = (editNote as unknown as { description: string })
+      .description;
+    expect(description).toMatch(/parallel\s+`edit_note replace`/);
   });
 });
 
@@ -756,5 +856,117 @@ describe("createTaskImpl", () => {
     expect(r.reason).toBe("invalid_date_format");
     expect(r.field).toBe("createdDate");
     expect(world.files.size).toBe(0);
+  });
+
+  test("SC-001: 100 parallel create_task calls to same target → 100 distinct task lines", async () => {
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+    });
+    const deps = makeDeps(world);
+    const N = 100;
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        createTaskImpl({ description: `task-${i}` }, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    const taskLines = written.split("\n").filter((l) => l.startsWith("- [ ]"));
+    expect(taskLines.length).toBe(N);
+    // Every description must appear exactly once.
+    const descs = new Set(taskLines.map((l) => l.replace(/ \(created:.*\)$/, "")));
+    expect(descs.size).toBe(N);
+    for (let i = 0; i < N; i++) {
+      expect(descs.has(`- [ ] task-${i}`)).toBe(true);
+    }
+  });
+
+  test("5 parallel create_task calls where target does NOT exist → all 5 tasks present, file created exactly once", async () => {
+    const world = makeWorld({ files: new Map() });
+    const deps = makeDeps(world);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        createTaskImpl({ description: `race-${i}` }, deps),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    // Target exists; exactly one caller reports existingTargetCreated=true.
+    const createdCount = results.filter(
+      (r) => r.ok && r.existingTargetCreated,
+    ).length;
+    expect(createdCount).toBe(1);
+    // The other 4 tolerated the exists-error and joined the atomic append.
+    const written = world.files.get("2026-06-09.md")!.content!;
+    const taskLines = written.split("\n").filter((l) => l.startsWith("- [ ]"));
+    expect(taskLines.length).toBe(5);
+    for (let i = 0; i < 5; i++) expect(written).toContain(`race-${i}`);
+  });
+
+  test("3 parallel create_task with different formats (tasks plugin on/off/on) each land correctly", async () => {
+    // All three go to the same daily-note target, so the atomic
+    // append path serializes them. Each uses the same formatSource
+    // decided at start (tasksPluginEnabled at world level), so we
+    // vary description content to prove they don't clobber.
+    const today: FakeFile = { path: "2026-06-09.md", content: "" };
+    const world = makeWorld({
+      files: new Map([[today.path, today]]),
+      tasksPluginEnabled: true,
+    });
+    const deps = makeDeps(world);
+    const results = await Promise.all([
+      createTaskImpl({ description: "one", priority: "high" }, deps),
+      createTaskImpl({ description: "two", dueDate: "2026-06-15" }, deps),
+      createTaskImpl({ description: "three" }, deps),
+    ]);
+    for (const r of results) expect(r.ok).toBe(true);
+    const written = world.files.get("2026-06-09.md")!.content!;
+    expect(written).toContain("one");
+    expect(written).toContain("two");
+    expect(written).toContain("three");
+    // All three lines survive.
+    expect(written.split("\n").filter((l) => l.startsWith("- [ ]")).length).toBe(3);
+  });
+
+  test("SC-002: 100 parallel create_task each targeting a DIFFERENT note all land, with per-path independent process chains", async () => {
+    // Fake vault serializes only per-path; when each call targets a
+    // different path the chains are structurally independent. The
+    // meaningful signal here is that all 100 tasks land AND the
+    // process-chain map has 100 distinct per-path entries — i.e. we
+    // do not accidentally funnel unrelated files through a shared
+    // queue. Wall-clock is not asserted (the fake read/modify path is
+    // synchronous, so wall-clock cannot distinguish parallel from
+    // globally-serialized under these fakes).
+    const files = new Map<string, FakeFile>();
+    for (let i = 0; i < 100; i++) {
+      files.set(`n${i}.md`, { path: `n${i}.md`, content: "" });
+    }
+    const world = makeWorld({ files });
+    const baseDeps = makeDeps(world);
+    const perCallVaultAwareness = (target: string) => ({
+      ...DEFAULT_VAULT_AWARENESS_SETTINGS,
+      taskTargetMode: "custom-path" as const,
+      customTaskTargetPath: target,
+    });
+
+    await Promise.all(
+      Array.from({ length: 100 }, (_, i) => {
+        const perCallDeps = {
+          ...baseDeps,
+          vaultAwareness: () => perCallVaultAwareness(`n${i}.md`),
+        };
+        return createTaskImpl({ description: `t-${i}` }, perCallDeps);
+      }),
+    );
+
+    // Each of the 100 files has exactly one task.
+    for (let i = 0; i < 100; i++) {
+      const content = world.files.get(`n${i}.md`)?.content ?? "";
+      expect(content).toContain(`t-${i}`);
+    }
+    // Structural assertion: 100 independent per-path chains. A single
+    // global lock across files would show up as fewer chain entries
+    // (or a shared queue).
+    expect(world.processChains.size).toBe(100);
   });
 });
