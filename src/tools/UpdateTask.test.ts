@@ -585,7 +585,38 @@ describe("updateTaskImpl — final-review F5 (descriptionMatch ambiguity)", () =
     expect(written).toContain("task gamma");
   });
 
-  test("update_task returns line_not_found when target disappears between attempts (ProcessAbort → no write, no undo)", async () => {
+  test("2 parallel update_task calls on SAME line with non-overlapping fields → both patches persist", async () => {
+    const initial = "- [ ] task alpha";
+    const world = makeWorld({
+      files: new Map([["notes.md", { path: "notes.md", content: initial }]]),
+    });
+    const deps = makeDeps(world);
+    const [r1, r2] = await Promise.all([
+      updateTaskImpl(
+        { path: "notes.md", line: 1, patch: { setPriority: "high" } },
+        deps,
+      ),
+      updateTaskImpl(
+        {
+          path: "notes.md",
+          line: 1,
+          patch: { setDueDate: "2026-06-15" },
+        },
+        deps,
+      ),
+    ]);
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+    const written = world.files.get("notes.md")!.content!;
+    // Both markers survive because processFileImpl serializes same-
+    // path callbacks; the second callback re-parses the first's
+    // patched line before layering its own patch.
+    expect(written).toContain("(priority: high)");
+    expect(written).toContain("(due: 2026-06-15)");
+    expect(written).toContain("task alpha");
+  });
+
+  test("update_task returns task_not_found when target disappears between attempts (ProcessAbort → no write, no undo)", async () => {
     const initial = [
       "- [ ] real task",
     ].join("\n");
