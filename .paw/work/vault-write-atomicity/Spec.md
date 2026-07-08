@@ -65,74 +65,69 @@ The fix must guarantee that every successful tool call's changes persist to disk
 
 - FR-001: When multiple vault-mutating tool calls target the same file concurrently, each successful call's changes MUST be present in the final on-disk content. (Stories: P1, P2, P3)
 - FR-002: When vault-mutating tool calls target different files, they MUST NOT serialize on each other. (Stories: P1, P2, P3)
-- FR-003: Tool return values (`ok`, `undoId`, `path`, `error`, etc.) MUST remain semantically identical to the pre-fix behavior. Existing callers and tests continue to work without changes. (Stories: P1, P2, P3)
-- FR-004: The `hasUnsavedEditorChanges` guard MUST continue to reject writes when the target file has unsaved changes in an open editor. (Edge case)
-- FR-005: The atomicity guarantee applies to these tools: `create_task`, `update_task`, `edit_note` (append/prepend modes), `insert_into_active_note` (disk-fallback path). (Stories: P1, P2, P3)
-- FR-006: `edit_note replace` mode is documented as last-writer-wins by intent; no atomicity guarantee is added. (Edge case)
-- FR-007: The `edit_note` tool hint MUST steer the model away from parallel `replace` calls against the same file. Concretely: the hint states that `replace` overwrites the entire note and that concurrent `replace` invocations against the same path drop all but one write; the model should serialize them or use `append`/`prepend` instead. (Edge case)
-- FR-008: The fix MUST NOT change the plugin's `manifest.json` `minAppVersion` requirement. (Compatibility)
-- FR-009: Undo journal entries recorded by the affected tools MUST remain valid after the fix — a single undo click reverses the tool's effect exactly as before. (Stories: P1, P2, P3)
+- FR-003: Tool return values (`ok`, `undoId`, `path`, `error`, and all existing fields) MUST remain semantically identical to the pre-fix behavior. (Stories: P1, P2, P3)
+- FR-004: The unsaved-editor-conflict guard MUST continue to reject writes when the target file has unsaved changes in an open editor. (Stories: P1, P2, P3 — protects the guard invariant they all rely on)
+- FR-005: The atomicity guarantee applies to the following tool operations: `create_task`, `update_task`, `edit_note` in `append`/`prepend` modes, and `insert_into_active_note` when it writes to disk. (Stories: P1, P2, P3)
+- FR-006: `edit_note` in `replace` mode is documented as last-writer-wins by intent; no atomicity guarantee is added for this mode. (Stories: P3 — bounds the guarantee for that story)
+- FR-007: The `edit_note` tool description surfaced to the model MUST warn against issuing concurrent `replace` calls against the same file, and MUST recommend either serializing them or using `append`/`prepend` when data preservation is needed. (Stories: P3)
+- FR-008: The fix MUST NOT change the plugin's declared minimum Obsidian app version. (Stories: P1, P2, P3 — compatibility floor for all users)
+- FR-009: Undo journal entries recorded by the affected tools MUST remain valid — a single undo click reverses the tool's effect exactly as before. (Stories: P1, P2, P3)
 
 ### Key Entities
 
-- **Vault-relative path**: the normalized string used to key any file-level coordination. Case-sensitive; matches the value passed to Obsidian's `Vault` APIs.
+- **Vault-relative path**: the normalized string used to identify a file within the vault. Case-sensitive.
 
 ### Cross-Cutting / Non-Functional
 
-- **No regression in single-call latency**: the fix must not add measurable overhead to a single, uncontended tool call (target: < 5 ms on top of the existing operation).
-- **Bounded contention overhead**: under high contention on a single file, the total wall-clock time for N calls scales linearly in N (i.e., serialized execution), not quadratically.
+- **No regression in single-call latency**: an uncontended tool call completes within 105% of its pre-fix wall-clock time (i.e., ≤ 5% overhead) on the existing benchmark shape.
+- **Bounded contention overhead**: under high contention on a single file, wall-clock time for N calls scales linearly in N (i.e., serialized execution), not quadratically.
 
 ## Success Criteria
 
-- SC-001: 100 concurrent `create_task` calls to the same daily note result in 100 distinct task lines in the file. (FR-001)
-- SC-002: 100 concurrent `create_task` calls to 100 distinct daily notes complete in wall-clock time comparable to a single call (no artificial serialization). (FR-002)
+- SC-001: 100 concurrent `create_task` calls to the same target note result in 100 distinct task lines in the file. (FR-001)
+- SC-002: 100 concurrent `create_task` calls to 100 distinct target notes complete in wall-clock time no greater than 2× a single-call baseline (i.e., no cross-file serialization penalty). (FR-002)
 - SC-003: The plugin's existing test suite passes without modification to production-code contracts (test additions permitted; test rewrites for behavior changes are not). (FR-003)
-- SC-004: A deterministic-parallelism regression test exercises the race on the *pre-fix* code (fails) and the post-fix code (passes) for each of the four affected tools. (FR-005)
-- SC-005: An `edit_note` call against a note with a dirty open editor is still rejected with the unsaved-editor-conflict error. (FR-004)
-- SC-006: The `edit_note` tool hint contains explicit anti-parallel-replace guidance and is exercised by a snapshot/assertion test on the vault-tool manifest. (FR-007)
-- SC-007: The `manifest.json` `minAppVersion` remains `1.5.0`. (FR-008)
+- SC-004: A deterministic-parallelism regression test exercises the race on the *pre-fix* code (fails) and the post-fix code (passes) for each of the four affected tool operations. (FR-005)
+- SC-005: A vault-write call against a note with a dirty open editor is still rejected with the unsaved-editor-conflict error. (FR-004)
+- SC-006: The `edit_note` tool description surfaced to the model contains explicit anti-parallel-replace guidance, verified by an assertion test on the tool manifest. (FR-007)
+- SC-007: The plugin's declared minimum Obsidian app version is unchanged relative to the pre-fix release. (FR-008)
 
 ## Assumptions
 
-- **Obsidian's `Vault.process(file, fn)` API is available and reliable.** It's marked `@since 1.1.0` in the official `obsidian.d.ts`; our `minAppVersion` is `1.5.0`, so every supported install has it. If a mock or stubbed vault in tests lacks it, tests must supply a `process` implementation.
+- **Obsidian provides a vendor-supported atomic read-modify-write primitive on the file API, available at or below the plugin's declared minimum app version.** No new dependency is needed. If test fakes for the vault interface don't yet implement it, the shared fake will be extended to do so.
 - **The user-perceived correctness bar is "no lost writes", not "linearizable ordering with strong isolation".** If two `update_task` calls concurrently patch different fields of the same task line, either merge semantics or last-field-wins semantics is acceptable — the anti-goal is silent line loss.
-- **The fix is scoped to in-process races.** Two Obsidian *processes* opening the same vault simultaneously is out of scope (Obsidian itself doesn't officially support this configuration).
-- **`Vault.process`'s callback signature (`(data: string) => string`, synchronous) is sufficient** for the compute step in all four tools. Any async work (e.g., `hasUnsavedEditorChanges`, active-editor lookup) is done outside the callback, before or after the RMW critical section.
+- **The fix is scoped to in-process races.** Two Obsidian *processes* opening the same vault simultaneously is out of scope.
+- **A synchronous compute callback inside the atomic RMW is sufficient** for all four tool operations. Any async work (guard checks, active-editor lookup) runs before or after the critical section, not inside it.
 
 ## Scope
 
 **In Scope**:
-- `create_task` write path (`createTaskImpl` in `WriteNoteTools.ts`)
-- `update_task` write path (`updateTaskImpl` in `UpdateTask.ts`)
-- `edit_note` write path for `append` and `prepend` modes (`editNoteImpl` / `editFileImpl` in `WriteNoteTools.ts` / `WriteTools.ts`)
-- `insert_into_active_note` disk-fallback path (transitively through `editNoteImpl`)
-- Test coverage for the four sites, exercising deterministic parallelism
-- Tool-hint update for `edit_note` steering the model away from parallel `replace` calls
-- CHANGELOG entry
-- Point release (v0.10.2)
+- Atomic RMW for the write path of `create_task`, `update_task`, `edit_note` (`append`/`prepend` modes), and `insert_into_active_note`'s disk-fallback path.
+- Regression tests exercising deterministic parallelism against each affected tool.
+- Tool-description update for `edit_note` steering the model away from parallel `replace` calls.
+- CHANGELOG entry and point release.
 
 **Out of Scope**:
-- `create_note` create-race behavior (two concurrent creates of the same new path). Current behavior: one wins, the other reports an error. Acceptable.
-- `edit_note replace` atomicity — semantics of "replace" make last-writer-wins the correct behavior.
+- `create_note` behavior when two concurrent calls target the same new path. Current behavior (one succeeds, the other reports an error) is acceptable.
+- Atomicity for `edit_note replace` — last-writer-wins matches the mode's stated intent.
 - Cross-process (multi-Obsidian-instance) coordination.
 - Multi-file transactions (all-or-nothing across multiple file writes).
-- Performance tuning beyond the "no measurable single-call regression" bar.
-- Introducing a new dependency (e.g., an async-mutex library) — the fix uses only the vendor-provided API.
+- Performance tuning beyond the non-regression bound in Cross-Cutting / Non-Functional.
+- Introducing a new npm dependency for locking.
 
 ## Dependencies
 
-- Obsidian's `Vault.process` API (@since 1.1.0) — already available on all supported installs.
+- Vendor-supported atomic read-modify-write API on the host's vault interface. (Implementation choice documented in CodeResearch.)
 - No new npm dependencies.
 
 ## Risks & Mitigations
 
-- **Risk: `Vault.process` semantics differ subtly from `vault.read` + `vault.modify` in edge cases we haven't seen.** Impact: subtle behavior change in a well-covered code path. Mitigation: exercise every affected tool through the existing test suite unchanged; add targeted tests for edge cases (empty file, missing file, file created inside the callback race window).
-- **Risk: Test fakes for the `Vault` interface don't implement `process`.** Impact: many tests break. Mitigation: add `process` to the shared vault test-fake; keep its semantics deterministic (single-flight per path); prefer wrapping in a small helper in `ObsidianApi` so callers don't hard-depend on the raw `process` symbol.
-- **Risk: The `hasUnsavedEditorChanges` guard becomes ineffective because it runs *outside* the atomic section.** Impact: dirty editor buffer could be silently overwritten in a very narrow window. Mitigation: re-check the guard's contract — it protects against *user-typed-but-unsaved* content, not tool-vs-tool contention; the guard runs before `process`, and if the user types *during* `process`'s callback execution, Obsidian's own editor-file conflict detection kicks in on save. Document the analysis in `CodeResearch.md`.
-- **Risk: Undo journal double-recording under high contention.** Impact: undo click reverses more than the tool intended. Mitigation: record the journal entry inside the RMW critical section (based on the actual `before → after` transition observed atomically), not from a pre-read snapshot.
+- **Risk: the atomic RMW primitive has subtle behavior differences from the existing read-then-modify path.** Impact: silent regression in a well-covered code path. Mitigation: run the existing test suite unchanged; add targeted tests for edge cases (empty file, missing file, file created inside the callback race window). Details in CodeResearch.
+- **Risk: test fakes for the vault interface don't implement the atomic primitive.** Impact: many tests break. Mitigation: extend the shared vault test-fake to expose it with deterministic single-flight semantics per path.
+- **Risk: the unsaved-editor-conflict guard becomes ineffective because it runs outside the atomic section.** Impact: dirty editor buffer could theoretically be overwritten in a narrow window. Mitigation: the guard protects against *user-typed-but-unsaved* content, not tool-vs-tool contention; the host's own editor-file conflict detection handles the case where the user types during the atomic section. This analysis is documented in CodeResearch.
+- **Risk: undo-journal double-recording under high contention.** Impact: a single undo click reverses more than the tool intended. Mitigation: record the journal entry based on the `before → after` transition observed atomically inside the critical section, not from a pre-read snapshot.
 
 ## References
 
-- Issue: (user-reported, no GitHub issue filed — this doc is the source of truth)
-- Related: `.paw/work/agent-native-vault-tools/` (v0.10.0 shipped the read-side vault-navigation tools whose write-side counterparts have this bug)
-- Obsidian API reference: [`Vault.process`](https://docs.obsidian.md/Reference/TypeScript+API/Vault/process) (@since 1.1.0)
+- Reported by user via smoke test on 2026-07-08: five `create_task` calls issued in parallel; only two survived.
+- Related: `.paw/work/agent-native-vault-tools/` (v0.10.0 shipped the read-side vault-navigation tools whose write-side counterparts have this bug).
