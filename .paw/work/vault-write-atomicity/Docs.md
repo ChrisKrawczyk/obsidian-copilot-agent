@@ -141,16 +141,18 @@ guaranteed).
 
 ## Integration Points
 
-- **`WriteToolsVault`** (write-side vault shim, `src/tools/WriteTools.ts`)
-  gained an optional `process?(file, fn)` field. Production wiring
-  always supplies it; the fallback path in `processFileImpl` handles
-  exotic test fakes that don't.
-- **`AppLike.vault`** (`src/tools/ObsidianApi.ts`) gained the same
-  optional `process?` field. `ObsidianApi.processNote(file, fn)`
-  is a thin wrapper returning `ApiResult<string>`.
+- **`processFileImpl`** in `src/tools/WriteTools.ts` wraps
+  `Vault.process` directly (no separate `ObsidianApi` wrapper — the
+  helper accesses `vault.process` on the write-side vault shim
+  because that's where the write pipeline lives). `WriteToolsVault`
+  gained an optional `process?(file, fn)` field, always supplied in
+  production wiring.
 - **`ProcessAbort`** class is exported from `src/tools/WriteTools.ts`
   for callers that need to bail from inside their callback with a
-  typed abort.
+  typed abort. It is thrown OUT of the atomic callback (not caught
+  inside), so Obsidian's `Vault.process` skips the underlying
+  `modify` entirely — true no-write abort, no spurious `modify`
+  events.
 - **Manifest hint** for `edit_note` in `src/domain/vaultToolManifest.ts`
   now explicitly warns against parallel `replace` calls. The SDK
   `defineTool("edit_note")` description mirrors the same guidance
@@ -175,6 +177,23 @@ New test patterns for concurrent-call regressions live in:
 
 ## Follow-ups / Future Work
 
+- **Undo semantics under contention.** The `UndoJournal` uses
+  snapshot-based modify entries (`before`/`after` on the full file
+  content). Under contention, entries recorded by earlier callers
+  become stale as soon as later successful writes land: a normal
+  "undo" click safely declines with `divergence: "modified"`, but a
+  force-undo would revert the whole file to that caller's snapshot,
+  discarding the later writes. The missing-target `create_task`
+  creator surfaces a `create` undo whose force-undo would delete the
+  daily note. This is a pre-existing property of the snapshot-based
+  undo journal (not a regression from this fix — before this fix,
+  only one write per contention window succeeded so the effect
+  didn't manifest). Redesigning to operation-aware inverses (revert
+  only my appended block, only my patched line, etc.) is a candidate
+  for a future release.
+- **`usedFallback` is vestigial** for `edit_note` append/prepend on
+  the atomic path — it is always `false`. The field is informational
+  and left in place for return-shape compatibility.
 - The `hint` string for `edit_note` is duplicated between the
   manifest and the SDK description. Extracting a shared constant
   would be a small future refactor if the guidance needs to evolve.

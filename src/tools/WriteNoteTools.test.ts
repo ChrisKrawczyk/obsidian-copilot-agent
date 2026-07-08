@@ -928,53 +928,29 @@ describe("createTaskImpl", () => {
     expect(written.split("\n").filter((l) => l.startsWith("- [ ]")).length).toBe(3);
   });
 
-  test("SC-002: 100 parallel create_task each targeting a DIFFERENT note completes near baseline (no cross-file serialization)", async () => {
+  test("SC-002: 100 parallel create_task each targeting a DIFFERENT note all land, with per-path independent process chains", async () => {
     // Fake vault serializes only per-path; when each call targets a
-    // different path the chains are independent. We assert wall-clock
-    // ≤ 3x a single-call baseline (generous ceiling to avoid CI flake).
-    const singleWorld = makeWorld({
-      files: new Map([["baseline.md", { path: "baseline.md", content: "" }]]),
-      vaultAwareness: {
-        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
-        taskTargetMode: "custom-path",
-        customTaskTargetPath: "baseline.md",
-      },
-    });
-    const singleDeps = makeDeps(singleWorld);
-    const singleStart = performance.now();
-    await createTaskImpl({ description: "baseline" }, singleDeps);
-    const singleDuration = performance.now() - singleStart;
-
-    // Now 100 parallel calls, each targeting a different file.
+    // different path the chains are structurally independent. The
+    // meaningful signal here is that all 100 tasks land AND the
+    // process-chain map has 100 distinct per-path entries — i.e. we
+    // do not accidentally funnel unrelated files through a shared
+    // queue. Wall-clock is not asserted (the fake read/modify path is
+    // synchronous, so wall-clock cannot distinguish parallel from
+    // globally-serialized under these fakes).
     const files = new Map<string, FakeFile>();
     for (let i = 0; i < 100; i++) {
       files.set(`n${i}.md`, { path: `n${i}.md`, content: "" });
     }
-    // We must vary customTaskTargetPath per call, so use a mutable
-    // vaultAwareness closure.
-    const settingsHolder = {
-      current: {
-        ...DEFAULT_VAULT_AWARENESS_SETTINGS,
-        taskTargetMode: "custom-path" as const,
-        customTaskTargetPath: "n0.md",
-      },
-    };
     const world = makeWorld({ files });
     const baseDeps = makeDeps(world);
-    // Override vaultAwareness to return the per-call target.
     const perCallVaultAwareness = (target: string) => ({
       ...DEFAULT_VAULT_AWARENESS_SETTINGS,
       taskTargetMode: "custom-path" as const,
       customTaskTargetPath: target,
     });
 
-    const parallelStart = performance.now();
     await Promise.all(
       Array.from({ length: 100 }, (_, i) => {
-        settingsHolder.current = perCallVaultAwareness(`n${i}.md`);
-        // Each call captures the target at invocation time by using
-        // a deps clone with a fixed vaultAwareness. We pin the target
-        // by creating a shallow deps override.
         const perCallDeps = {
           ...baseDeps,
           vaultAwareness: () => perCallVaultAwareness(`n${i}.md`),
@@ -982,18 +958,15 @@ describe("createTaskImpl", () => {
         return createTaskImpl({ description: `t-${i}` }, perCallDeps);
       }),
     );
-    const parallelDuration = performance.now() - parallelStart;
 
     // Each of the 100 files has exactly one task.
     for (let i = 0; i < 100; i++) {
       const content = world.files.get(`n${i}.md`)?.content ?? "";
       expect(content).toContain(`t-${i}`);
     }
-    // Wall-clock ceiling: 10x single call, or 500ms floor. This is
-    // deliberately loose — the primary signal is that all 100 land
-    // correctly, not a precision benchmark. A hard cross-file
-    // serialization bug would push this into the multi-second range.
-    const ceiling = Math.max(singleDuration * 10, 500);
-    expect(parallelDuration).toBeLessThan(ceiling);
+    // Structural assertion: 100 independent per-path chains. A single
+    // global lock across files would show up as fewer chain entries
+    // (or a shared queue).
+    expect(world.processChains.size).toBe(100);
   });
 });

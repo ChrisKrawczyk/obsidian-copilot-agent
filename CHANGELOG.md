@@ -22,7 +22,7 @@ Bug-fix release: eliminates a lost-update race in parallel vault writes. When th
 
 - New `processFileImpl` helper in `src/tools/WriteTools.ts` wraps `Vault.process` with the plugin's unsaved-editor guard, undo journal accounting, no-op skip, and a `ProcessAbort` bail-out mechanism. `Vault.process` is Obsidian's atomic read-modify-write primitive (@since Obsidian 1.1.0; plugin already requires 1.5.0, no floor bump).
 - Test fake vaults gained a per-path `Promise`-chained `process()` implementation so concurrent-call regression tests are deterministic.
-- 24 new tests added (10 parallel append, 100-way `create_task` linearization, 100-way cross-file wall-clock guard, missing-target race, same-line non-overlapping patches, FR-007 hint assertions). 1629 tests total, all passing.
+- 27 new tests added (10 parallel append, 100-way `create_task` linearization, 100-way cross-file structural independence, missing-target race, same-line non-overlapping patches, exists-conflict regex classification, FR-007 hint assertions). 1632 tests total, all passing.
 
 
 ## [0.10.1] - 2026-07-06

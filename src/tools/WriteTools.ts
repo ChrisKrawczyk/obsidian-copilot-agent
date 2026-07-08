@@ -122,13 +122,14 @@ export async function createFileImpl(
     // Detect the racy exists-conflict: another caller (or a
     // background reindex) created the target between our lookup and
     // the adapter's create. Obsidian's built-in adapter surfaces this
-    // as an error whose message mentions "exists" or contains the
-    // path already; some fake adapters throw with node's EEXIST.
-    // Keep the pattern narrow to avoid mis-classifying unrelated
-    // errors (e.g. permission failures).
+    // as an error whose message mentions "exists" (e.g. "File already
+    // exists.", "EEXIST: file already exists, ..."); some fake
+    // adapters throw with a bare "exists: <path>". Match any \bexists\b
+    // occurrence but exclude "does not exist" / "no such file" so we
+    // never mis-classify a missing-file error.
     const looksLikeExistsConflict =
-      /already exists|file exists|exists at|EEXIST/i.test(message) &&
-      !/no such file/i.test(message);
+      /\bexists\b/i.test(message) &&
+      !/(does\s*n['’]?t|do(?:es)?\s+not|no\s+such)\s+(?:file|exist)/i.test(message);
     if (looksLikeExistsConflict) {
       return {
         ok: false,
@@ -393,35 +394,27 @@ export async function processFileImpl(
   // Atomic RMW via Obsidian's Vault.process. Capture before/after
   // inside the callback so the undo entry reflects the exact
   // transition that landed on disk.
+  //
+  // ProcessAbort is thrown out of the callback (not swallowed) so
+  // Obsidian skips the underlying `modify` entirely — a true no-write
+  // abort. The outer catch classifies it.
   let observedBefore = "";
   let observedAfter = "";
-  let aborted: ProcessAbort | null = null;
   try {
     await deps.vault.process(file, (data) => {
       observedBefore = data;
-      try {
-        const next = fn(data);
-        observedAfter = next;
-        return next;
-      } catch (err) {
-        if (err instanceof ProcessAbort) {
-          aborted = err;
-          // Return unchanged to avoid a spurious write; the outer
-          // catch handles the abort.
-          observedAfter = data;
-          return data;
-        }
-        throw err;
-      }
+      const next = fn(data);
+      observedAfter = next;
+      return next;
     });
   } catch (err) {
+    if (err instanceof ProcessAbort) {
+      return { ok: false, error: err.message, aborted: true };
+    }
     return {
       ok: false,
       error: `Process failed: ${(err as Error).message || String(err)}`,
     };
-  }
-  if (aborted !== null) {
-    return { ok: false, error: (aborted as ProcessAbort).message, aborted: true };
   }
   if (observedAfter === observedBefore) {
     return { ok: true, kind: "modify", path: vaultRel, changed: false };

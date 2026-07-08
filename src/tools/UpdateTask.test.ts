@@ -616,7 +616,7 @@ describe("updateTaskImpl — final-review F5 (descriptionMatch ambiguity)", () =
     expect(written).toContain("task alpha");
   });
 
-  test("update_task returns task_not_found when target disappears between attempts (ProcessAbort → no write, no undo)", async () => {
+  test("update_task returns task_not_found for an out-of-range line via ProcessAbort (no write, no undo)", async () => {
     const initial = [
       "- [ ] real task",
     ].join("\n");

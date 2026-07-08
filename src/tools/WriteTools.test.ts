@@ -165,6 +165,34 @@ describe("createFileImpl", () => {
     const r = await createFileImpl("C:\\evil.md", "x", deps);
     expect(r.ok).toBe(false);
   });
+
+  // Regression: the missing-target race depends on the exists-conflict
+  // regex catching whatever error string Obsidian's adapter throws
+  // when two callers race a `vault.create` for the same path. These
+  // tests force the throw path directly (bypassing the pre-lookup) to
+  // lock the regex against known message shapes.
+  test.each([
+    ["File already exists.", true],
+    ["EEXIST: file already exists, open 'x/y.md'", true],
+    ["exists: inbox/x.md", true],
+    ["File exists", true],
+    ["ENOENT: no such file or directory", false],
+    ["Permission denied", false],
+  ])(
+    "classifies adapter create error %j as alreadyExists=%s",
+    async (message, expected) => {
+      const deps = makeDeps();
+      // Force the throw path: adapter throws, but lookupTFile returns
+      // null so we skip the pre-lookup early-out.
+      deps.vault.create = async () => {
+        throw new Error(message);
+      };
+      const r = await createFileImpl("inbox/x.md", "hello", deps);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.alreadyExists === true).toBe(expected);
+    },
+  );
 });
 
 describe("editFileImpl", () => {
