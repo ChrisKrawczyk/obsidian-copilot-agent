@@ -65,7 +65,7 @@ The fix must guarantee that every successful tool call's changes persist to disk
 
 - FR-001: When multiple vault-mutating tool calls target the same file concurrently, each successful call's changes MUST be present in the final on-disk content. (Stories: P1, P2, P3)
 - FR-002: When vault-mutating tool calls target different files, they MUST NOT serialize on each other. (Stories: P1, P2, P3)
-- FR-003: Tool return values (`ok`, `undoId`, `path`, `error`, and all existing fields) MUST remain semantically identical to the pre-fix behavior. (Stories: P1, P2, P3)
+- FR-003: The observable return contract of the affected tools (success/failure signal, undo handle, target path, error message) MUST remain semantically identical to the pre-fix behavior. (Stories: P1, P2, P3)
 - FR-004: The unsaved-editor-conflict guard MUST continue to reject writes when the target file has unsaved changes in an open editor. (Stories: P1, P2, P3 — protects the guard invariant they all rely on)
 - FR-005: The atomicity guarantee applies to the following tool operations: `create_task`, `update_task`, `edit_note` in `append`/`prepend` modes, and `insert_into_active_note` when it writes to disk. (Stories: P1, P2, P3)
 - FR-006: `edit_note` in `replace` mode is documented as last-writer-wins by intent; no atomicity guarantee is added for this mode. (Stories: P3 — bounds the guarantee for that story)
@@ -94,15 +94,15 @@ The fix must guarantee that every successful tool call's changes persist to disk
 
 ## Assumptions
 
-- **Obsidian provides a vendor-supported atomic read-modify-write primitive on the file API, available at or below the plugin's declared minimum app version.** No new dependency is needed. If test fakes for the vault interface don't yet implement it, the shared fake will be extended to do so.
-- **The user-perceived correctness bar is "no lost writes", not "linearizable ordering with strong isolation".** If two `update_task` calls concurrently patch different fields of the same task line, either merge semantics or last-field-wins semantics is acceptable — the anti-goal is silent line loss.
-- **The fix is scoped to in-process races.** Two Obsidian *processes* opening the same vault simultaneously is out of scope.
-- **A synchronous compute callback inside the atomic RMW is sufficient** for all four tool operations. Any async work (guard checks, active-editor lookup) runs before or after the critical section, not inside it.
+- **The host application exposes an atomic read-modify-write mechanism at or below the plugin's declared minimum app version.** No new dependency is required. (Implementation choice is documented in CodeResearch.)
+- **The user-perceived correctness bar is "no lost writes", not "linearizable ordering with strong isolation".** If two `update_task` calls concurrently patch different fields of the same task line, either merge or last-field-wins semantics is acceptable — the anti-goal is silent line loss.
+- **The fix is scoped to in-process races.** Two host instances opening the same vault simultaneously is out of scope.
+- **Async work performed by the tools (guard checks, active-editor lookup) can be arranged around the atomic section** — it does not need to run inside it.
 
 ## Scope
 
 **In Scope**:
-- Atomic RMW for the write path of `create_task`, `update_task`, `edit_note` (`append`/`prepend` modes), and `insert_into_active_note`'s disk-fallback path.
+- Atomic write behavior for `create_task`, `update_task`, `edit_note` in `append`/`prepend` modes, and `insert_into_active_note`'s disk-fallback path.
 - Regression tests exercising deterministic parallelism against each affected tool.
 - Tool-description update for `edit_note` steering the model away from parallel `replace` calls.
 - CHANGELOG entry and point release.
@@ -110,14 +110,14 @@ The fix must guarantee that every successful tool call's changes persist to disk
 **Out of Scope**:
 - `create_note` behavior when two concurrent calls target the same new path. Current behavior (one succeeds, the other reports an error) is acceptable.
 - Atomicity for `edit_note replace` — last-writer-wins matches the mode's stated intent.
-- Cross-process (multi-Obsidian-instance) coordination.
+- Cross-process (multi-instance) coordination.
 - Multi-file transactions (all-or-nothing across multiple file writes).
 - Performance tuning beyond the non-regression bound in Cross-Cutting / Non-Functional.
-- Introducing a new npm dependency for locking.
+- New third-party dependencies for locking.
 
 ## Dependencies
 
-- Vendor-supported atomic read-modify-write API on the host's vault interface. (Implementation choice documented in CodeResearch.)
+- Atomic read-modify-write capability on the host's vault interface. (Implementation choice documented in CodeResearch.)
 - No new npm dependencies.
 
 ## Risks & Mitigations
@@ -129,5 +129,5 @@ The fix must guarantee that every successful tool call's changes persist to disk
 
 ## References
 
-- Reported by user via smoke test on 2026-07-08: five `create_task` calls issued in parallel; only two survived.
-- Related: `.paw/work/agent-native-vault-tools/` (v0.10.0 shipped the read-side vault-navigation tools whose write-side counterparts have this bug).
+- Reported by user via smoke test on 2026-07-08: five task-creation calls issued in parallel; only two survived.
+- Related prior work: the v0.10.0 release added read-side vault-navigation tools; this feature addresses the correctness gap in the write-side counterparts.
