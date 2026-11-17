@@ -273,7 +273,7 @@ Before any non-private distribution we register a dedicated OAuth App (tracked a
 
 The Copilot SDK delegates model and tool execution to the `@github/copilot` CLI runtime. Obsidian.exe ships with the `ELECTRON_RUN_AS_NODE` Electron fuse disabled for security, so we can't reuse it as the Node interpreter. Instead we ship the platform-specific single-executable application (SEA) the npm package provides.
 
-As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from `@github/copilot-sdk`'s transitive `@github/copilot` dependency. See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
+As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from the exact-pinned `@github/copilot` devDependency, which must match the CLI version the installed `@github/copilot-sdk` targets (`COPILOT_CLI_VERSION` in the SDK's `dist/cliVersion.js`). See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
 
 ## Tests
 

@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.3] - 2026-11-17
+
+Dependency refresh: brings the Copilot SDK and the bundled Copilot CLI runtime up to date. No user-visible behavior changes. On first launch after upgrading, the plugin downloads the new CLI binary (sha512-verified, as before).
+
+### Changed
+
+- **Bumped `@github/copilot-sdk` from `1.0.5` → `1.0.34`.** Picks up ~4 months of upstream stable-track fixes. No plugin-visible API drift; all 1632 tests pass unchanged.
+- **Copilot CLI runtime pinned to `1.0.112`** (was `1.0.68`), matching the CLI version SDK `1.0.34` is built against. Newer SDKs no longer pull the CLI in transitively, so it is now pinned directly as a build-time dependency; the first-launch binary fetcher and its integrity checks are unchanged.
+
+### Under the hood
+
+- The SDK's new optional native in-process transport (`koffi`) is excluded from the bundle; the plugin continues to talk to the CLI over stdio. `main.js` grows ~170 KB (605 KB → 779 KB) from the larger SDK client.
+- [`RELEASING.md`](RELEASING.md) documents the new rule: when bumping the SDK, bump the pinned `@github/copilot` to the SDK's `COPILOT_CLI_VERSION`.
+
+
 ## [0.10.2] - 2026-07-08
 
 Bug-fix release: eliminates a lost-update race in parallel vault writes. When the agent issued multiple write calls to the same note in parallel (e.g. five `create_task` calls to the same daily note), only the last writer's change survived and the rest were silently dropped. All read-modify-write vault mutations now run through Obsidian's atomic `Vault.process` primitive.
