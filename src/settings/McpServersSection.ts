@@ -693,12 +693,9 @@ export class McpServersSection {
       await this.options.manager.enable(server.id);
     } else await this.options.manager.disable(server.id);
     // Open conversations pick up the change via McpStatusWatcher →
-    // AgentSession.applyToolListChange() (session.setTools).
-    this.notify(
-      enabled
-        ? `MCP server "${server.name}" enabled. Its tools will be added to open conversations once it connects.`
-        : `MCP server "${server.name}" disabled. Its tools have been removed from open conversations.`,
-    );
+    // AgentSession.applyToolListChange() (session.setTools); the
+    // watcher's "Tools from X are now available" toast confirms connects.
+    this.notify(`MCP server "${server.name}" ${enabled ? "enabled" : "disabled"}.`);
   }
 
   private async remove(server: McpServerConfig): Promise<void> {

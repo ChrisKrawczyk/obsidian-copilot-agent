@@ -31,7 +31,7 @@ Short design docs for future work items. One file per proposal.
 | ---- | -------------------------------------------------- | ------ |
 | 0001 | Microsoft 365 Graph MCP integration                | Draft  |
 | 0002 | Packaging and release for community distribution   | Draft  |
-| 0003 | Mid-session MCP tool registry refresh              | Shipped |
+| 0003 | Mid-session MCP tool registry refresh              | Shipped (partial) |
 | 0004 | Vault embeddings and semantic search               | Draft  |
 | 0005 | Track upstream MCP filesystem `slice(7)` fix       | Draft  |
 | 0006 | Tool picker & scope-aware credential resolution    | Draft  |

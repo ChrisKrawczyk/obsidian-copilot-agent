@@ -2735,6 +2735,29 @@ describe("CopilotAgentSession — applyToolListChange (session.setTools)", () =>
     }
   });
 
+  test("dispose during an in-flight setTools swallows the rejection without warning", async () => {
+    const h = makeFakeSdk();
+    const gate = deferred<void>();
+    (h.session as unknown as {
+      setTools: () => Promise<void>;
+    }).setTools = () => gate.promise;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const agent = makeAgent(h, denyAll);
+      await agent.init();
+      const p = agent.applyToolListChange();
+      await agent.dispose();
+      gate.reject(new Error("Session is disconnected"));
+      await expect(p).resolves.toBeUndefined();
+      const relevant = warnSpy.mock.calls.filter((args) =>
+        String(args[0] ?? "").includes("SDK setTools threw"),
+      );
+      expect(relevant.length).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test("applyToolListChange passes [] (not undefined) when the merged tool list is empty", async () => {
     // setTools([]) removes every client tool; undefined is not a valid
     // argument. toolsForSession() returns undefined for an empty list

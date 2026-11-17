@@ -1321,11 +1321,15 @@ export class CopilotAgentSession implements AgentSession {
     // tool this client supplies, so an MCP-only list would drop the
     // vault tools. An empty list correctly removes all client tools.
     // Conversation state and event subscriptions are preserved.
-    const setTools = this.session.setTools;
+    const target = this.session;
+    const setTools = target.setTools;
     if (typeof setTools === "function") {
       try {
-        await setTools.call(this.session, this.toolsForSession() ?? []);
+        await setTools.call(target, this.toolsForSession() ?? []);
       } catch (e) {
+        // Torn down (dispose / reset / stopRuntime) mid-call: expected
+        // rejection, and the replacement session reads a fresh list.
+        if (this.disposed || this.session !== target) return;
         // On rejection the SDK keeps the previous tools and handlers.
         // The next transition retries with a fresh snapshot.
         console.warn(
