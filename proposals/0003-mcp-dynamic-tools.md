@@ -1,11 +1,10 @@
 # 0003 — Mid-session MCP tool registry refresh
 
-**Status:** Shipped (partial) — v0.9.0 (MCP Readiness UX, `resumeSession`
-swap stop-gap); native `session.setTools` adoption via the
-`sdk-settools-adoption` workflow (github/copilot-sdk#1896). Enable/disable
-and connect/disconnect propagate live. Not yet covered: removing a
-connected server and `tools/list_changed` on a connected server
-(`McpStatusWatcher` only fires on connected-state flips).
+**Status:** Shipped — v0.9.0 (MCP Readiness UX, `resumeSession` swap
+stop-gap); native `session.setTools` adoption via the
+`sdk-settools-adoption` workflow (github/copilot-sdk#1896). Connect,
+disconnect, enable/disable, server removal, and `tools/list_changed`
+all propagate to open conversations at the next turn boundary.
 **Created:** 2026-06-18
 **Owner:** unassigned
 
