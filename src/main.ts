@@ -130,9 +130,8 @@ export function handleMcpTransitionForToolRefresh(
  * event, not user-actionable.
  *
  * Toast gating: suppressed when no live runtime can actually apply
- * the update — with SDK 1.0.0 (no `updateTools` primitive) the
- * toast would lie because tools require reload (planning-docs S3 /
- * FR-011).
+ * the update (no session exposes `setTools`), so the toast never
+ * claims tools are available when they aren't (FR-011).
  *
  * Extracted for direct unit testing.
  */
@@ -459,9 +458,8 @@ export default class CopilotAgentPlugin extends Plugin {
     //     `toolsForSession()`.
     //   • onNotice (5 s per-server coalesced): show a single toast
     //     naming the server whose tools just became available. Gated
-    //     on `hasLiveToolUpdate()` — with SDK 1.0.0 (no primitive)
-    //     the toast would lie because tools require reload
-    //     (planning-docs S3 / FR-011).
+    //     on `hasLiveToolUpdate()` so it only shows when some live
+    //     session can apply the change (FR-011).
     mcpStatusWatcher.onTransition((evt) => {
       handleMcpTransitionForToolRefresh(liveRuntimes, evt);
     });
@@ -746,10 +744,10 @@ export default class CopilotAgentPlugin extends Plugin {
         mcpTools: () =>
           createMcpSdkTools(mcpSnapshot(), { manager: mcpManager }) as unknown as import("./sdk/AgentSession").SdkTool[],
         // Phase 9: block createSession until enabled MCP servers reach a
-        // terminal runtime status so their tools are in the frozen tool
-        // snapshot passed to the SDK. Without this gate, plugin-reload
-        // races with MCP stdio child spawn produce sessions that can
-        // never call any MCP tool. 15s is generous for stdio auth flows;
+        // terminal runtime status so their tools are in the first-turn
+        // tool list. Without this gate, plugin-reload races with MCP
+        // stdio child spawn produce a first turn with no MCP tools
+        // (later connects arrive via session.setTools). 15s is generous for stdio auth flows;
         // the gate never rejects, so a slow server just degrades to a
         // partial tool list rather than hanging the agent.
         mcpReadinessGate: () => mcpManager.waitUntilEnabledReady(15_000),

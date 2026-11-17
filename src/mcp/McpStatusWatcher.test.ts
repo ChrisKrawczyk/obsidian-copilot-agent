@@ -5,6 +5,7 @@ import type {
   McpServerConfig,
   McpServerId,
   McpServerRuntimeSnapshot,
+  McpToolInventoryEntry,
 } from "./McpTypes";
 import type { McpManager } from "./McpManager";
 
@@ -18,9 +19,28 @@ import type { McpManager } from "./McpManager";
 class FakeManager {
   private listeners = new Set<() => void>();
   private snap: McpServerRuntimeSnapshot[] = [];
+  private inventory: McpToolInventoryEntry[] = [];
 
   statusSnapshot(): readonly McpServerRuntimeSnapshot[] {
     return this.snap;
+  }
+
+  inventorySnapshot(): readonly McpToolInventoryEntry[] {
+    return this.inventory;
+  }
+
+  setTools(id: string, toolNames: string[], description = ""): void {
+    this.inventory = [
+      ...this.inventory.filter((t) => t.serverId !== (id as McpServerId)),
+      ...toolNames.map((toolName) => ({
+        serverId: id as McpServerId,
+        serverName: id,
+        toolName,
+        syntheticId: `mcp__${id}__${toolName}`,
+        description,
+      })),
+    ];
+    this.emit();
   }
 
   subscribe(fn: () => void): () => void {
@@ -270,5 +290,76 @@ describe("McpStatusWatcher", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("removing a connected server fires a disconnected transition but no notice", () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = new FakeManager();
+      mgr.setStatus("s1", "connected");
+      mgr.setStatus("s2", "error");
+      const watcher = new McpStatusWatcher({
+        manager: asManager(mgr),
+        serversProvider: () => [cfg("s1"), cfg("s2")],
+      });
+      const transitions: Array<{ serverId: string; kind: string }> = [];
+      const notices: string[] = [];
+      watcher.onTransition((e) => transitions.push({ serverId: String(e.serverId), kind: e.kind }));
+      watcher.onNotice((e) => notices.push(e.kind));
+
+      mgr.removeSnapshot("s1");
+      mgr.removeSnapshot("s2"); // never connected → nothing to drop
+      vi.advanceTimersByTime(10_000);
+
+      expect(transitions).toEqual([{ serverId: "s1", kind: "disconnected" }]);
+      expect(notices).toEqual([]);
+      watcher.disposeAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("inventory change on a connected server fires toolsChanged without a notice", () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = new FakeManager();
+      mgr.setStatus("s1", "connected");
+      mgr.setTools("s1", ["a"]);
+      const watcher = new McpStatusWatcher({
+        manager: asManager(mgr),
+        serversProvider: () => [cfg("s1")],
+      });
+      const transitions: string[] = [];
+      const notices: string[] = [];
+      watcher.onTransition((e) => transitions.push(e.kind));
+      watcher.onNotice((e) => notices.push(e.kind));
+
+      mgr.setStatus("s1", "connected"); // unrelated emit, same inventory
+      expect(transitions).toEqual([]);
+
+      mgr.setTools("s1", ["a", "b"]); // tools/list_changed refresh
+      mgr.setTools("s1", ["a", "b"], "new description");
+      vi.advanceTimersByTime(10_000);
+
+      expect(transitions).toEqual(["toolsChanged", "toolsChanged"]);
+      expect(notices).toEqual([]);
+      watcher.disposeAll();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("inventory change on a non-connected server does not fire", () => {
+    const mgr = new FakeManager();
+    mgr.setStatus("s1", "error");
+    const watcher = new McpStatusWatcher({
+      manager: asManager(mgr),
+      serversProvider: () => [cfg("s1")],
+    });
+    const transitions: string[] = [];
+    watcher.onTransition((e) => transitions.push(e.kind));
+    mgr.setTools("s1", ["a"]);
+    expect(transitions).toEqual([]);
+    watcher.disposeAll();
   });
 });

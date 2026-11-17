@@ -1,6 +1,10 @@
 # 0003 — Mid-session MCP tool registry refresh
 
-**Status:** Draft
+**Status:** Shipped — v0.9.0 (MCP Readiness UX, `resumeSession` swap
+stop-gap); native `session.setTools` adoption via the
+`sdk-settools-adoption` workflow (github/copilot-sdk#1896). Connect,
+disconnect, enable/disable, server removal, and `tools/list_changed`
+all propagate to open conversations at the next turn boundary.
 **Created:** 2026-06-18
 **Owner:** unassigned
 

@@ -247,9 +247,9 @@ export class McpManager {
    * Used by `CopilotAgentSession.init()` to delay `client.createSession()`
    * until MCP tool inventories are populated for enabled servers. Without
    * this gate, on plugin reload the SDK session is created with an empty
-   * MCP tool list because stdio child processes are still spawning; the
-   * tool list is then frozen for the lifetime of that session (there is
-   * no `updateTools()` API in the current SDK version).
+   * MCP tool list because stdio child processes are still spawning, so
+   * the first turn can't see MCP tools. Late connects are applied later
+   * via `session.setTools`, but gating keeps the first turn complete.
    *
    * Semantics:
    *  - Servers whose runtime does not yet exist (getOrCreate hasn't fired

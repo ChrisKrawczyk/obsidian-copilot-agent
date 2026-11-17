@@ -98,7 +98,7 @@ describe("main.ts — handleMcpNoticeForToolToast (Phase 3 wiring)", () => {
     expect(notify).not.toHaveBeenCalled();
   });
 
-  test("gated: no toast when NO live runtime has updateTools primitive (SDK 1.0.0 / FR-011)", () => {
+  test("gated: no toast when NO live runtime has the setTools primitive (FR-011)", () => {
     const notify = vi.fn();
     handleMcpNoticeForToolToast(
       [

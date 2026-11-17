@@ -5,8 +5,11 @@
  *
  * Two-surface design (per plan-review):
  *  - `onTransition(listener)` — leading-edge, no debounce. Fires on
- *    every observed transition into or out of the "connected" state.
- *    Consumed by the plugin's live tool-list refresh path, which has
+ *    every observed transition into or out of the "connected" state
+ *    (including removal of a connected server), and with kind
+ *    `toolsChanged` when a connected server's tool inventory changes
+ *    (e.g. `notifications/tools/list_changed`). Consumed by the
+ *    plugin's live tool-list refresh path, which has
  *    a 2 s latency bound (FR-004/005/007). Bypasses the coarser 5 s
  *    coalescing window so refresh dispatch is never throttled by
  *    the notice throttle.
@@ -34,7 +37,7 @@ import type {
 
 export type McpStatusTransition = {
   serverId: McpServerId;
-  kind: "connected" | "disconnected";
+  kind: "connected" | "disconnected" | "toolsChanged";
 };
 
 export type McpStatusNotice = {
@@ -70,6 +73,20 @@ const NOTICE_WINDOW_DEFAULT_MS = 5_000;
 const isConnected = (status: McpRuntimeStatus | undefined): boolean =>
   status === "connected";
 
+/** Per-server fingerprint of everything that reaches the SDK tool definition. */
+function inventorySignatures(manager: McpManager): Map<McpServerId, string> {
+  const byServer = new Map<McpServerId, string[]>();
+  for (const t of manager.inventorySnapshot()) {
+    const entry = JSON.stringify([t.syntheticId, t.toolName, t.description ?? null, t.inputSchema ?? null]);
+    const list = byServer.get(t.serverId);
+    if (list) list.push(entry);
+    else byServer.set(t.serverId, [entry]);
+  }
+  const out = new Map<McpServerId, string>();
+  for (const [id, list] of byServer) out.set(id, list.sort().join("\n"));
+  return out;
+}
+
 export class McpStatusWatcher {
   private readonly manager: McpManager;
   private readonly serversProvider: () => readonly McpServerConfig[];
@@ -83,6 +100,8 @@ export class McpStatusWatcher {
 
   /** Last observed connected/not-connected classification per server. */
   private lastConnected = new Map<McpServerId, boolean>();
+  /** Last observed inventory fingerprint per server ("" = no tools). */
+  private lastToolSig = new Map<McpServerId, string>();
 
   /** Pending notice-window timers per server. Absent = no open window. */
   private noticeTimers = new Map<McpServerId, ReturnType<typeof setTimeout>>();
@@ -170,19 +189,32 @@ export class McpStatusWatcher {
   // --- internals -----------------------------------------------------
 
   private seedInitialState(): void {
+    const sigs = inventorySignatures(this.manager);
     for (const snap of this.manager.statusSnapshot()) {
       this.lastConnected.set(snap.id, isConnected(snap.status));
+      this.lastToolSig.set(snap.id, sigs.get(snap.id) ?? "");
     }
   }
 
   private handleManagerEmit(): void {
     if (this.disposed) return;
     const seen = new Set<McpServerId>();
+    const sigs = inventorySignatures(this.manager);
     for (const snap of this.manager.statusSnapshot()) {
       seen.add(snap.id);
+      const sig = sigs.get(snap.id) ?? "";
+      const prevSig = this.lastToolSig.get(snap.id);
+      this.lastToolSig.set(snap.id, sig);
       const wasConnected = this.lastConnected.get(snap.id) ?? false;
       const nowConnected = isConnected(snap.status);
-      if (wasConnected === nowConnected && this.lastConnected.has(snap.id)) continue;
+      if (wasConnected === nowConnected && this.lastConnected.has(snap.id)) {
+        // Still connected but the tool inventory changed (list_changed
+        // refresh): live sessions must re-apply. No user Notice.
+        if (nowConnected && prevSig !== undefined && prevSig !== sig) {
+          this.emitTransition({ serverId: snap.id, kind: "toolsChanged" });
+        }
+        continue;
+      }
       this.lastConnected.set(snap.id, nowConnected);
       const kind = nowConnected ? "connected" : "disconnected";
       this.emitTransition({ serverId: snap.id, kind });
@@ -191,7 +223,12 @@ export class McpStatusWatcher {
     // Drop tracking for removed servers so a re-add gets a fresh window.
     for (const id of Array.from(this.lastConnected.keys())) {
       if (!seen.has(id)) {
+        const wasConnected = this.lastConnected.get(id) === true;
         this.lastConnected.delete(id);
+        this.lastToolSig.delete(id);
+        // A removed (or rebound) connected server's tools are gone from
+        // the registry; live sessions must drop them. No user Notice.
+        if (wasConnected) this.emitTransition({ serverId: id, kind: "disconnected" });
         const pending = this.noticeTimers.get(id);
         if (pending) {
           this.clearTimeoutFn(pending);
