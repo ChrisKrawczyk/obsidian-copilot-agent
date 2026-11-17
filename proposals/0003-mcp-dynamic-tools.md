@@ -1,6 +1,8 @@
 # 0003 — Mid-session MCP tool registry refresh
 
-**Status:** Draft
+**Status:** Shipped — v0.9.0 (MCP Readiness UX, `resumeSession` swap
+stop-gap); native `session.setTools` adoption via the
+`sdk-settools-adoption` workflow (github/copilot-sdk#1896).
 **Created:** 2026-06-18
 **Owner:** unassigned
 

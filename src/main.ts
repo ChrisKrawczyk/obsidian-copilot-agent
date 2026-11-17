@@ -130,9 +130,8 @@ export function handleMcpTransitionForToolRefresh(
  * event, not user-actionable.
  *
  * Toast gating: suppressed when no live runtime can actually apply
- * the update — with SDK 1.0.0 (no `updateTools` primitive) the
- * toast would lie because tools require reload (planning-docs S3 /
- * FR-011).
+ * the update (no session exposes `setTools`), so the toast never
+ * claims tools are available when they aren't (FR-011).
  *
  * Extracted for direct unit testing.
  */
@@ -459,9 +458,8 @@ export default class CopilotAgentPlugin extends Plugin {
     //     `toolsForSession()`.
     //   • onNotice (5 s per-server coalesced): show a single toast
     //     naming the server whose tools just became available. Gated
-    //     on `hasLiveToolUpdate()` — with SDK 1.0.0 (no primitive)
-    //     the toast would lie because tools require reload
-    //     (planning-docs S3 / FR-011).
+    //     on `hasLiveToolUpdate()` so it only shows when some live
+    //     session can apply the change (FR-011).
     mcpStatusWatcher.onTransition((evt) => {
       handleMcpTransitionForToolRefresh(liveRuntimes, evt);
     });

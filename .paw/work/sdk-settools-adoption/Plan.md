@@ -60,6 +60,9 @@ client tool set in place, and the next turn uses the new handlers.
 3. **refresh-comments-docs**
    - `src/main.ts` toast-gating comments (≈L133, ≈L462).
    - `src/mcp/McpManager.ts` `waitUntilEnabledReady` comment (≈L252).
+   - `src/settings/McpServersSection.ts` enable/disable Notice: drop the
+     now-false "Start a new conversation…" instruction (toggles reach open
+     conversations via watcher → `setTools`).
    - `README.md` v0.9 "Preserves conversation state" / "Forward-looking work" bullets.
    - `proposals/0003-mcp-dynamic-tools.md` status → Shipped; `proposals/README.md` row.
 4. **verify**: `npm run typecheck`, `npm test`, `npm run build`, `npm run deploy`,

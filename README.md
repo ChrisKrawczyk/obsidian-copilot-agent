@@ -42,15 +42,12 @@ Detailed platform matrix, first-launch behavior, and known limitations are docum
   single "Tools from *&lt;server name&gt;* are now available." Notice
   confirms the pickup, naming the specific server. **No more
   reloading Obsidian to recover from token expiry.**
-- **Preserves conversation state.** The refresh uses the Copilot SDK's
-  `client.resumeSession(sessionId, …)` primitive to swap the session in
-  place, keeping server-side conversation history intact. Permission
-  routing to the plugin's decider is preserved across the swap.
-- **Forward-looking work.** A cleaner refresh path is proposed upstream
-  at [github/copilot-sdk#1896](https://github.com/github/copilot-sdk/issues/1896)
-  (re-triage of the previously-closed #735). When it lands, the plugin
-  will bump the SDK and drop the session-swap fallback. The user-visible
-  behavior is unchanged either way.
+- **Preserves conversation state.** The refresh replaces the live
+  session's tool list in place, keeping conversation history and
+  permission routing intact. (v0.9 swapped the session via
+  `client.resumeSession`; later releases use the SDK's native
+  `session.setTools`, which landed upstream via
+  [github/copilot-sdk#1896](https://github.com/github/copilot-sdk/issues/1896).)
 
 ## What's new in v0.8
 

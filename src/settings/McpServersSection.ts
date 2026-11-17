@@ -692,12 +692,12 @@ export class McpServersSection {
       this.notifyStdioStartupIfNew(server);
       await this.options.manager.enable(server.id);
     } else await this.options.manager.disable(server.id);
-    // The SDK locks the tool list at session creation; mid-session toggles
-    // don't refresh it. Prompt the user to start a new conversation so the
-    // model sees the updated tool roster.
+    // Open conversations pick up the change via McpStatusWatcher →
+    // AgentSession.applyToolListChange() (session.setTools).
     this.notify(
-      `MCP server "${server.name}" ${enabled ? "enabled" : "disabled"}. ` +
-        "Start a new conversation in the chat for the tool change to take effect.",
+      enabled
+        ? `MCP server "${server.name}" enabled. Its tools will be added to open conversations once it connects.`
+        : `MCP server "${server.name}" disabled. Its tools have been removed from open conversations.`,
     );
   }
 
