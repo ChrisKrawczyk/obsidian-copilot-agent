@@ -3,6 +3,30 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.4] - 2026-11-17
+
+Live MCP tool refresh, done properly. Open conversations now pick up MCP tool changes in place at the next turn boundary, with history intact, using the Copilot SDK's native `session.setTools`. Two cases that previously left stale tools in open conversations are now covered: removing a server and a server changing its tool list.
+
+### Changed
+
+- **MCP tool refresh uses the SDK's native `session.setTools`.** This replaces the v0.9 stop-gap, which tore down and resumed the session (`resumeSession`) on every MCP connect, disconnect, enable or disable. The refresh is now a single in-place call. It is still deferred until a streaming reply finishes. (`src/sdk/AgentSession.ts`.)
+- **MCP enable/disable Notice reworded.** It now reads `MCP server "X" enabled.` / `disabled.` and no longer tells you to start a new conversation, since open conversations update automatically. (`src/settings/McpServersSection.ts`.)
+
+### Fixed
+
+- **Removing a connected MCP server** now drops its tools from open conversations. Previously they lingered until a new conversation was started.
+- **Servers that announce `tools/list_changed`** now have their new or changed tools picked up by open conversations. `McpStatusWatcher` fingerprints each connected server's tool inventory and triggers a refresh when it changes. Neither case shows a Notice. (`src/mcp/McpStatusWatcher.ts`.)
+
+### Under the hood
+
+- Removed the session-swap machinery: `swapSessionForToolRefresh`, `canSwapForToolRefresh`, and the `SdkClient.resumeSession` shim.
+- Proposals housekeeping:
+  - 0003 (mid-session tool refresh) and 0010 (agent-native vault tools) are marked Shipped.
+  - 0004 (embeddings) is marked Rejected.
+  - New Draft proposals: 0009 (one-shot retry on HTTP 502/503/504 from MCP servers), 0011 (Dataview query tool) and 0012 (operation-aware undo for contended vault writes).
+- 1629 tests, all passing.
+
+
 ## [0.10.3] - 2026-11-17
 
 Dependency refresh: brings the Copilot SDK and the bundled Copilot CLI runtime up to date. No user-visible behavior changes. On first launch after upgrading, the plugin downloads the new CLI binary (sha512-verified, as before).
