@@ -38,7 +38,13 @@ export interface PackFileReadErr {
 export type PackFileReadResult = PackFileReadOk | PackFileReadErr;
 
 export interface PackFileReader {
-  pickAndReadPackFile(): Promise<PackFileReadResult>;
+  /**
+   * `ownerDocument` must be the document of the element the user clicked.
+   * Chromium only opens a file chooser from a window holding transient
+   * user activation, and Obsidian can render settings in a window other
+   * than the main one.
+   */
+  pickAndReadPackFile(ownerDocument?: Document): Promise<PackFileReadResult>;
 }
 
 export interface PackFileWriteOk {
@@ -103,7 +109,7 @@ function resolveFileSourcePath(file: File): string {
  */
 export function createDesktopPackFileReader(): PackFileReader {
   return {
-    pickAndReadPackFile(): Promise<PackFileReadResult> {
+    pickAndReadPackFile(ownerDocument?: Document): Promise<PackFileReadResult> {
       if (!isElectronRuntime()) {
         return Promise.resolve({
           ok: false,
@@ -111,8 +117,9 @@ export function createDesktopPackFileReader(): PackFileReader {
           message: "Desktop-only feature.",
         });
       }
+      const doc = ownerDocument ?? activeOrGlobalDocument();
       return new Promise<PackFileReadResult>((resolve) => {
-        const input = document.createElement("input");
+        const input = doc.createElement("input");
         input.type = "file";
         input.accept = ".json,application/json";
         input.style.display = "none";
@@ -162,11 +169,15 @@ export function createDesktopPackFileReader(): PackFileReader {
         input.addEventListener("cancel", () => {
           settle({ ok: false, reason: "cancelled" });
         });
-        document.body.appendChild(input);
+        doc.body.appendChild(input);
         input.click();
       });
     },
   };
+}
+
+function activeOrGlobalDocument(): Document {
+  return (globalThis as { activeDocument?: Document }).activeDocument ?? document;
 }
 
 function isElectronRuntime(): boolean {

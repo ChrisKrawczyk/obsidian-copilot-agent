@@ -912,7 +912,9 @@ export class McpServersSection {
       attr: { "aria-label": "Import preset pack from file" },
     });
     on(importBtn, "click", () => {
-      void this.handleImportPack();
+      void this.handleImportPack(
+        (importBtn as unknown as { ownerDocument?: Document }).ownerDocument,
+      );
     });
 
     const list = child(section, "div", {
@@ -955,14 +957,14 @@ export class McpServersSection {
     });
   }
 
-  private async handleImportPack(): Promise<void> {
+  private async handleImportPack(ownerDocument?: Document): Promise<void> {
     const packsStore = this.options.presetPacksStore;
     const reader = this.options.packFileReader;
     if (!packsStore || !reader) {
       this.notify("[Copilot Agent] Pack import is unavailable in this build.");
       return;
     }
-    const picked = await reader.pickAndReadPackFile();
+    const picked = await reader.pickAndReadPackFile(ownerDocument);
     const outcome = runImportFromReaderResult(picked, (text) =>
       findExistingRecord(packsStore.snapshot(), text),
     );
