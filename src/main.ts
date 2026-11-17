@@ -32,6 +32,7 @@ import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
 import { createSearchTools } from "./tools/SearchTools";
+import { createNavigateTools } from "./tools/NavigateTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
 import { SafetyState } from "./domain/SafetyPolicy";
 import { SafetySettingsStore } from "./settings/SafetySettingsStore";
@@ -678,6 +679,10 @@ export default class CopilotAgentPlugin extends Plugin {
         obsidianApi,
         this.app.vault as unknown as Parameters<typeof createReadTools>[0],
       );
+      const navigateTools = createNavigateTools(
+        obsidianApi,
+        this.app.vault as unknown as Parameters<typeof createReadTools>[0],
+      );
       const writeNoteTools = createWriteNoteTools({
         vault: this.app.vault as unknown as Parameters<
           typeof createWriteTools
@@ -696,6 +701,7 @@ export default class CopilotAgentPlugin extends Plugin {
           ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(readNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(searchTools as unknown as import("./sdk/AgentSession").SdkTool[]),
+          ...(navigateTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ],
         exposeRawFsToolsAtStartup,

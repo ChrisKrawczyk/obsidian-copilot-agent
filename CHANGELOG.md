@@ -3,6 +3,80 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.3] - 2026-11-17
+
+Dependency refresh: brings the Copilot SDK and the bundled Copilot CLI runtime up to date. No user-visible behavior changes. On first launch after upgrading, the plugin downloads the new CLI binary (sha512-verified, as before).
+
+### Changed
+
+- **Bumped `@github/copilot-sdk` from `1.0.5` → `1.0.34`.** Picks up ~4 months of upstream stable-track fixes. No plugin-visible API drift; all 1632 tests pass unchanged.
+- **Copilot CLI runtime pinned to `1.0.112`** (was `1.0.68`), matching the CLI version SDK `1.0.34` is built against. Newer SDKs no longer pull the CLI in transitively, so it is now pinned directly as a build-time dependency; the first-launch binary fetcher and its integrity checks are unchanged.
+
+### Under the hood
+
+- The SDK's new optional native in-process transport (`koffi`) is excluded from the bundle; the plugin continues to talk to the CLI over stdio. `main.js` grows ~170 KB (605 KB → 779 KB) from the larger SDK client.
+- [`RELEASING.md`](RELEASING.md) documents the new rule: when bumping the SDK, bump the pinned `@github/copilot` to the SDK's `COPILOT_CLI_VERSION`.
+
+
+## [0.10.2] - 2026-07-08
+
+Bug-fix release: eliminates a lost-update race in parallel vault writes. When the agent issued multiple write calls to the same note in parallel (e.g. five `create_task` calls to the same daily note), only the last writer's change survived and the rest were silently dropped. All read-modify-write vault mutations now run through Obsidian's atomic `Vault.process` primitive.
+
+### Fixed
+
+- **`create_task` under parallel invocation.** Five parallel `create_task` calls against the same daily note now produce five task entries, not one. Both the existing-target append and the missing-target "who creates the daily note first" race are covered; exactly one caller reports `existingTargetCreated: true` when the note has to be created. (`src/tools/WriteNoteTools.ts` — `createTaskImpl`.)
+- **`update_task` under parallel invocation.** Concurrent status/field patches against different tasks in the same note all land; concurrent non-overlapping field patches against the same task line both land. The split → identify → patch → join compute step now runs inside the atomic callback. (`src/tools/UpdateTask.ts`.)
+- **`edit_note` in `append` and `prepend` modes.** Parallel appends/prepends to the same note are now serialized atomically, in enqueue order. `edit_note` in `replace` mode is intentionally unchanged — replace is documented as last-writer-wins because the user may be intentionally overwriting.
+- **`insert_into_active_note` disk-fallback path.** Picks up the fix transitively through its delegation to `edit_note`.
+
+### Changed
+
+- **Preamble hint for `edit_note` (FR-007).** The tool manifest and the SDK `defineTool("edit_note")` description now explicitly warn the model against issuing parallel `edit_note replace` calls on the same path, since replace remains last-writer-wins. `append` / `prepend` and the other write tools (`create_task`, `update_task`) are now safe to parallelize on the same target. (`src/domain/vaultToolManifest.ts`, `src/tools/WriteNoteTools.ts`.)
+
+### Under the hood
+
+- New `processFileImpl` helper in `src/tools/WriteTools.ts` wraps `Vault.process` with the plugin's unsaved-editor guard, undo journal accounting, no-op skip, and a `ProcessAbort` bail-out mechanism. `Vault.process` is Obsidian's atomic read-modify-write primitive (@since Obsidian 1.1.0; plugin already requires 1.5.0, no floor bump).
+- Test fake vaults gained a per-path `Promise`-chained `process()` implementation so concurrent-call regression tests are deterministic.
+- 27 new tests added (10 parallel append, 100-way `create_task` linearization, 100-way cross-file structural independence, missing-target race, same-line non-overlapping patches, exists-conflict regex classification, FR-007 hint assertions). 1632 tests total, all passing.
+
+
+## [0.10.1] - 2026-07-06
+
+Quality release: dependency refresh and README install guidance. No functional changes to plugin behavior.
+
+### Changed
+
+- **Bumped `@github/copilot-sdk` from `1.0.0` → `1.0.5`.** Picks up ~5 months of upstream stable-track improvements. Transitive `@github/copilot` binary is pinned to `1.0.68` (latest stable). All 1605 tests pass unchanged; no plugin-visible SDK API drift.
+- **README: promoted BRAT install instructions above the fold.** A compact `## Install` section now sits right below the status banner so first-time readers see the install recipe before the multi-version "What's new" history. The full platform-support / first-launch / known-limitations breakdown remains further down.
+
+
+## [0.10.0] - 2026-07-03
+
+Agent-native vault navigation surface. Six new / upgraded read-only capabilities let the agent locate, inspect, and traverse notes without asking the human — a substitute for the local-embedding path explored (and rejected) in proposal #0004. All new tools are auto-approved under the FR-017 read-only gate. No breaking changes.
+
+### Added
+
+- **`search_content` modes (Phase 1).** The existing full-text search tool now accepts an explicit `mode`: `substring` (default; literal, byte-for-byte compatible with the v0.9 behavior), `regex` (JavaScript pattern with ranked/fuzzy fallback), or `fuzzy` (Obsidian's own scorer via `prepareFuzzySearch`). Returns match spans for precise follow-up reads. Backwards-compatible: omitting `mode` preserves the v0.9 behavior. (`src/tools/ReadTools.ts` — `searchInFiles` helper.)
+- **`resolve_link` (Phase 2).** Resolves a wikilink or markdown link to its target vault path, source-aware — matches Obsidian's own click behavior. Distinguishes `unresolved` from `metadata-cache-not-ready` for the FR-014 warmup contract. (`src/tools/NavigateTools.ts`.)
+- **`get_outlinks` (Phase 2).** Lists a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes `resolvedPath` when Obsidian can resolve the target. Capped at 200 entries with a truncation signal.
+- **`get_note_structure` (Phase 2).** Returns a note's headings + sections + block IDs with line numbers, WITHOUT body prose. Cheap structural inspection to plan a targeted `read_file`. Capped at 500 combined items.
+- **`search_vault` (Phase 3).** Compound query: AND-combines tag / folder-prefix / `modifiedSince` / text filters in a single call. Short-circuits without body reads when structural filters exclude every note. Delegates ranked/fuzzy text search to the Phase 1 helper. Capped at 100 results.
+- **`related_notes` (Phase 4).** Ranks vault neighbours of a source note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts. Deterministic sort (score desc, path asc). Zero-score neighbours are dropped.
+
+### Changed
+
+- Session-start preamble inventory (`vaultToolManifest.ts`) lists all five new capabilities plus the updated `search_content` hint so the agent discovers them on the first turn (FR-011 / SC-011).
+
+### Under the hood
+
+- All five new tools share the FR-014 metadata-cache-warmup contract: when the source file exists but its cache entry hasn't populated yet, the tool returns `{ok: false, reason: "metadata-cache-not-ready"}` — a retryable signal, distinct from a terminal `not-found`.
+- No new npm dependencies. No schema changes.
+
+### Follow-ups
+
+- Dataview query tool (deferred to proposal `#0011`).
+
+
 ## [0.9.0] - 2026-07-02
 
 Two small, coherent UX follow-ups on top of v0.8.0's MCP work: the chat composer now tells you what it is waiting on when it stalls on an MCP server, and slow-authenticating servers that connect after the composer opens (or reconnect after a token expiry) get their tools injected into the live chat automatically. No breaking changes; no new user-facing settings.

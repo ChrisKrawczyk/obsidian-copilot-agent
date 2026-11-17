@@ -44,13 +44,41 @@ export type ApiResult<T> =
 /** Per-file metadata cache shape — the parts Phase 3 actually reads. */
 export interface FileCacheLike {
   tags?: Array<{ tag: string; position?: unknown }>;
-  headings?: Array<{ heading: string; level: number; position?: unknown }>;
+  headings?: Array<{
+    heading: string;
+    level: number;
+    position?: { start?: { line?: number } };
+  }>;
   frontmatter?: Record<string, unknown>;
   links?: Array<{
     link: string;
     original: string;
     position?: unknown;
   }>;
+  /** Embeds (`![[…]]` / `![…](…)`). Same shape as `links`. */
+  embeds?: Array<{
+    link: string;
+    original: string;
+    position?: unknown;
+  }>;
+  /**
+   * Sections (paragraphs, lists, headings, code, etc.) as identified by
+   * Obsidian's parser. Present on native Obsidian; optional here so
+   * test doubles can omit.
+   */
+  sections?: Array<{
+    type: string;
+    position?: { start?: { line?: number } };
+  }>;
+  /**
+   * Block references — `Record<blockId, { id, position }>`. Native
+   * Obsidian returns this from `getFileCache`; keys are the block
+   * IDs (without the leading `^`).
+   */
+  blocks?: Record<
+    string,
+    { id: string; position?: { start?: { line?: number } } }
+  >;
   /**
    * Tasks/list items discovered by Obsidian's metadata cache. `task`
    * is the status char inside `[ ]` (e.g. `' '`, `'/'`, `'x'`, `'-'`)
@@ -129,6 +157,18 @@ export interface AppLike {
      * the same `Record<"#tag", number>` shape.
      */
     getTags?: () => Record<string, number>;
+    /**
+     * Native Obsidian: source-aware link resolver, mirrors the click
+     * behavior of Obsidian's own editor. Given a link path like
+     * `[[Alice's Notes]]` or `folder/other`, plus the path of the note
+     * where the link was written, returns the resolved `TFile` (or
+     * `null` when the link doesn't resolve). Optional so older
+     * Obsidian builds and test doubles can omit.
+     */
+    getFirstLinkpathDest?: (
+      linkpath: string,
+      sourcePath: string,
+    ) => TFileLike | null;
   };
   /** `app.internalPlugins.plugins['daily-notes']?.instance?.options`. */
   internalPlugins?: {
@@ -263,6 +303,36 @@ export class ObsidianApi {
   }
 
   /**
+   * v0.10 Phase 2: source-aware wikilink resolver used by the
+   * `resolve_link` tool. Delegates directly to Obsidian's own
+   * `metadataCache.getFirstLinkpathDest(linkpath, sourcePath)` — the
+   * same call the editor uses when the user Ctrl-clicks a link, so
+   * agent-side resolution matches user-visible behavior.
+   *
+   * Returns `metadata-cache-not-ready` when the native call is
+   * missing (test doubles / old Obsidian), or `not-found` when the
+   * link doesn't resolve to any note in the vault.
+   */
+  resolveLinkPath(
+    linkpath: string,
+    sourcePath: string,
+  ): ApiResult<TFileLike> {
+    const mc = this.app.metadataCache;
+    if (!mc || typeof mc.getFirstLinkpathDest !== "function") {
+      return { ok: false, reason: "metadata-cache-not-ready" };
+    }
+    try {
+      const target = mc.getFirstLinkpathDest(linkpath, sourcePath);
+      if (!target) {
+        return { ok: false, reason: "not-found" };
+      }
+      return { ok: true, value: target };
+    } catch (e) {
+      return { ok: false, reason: "native-failed", cause: e };
+    }
+  }
+
+  /**
    * v0.3 Phase 2: list every distinct tag in the vault, paired with its
    * occurrence count. Native Obsidian exposes `metadataCache.getTags()`
    * which already returns a `Record<"#tag", number>` shape; when that
@@ -312,7 +382,13 @@ export class ObsidianApi {
       const files = this.app.vault.getMarkdownFiles();
       for (const file of files) {
         const cache = mc.getFileCache(file);
-        if (!cache) continue;
+        if (!cache) {
+          // FR-014: any file with a null cache entry means the
+          // metadata index is still warming — return partial tallies
+          // would silently under-report the vault. Surface the
+          // retryable not-ready state instead.
+          return { ok: false, reason: "metadata-cache-not-ready" };
+        }
         for (const t of collectFileTagsForFallback(cache)) {
           tally[t] = (tally[t] ?? 0) + 1;
         }
@@ -349,7 +425,11 @@ export class ObsidianApi {
       const matches: TFileLike[] = [];
       for (const file of files) {
         const cache = mc.getFileCache(file);
-        if (!cache) continue;
+        if (!cache) {
+          // FR-014: partial results would silently under-report the
+          // filtered file set. Surface the retryable not-ready state.
+          return { ok: false, reason: "metadata-cache-not-ready" };
+        }
         const fileTags = collectFileTagsForFallback(cache);
         if (fileTags.has(target)) {
           matches.push(file);

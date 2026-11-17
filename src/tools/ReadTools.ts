@@ -1,4 +1,5 @@
 import { defineTool, type Tool } from "@github/copilot-sdk";
+import { prepareSimpleSearch, prepareFuzzySearch } from "obsidian";
 import {
   resolveVaultPath,
   toVaultRelative,
@@ -25,6 +26,9 @@ export interface ReadToolsVault {
 export interface TFileLike {
   path: string;
   extension?: string;
+  /** File stat block. Present on Obsidian's real `TFile`; optional
+   *  for test doubles that only exercise path-based logic. */
+  stat?: { size?: number; mtime?: number };
 }
 
 /** Maximum entries returned by `view` to keep huge vaults from drowning the model. */
@@ -146,34 +150,73 @@ export function createReadTools(vault: ReadToolsVault): Tool[] {
 
     defineTool("search_content", {
       description:
-        "Search the active Obsidian vault for a substring (or regex) " +
-        "across all markdown files. Returns up to 50 matches with " +
-        "{ path, line, snippet }.",
+        "Search the active Obsidian vault for text across all markdown " +
+        "files. Modes: 'substring' (default; literal case-sensitive), " +
+        "'regex' (JS regex source), 'simple' (whitespace-AND ranked), " +
+        "'fuzzy' (character-subsequence ranked, tolerant of dropped " +
+        "chars). Ranked modes include a numeric score and per-match " +
+        "char spans. Returns up to 50 matches with " +
+        "{ path, line, snippet } (plus score/spans for ranked modes).",
       parameters: {
         type: "object",
         required: ["query"],
         properties: {
           query: {
             type: "string",
-            description: "Substring or regex to find.",
+            description: "Query text (or regex source when mode='regex').",
           },
           regex: {
             type: "boolean",
-            description: "When true, treat `query` as a JS regex source.",
+            description:
+              "Legacy: when true and `mode` is omitted, treat `query` " +
+              "as a JS regex source. Equivalent to mode='regex'.",
+          },
+          mode: {
+            type: "string",
+            enum: ["substring", "regex", "simple", "fuzzy"],
+            description:
+              "Search mode. 'substring' (default) and 'regex' preserve " +
+              "the legacy behavior. 'simple' and 'fuzzy' return ranked " +
+              "results with per-match spans.",
           },
         },
         additionalProperties: false,
       },
       skipPermission: true,
       handler: async (args: unknown) => {
-        const parsed = (args ?? {}) as { query?: unknown; regex?: unknown };
+        const parsed = (args ?? {}) as {
+          query?: unknown;
+          regex?: unknown;
+          mode?: unknown;
+        };
         if (typeof parsed.query !== "string" || parsed.query.length === 0) {
           throw new Error("`query` is required and must be a non-empty string");
         }
-        return await searchContentImpl(
+        const modeArg =
+          typeof parsed.mode === "string" ? parsed.mode : undefined;
+        if (
+          modeArg !== undefined &&
+          modeArg !== "substring" &&
+          modeArg !== "regex" &&
+          modeArg !== "simple" &&
+          modeArg !== "fuzzy"
+        ) {
+          throw new Error(
+            `Invalid mode: "${modeArg}". Expected one of substring, regex, simple, fuzzy.`,
+          );
+        }
+        // Legacy back-compat: when `mode` is omitted, `regex: true`
+        // routes to regex mode; otherwise substring mode. This
+        // preserves byte-for-byte output for existing callers.
+        const isRegex = Boolean(parsed.regex);
+        if (modeArg === undefined) {
+          return await searchContentImpl(parsed.query, isRegex, vault);
+        }
+        return await searchInFiles(
+          (vault.getMarkdownFiles && vault.getMarkdownFiles()) ?? [],
           parsed.query,
-          Boolean(parsed.regex),
           vault,
+          { mode: modeArg },
         );
       },
     }),
@@ -358,7 +401,259 @@ export async function searchContentImpl(
   return { matches, totalMatches: total, truncated };
 }
 
-// ---- arg parsing ----
+// ---- searchInFiles: new ranked/fuzzy search helper ---------------------
+//
+// Additive helper introduced for Phase 1 of the agent-native vault
+// tools work. It sits alongside — not on top of — `searchContentImpl`
+// so the legacy substring/regex path stays byte-for-byte identical
+// (per SC-003). New modes ("simple", "fuzzy") return per-match
+// `score` and `spans`; substring/regex modes return the same shape as
+// the legacy helper. This is also the seam `search_vault` (Phase 3)
+// uses to pass its own `limit`.
+
+export interface SearchInFilesOptions {
+  mode: "substring" | "regex" | "simple" | "fuzzy";
+  /**
+   * Maximum number of matches to keep. Defaults to
+   * `MAX_SEARCH_MATCHES` (50) — the same cap `search_content` has
+   * always used. Callers such as `search_vault` may pass a larger
+   * limit to enforce their own cap.
+   */
+  limit?: number;
+}
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  snippet: string;
+  /** Present only for ranked modes ("simple", "fuzzy"). */
+  score?: number;
+  /**
+   * Character offsets of the matched text within the returned line.
+   * Present only for ranked modes.
+   */
+  spans?: Array<[number, number]>;
+}
+
+export interface SearchInFilesResult {
+  matches: SearchMatch[];
+  totalMatches: number;
+  truncated: boolean;
+  /** True when the underlying scanner stopped counting matches early,
+   *  meaning `totalMatches` is a lower bound rather than an exact tally. */
+  totalIsLowerBound?: boolean;
+}
+
+export async function searchInFiles(
+  files: TFileLike[],
+  query: string,
+  vault: ReadToolsVault,
+  options: SearchInFilesOptions,
+): Promise<SearchInFilesResult> {
+  const limit = options.limit ?? MAX_SEARCH_MATCHES;
+
+  if (options.mode === "substring" || options.mode === "regex") {
+    return await searchInFilesUnranked(
+      files,
+      query,
+      options.mode === "regex",
+      vault,
+      limit,
+    );
+  }
+  return await searchInFilesRanked(files, query, options.mode, vault, limit);
+}
+
+async function searchInFilesUnranked(
+  files: TFileLike[],
+  query: string,
+  isRegex: boolean,
+  vault: ReadToolsVault,
+  limit: number,
+): Promise<SearchInFilesResult> {
+  let matcher: (line: string) => number;
+  if (isRegex) {
+    let re: RegExp;
+    try {
+      re = new RegExp(query);
+    } catch (err) {
+      throw new Error(
+        `Invalid regex: ${(err as Error).message || String(err)}`,
+      );
+    }
+    matcher = (line: string) => {
+      const m = re.exec(line);
+      return m ? m.index : -1;
+    };
+  } else {
+    matcher = (line: string) => line.indexOf(query);
+  }
+
+  const matches: SearchMatch[] = [];
+  let total = 0;
+  let truncated = false;
+  let totalIsLowerBound = false;
+
+  outer: for (const f of files) {
+    try {
+      resolveVaultPath(f.path, vault);
+    } catch {
+      continue;
+    }
+    let content: string;
+    try {
+      if (typeof vault.cachedRead === "function") {
+        content = await vault.cachedRead(f);
+      } else if (typeof vault.read === "function") {
+        content = await vault.read(f);
+      } else {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const idx = matcher(lines[i]);
+      if (idx < 0) continue;
+      total++;
+      if (matches.length < limit) {
+        const start = Math.max(0, idx - SNIPPET_RADIUS);
+        const end = Math.min(
+          lines[i].length,
+          idx + query.length + SNIPPET_RADIUS,
+        );
+        matches.push({
+          path: f.path,
+          line: i + 1,
+          snippet: lines[i].slice(start, end),
+        });
+      } else {
+        truncated = true;
+        if (total >= limit * 4) {
+          totalIsLowerBound = true;
+          break outer;
+        }
+      }
+    }
+  }
+
+  return {
+    matches,
+    totalMatches: total,
+    truncated,
+    totalIsLowerBound: totalIsLowerBound || undefined,
+  };
+}
+
+async function searchInFilesRanked(
+  files: TFileLike[],
+  query: string,
+  mode: "simple" | "fuzzy",
+  vault: ReadToolsVault,
+  limit: number,
+): Promise<SearchInFilesResult> {
+  const prepared =
+    mode === "simple" ? prepareSimpleSearch(query) : prepareFuzzySearch(query);
+
+  // Bound the amount of stored ranked work. Rather than accumulating
+  // every matching line across the whole vault and sorting at the end,
+  // we keep at most RANKED_WORKING_MULTIPLIER * limit candidates and
+  // evict the lowest-score entry when a new match would exceed that.
+  // This preserves the top-`limit` ranked results while keeping memory
+  // and sort cost O(limit) rather than O(vault-matches).
+  const RANKED_WORKING_MULTIPLIER = 4;
+  const workingCap = Math.max(1, limit * RANKED_WORKING_MULTIPLIER);
+  const working: SearchMatch[] = [];
+  let totalConsidered = 0;
+  let truncated = false;
+  let totalIsLowerBound = false;
+
+  const cmp = (a: SearchMatch, b: SearchMatch) => {
+    const ds = (b.score ?? 0) - (a.score ?? 0);
+    if (ds !== 0) return ds;
+    if (a.path < b.path) return -1;
+    if (a.path > b.path) return 1;
+    return a.line - b.line;
+  };
+
+  outer: for (const f of files) {
+    try {
+      resolveVaultPath(f.path, vault);
+    } catch {
+      continue;
+    }
+    let content: string;
+    try {
+      if (typeof vault.cachedRead === "function") {
+        content = await vault.cachedRead(f);
+      } else if (typeof vault.read === "function") {
+        content = await vault.read(f);
+      } else {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const result = prepared(line);
+      if (!result || result.matches.length === 0) continue;
+      totalConsidered++;
+      const firstIdx = result.matches[0][0];
+      const start = Math.max(0, firstIdx - SNIPPET_RADIUS);
+      const end = Math.min(line.length, firstIdx + SNIPPET_RADIUS);
+      const entry: SearchMatch = {
+        path: f.path,
+        line: i + 1,
+        snippet: line.slice(start, end),
+        score: result.score,
+        spans: result.matches.map(([s, e]) => [s, e] as [number, number]),
+      };
+      if (working.length < workingCap) {
+        working.push(entry);
+      } else {
+        // Only bother if the new entry could beat the current worst.
+        // Full sort of `working` is O(workingCap log workingCap) which
+        // is bounded; we keep it simple and correct.
+        working.sort(cmp);
+        const worst = working[working.length - 1];
+        if (cmp(entry, worst) < 0) {
+          working[working.length - 1] = entry;
+          truncated = true;
+        } else {
+          truncated = true;
+        }
+      }
+      // Yield periodically on very large vaults so the UI thread isn't
+      // pinned. Every 1000 considered matches we release control.
+      if (totalConsidered % 1000 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+        if (totalConsidered > 100000) {
+          // Extreme safety break — a pathologically broad query on a
+          // 100k-note vault shouldn't be allowed to freeze the plugin
+          // even with the working-cap in place.
+          truncated = true;
+          totalIsLowerBound = true;
+          break outer;
+        }
+      }
+    }
+  }
+
+  working.sort(cmp);
+
+  const finalTruncated = truncated || working.length > limit;
+  return {
+    matches: finalTruncated ? working.slice(0, limit) : working,
+    totalMatches: totalConsidered,
+    truncated: finalTruncated,
+    totalIsLowerBound: totalIsLowerBound || undefined,
+  };
+}
 
 function parseArgs<K extends string>(
   args: unknown,
