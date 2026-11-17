@@ -1,6 +1,9 @@
 # 0010 — Agent-native vault navigation tools
 
-**Status:** Draft
+**Status:** Shipped — v0.10.0 (`search_vault`, `resolve_link`,
+`get_outlinks`, `get_note_structure`, `related_notes`, upgraded
+`search_content`). The optional `dataview_query` tool was split out
+into [0011](./0011-dataview-query-tool.md).
 **Created:** 2026-07-06
 **Owner:** unassigned
 **Supersedes:** [0004 — Vault embeddings and semantic search](./0004-embeddings-vector-search.md)

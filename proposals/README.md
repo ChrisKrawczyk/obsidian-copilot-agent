@@ -37,5 +37,5 @@ Short design docs for future work items. One file per proposal.
 | 0006 | Tool picker & scope-aware credential resolution    | Draft  |
 | 0007 | Importable / exportable MCP server preset packs    | Draft  |
 | 0008 | MCP server stderr log file                         | Draft  |
-| 0009 | MCP HTTP transient 5xx retry                       | Draft (PR #11) |
-| 0010 | Agent-native vault navigation tools                | Draft  |
+| 0009 | MCP HTTP transient 5xx retry                       | Draft  |
+| 0010 | Agent-native vault navigation tools                | Shipped (v0.10.0) |
