@@ -32,7 +32,12 @@ Short design docs for future work items. One file per proposal.
 | 0001 | Microsoft 365 Graph MCP integration                | Draft  |
 | 0002 | Packaging and release for community distribution   | Draft  |
 | 0003 | Mid-session MCP tool registry refresh              | Shipped |
-| 0004 | Vault embeddings and semantic search               | Draft  |
+| 0004 | Vault embeddings and semantic search               | Rejected (superseded by 0010) |
 | 0005 | Track upstream MCP filesystem `slice(7)` fix       | Draft  |
 | 0006 | Tool picker & scope-aware credential resolution    | Draft  |
 | 0007 | Importable / exportable MCP server preset packs    | Draft  |
+| 0008 | MCP server stderr log file                         | Draft  |
+| 0009 | MCP HTTP transient 5xx retry                       | Draft  |
+| 0010 | Agent-native vault navigation tools                | Shipped (v0.10.0) |
+| 0011 | Dataview inter-plugin query tool                   | Draft  |
+| 0012 | Operation-aware undo for contended vault writes    | Draft  |
