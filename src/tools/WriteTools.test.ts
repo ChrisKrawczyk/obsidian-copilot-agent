@@ -8,6 +8,8 @@ import {
   deleteFileImpl,
   hasUnsavedEditorChanges,
   createWriteTools,
+  processFileImpl,
+  ProcessAbort,
   type WriteToolsVault,
   type WriteToolsDeps,
   WRITE_TOOL_NAMES,
@@ -31,8 +33,20 @@ afterAll(() => {
 function makeVault(initialFiles: Record<string, string> = {}): {
   vault: WriteToolsVault;
   files: Map<string, string>;
+  processInFlight: () => number;
+  processCounts: () => Map<string, number>;
 } {
   const files = new Map<string, string>(Object.entries(initialFiles));
+  // Per-path chain of pending `process` calls to serialize concurrent
+  // callers deterministically, matching Obsidian's atomic RMW.
+  const chains = new Map<string, Promise<unknown>>();
+  const inFlight = new Map<string, number>();
+  const counts = new Map<string, number>();
+  const bumpInFlight = (p: string, delta: number) => {
+    const n = (inFlight.get(p) ?? 0) + delta;
+    if (n <= 0) inFlight.delete(p);
+    else inFlight.set(p, n);
+  };
   const vault: WriteToolsVault = {
     adapter: { getBasePath: () => tmpRoot },
     getFileByPath: (p) =>
@@ -59,6 +73,28 @@ function makeVault(initialFiles: Record<string, string> = {}): {
       fs.writeFileSync(path.join(tmpRoot, file.path), c);
       return file;
     },
+    process: async (file, fn) => {
+      const p = file.path;
+      counts.set(p, (counts.get(p) ?? 0) + 1);
+      bumpInFlight(p, 1);
+      const prev = chains.get(p) ?? Promise.resolve();
+      const run = prev.then(async () => {
+        const before = files.get(p) ?? "";
+        const after = fn(before);
+        files.set(p, after);
+        fs.writeFileSync(path.join(tmpRoot, p), after);
+        return after;
+      });
+      chains.set(
+        p,
+        run.catch(() => undefined),
+      );
+      try {
+        return await run;
+      } finally {
+        bumpInFlight(p, -1);
+      }
+    },
     trash: async (file) => {
       files.delete(file.path);
       try {
@@ -66,16 +102,34 @@ function makeVault(initialFiles: Record<string, string> = {}): {
       } catch {}
     },
   };
-  return { vault, files };
+  return {
+    vault,
+    files,
+    processInFlight: () => {
+      let max = 0;
+      for (const n of inFlight.values()) if (n > max) max = n;
+      return max;
+    },
+    processCounts: () => new Map(counts),
+  };
 }
 
 function makeDeps(initialFiles: Record<string, string> = {}): WriteToolsDeps & {
   files: Map<string, string>;
   journal: UndoJournal;
+  processInFlight: () => number;
+  processCounts: () => Map<string, number>;
 } {
-  const { vault, files } = makeVault(initialFiles);
-  const journal = new UndoJournal(vault);
-  return { vault, undoJournal: journal, files, journal };
+  const v = makeVault(initialFiles);
+  const journal = new UndoJournal(v.vault);
+  return {
+    vault: v.vault,
+    undoJournal: journal,
+    files: v.files,
+    journal,
+    processInFlight: v.processInFlight,
+    processCounts: v.processCounts,
+  };
 }
 
 describe("createFileImpl", () => {
@@ -111,6 +165,34 @@ describe("createFileImpl", () => {
     const r = await createFileImpl("C:\\evil.md", "x", deps);
     expect(r.ok).toBe(false);
   });
+
+  // Regression: the missing-target race depends on the exists-conflict
+  // regex catching whatever error string Obsidian's adapter throws
+  // when two callers race a `vault.create` for the same path. These
+  // tests force the throw path directly (bypassing the pre-lookup) to
+  // lock the regex against known message shapes.
+  test.each([
+    ["File already exists.", true],
+    ["EEXIST: file already exists, open 'x/y.md'", true],
+    ["exists: inbox/x.md", true],
+    ["File exists", true],
+    ["ENOENT: no such file or directory", false],
+    ["Permission denied", false],
+  ])(
+    "classifies adapter create error %j as alreadyExists=%s",
+    async (message, expected) => {
+      const deps = makeDeps();
+      // Force the throw path: adapter throws, but lookupTFile returns
+      // null so we skip the pre-lookup early-out.
+      deps.vault.create = async () => {
+        throw new Error(message);
+      };
+      const r = await createFileImpl("inbox/x.md", "hello", deps);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.alreadyExists === true).toBe(expected);
+    },
+  );
 });
 
 describe("editFileImpl", () => {
@@ -171,6 +253,140 @@ describe("editFileImpl", () => {
       },
     });
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("processFileImpl", () => {
+  test("records undo with before from callback input and after from callback return", async () => {
+    const deps = makeDeps({ "inbox/x.md": "ORIG" });
+    const r = await processFileImpl(
+      "inbox/x.md",
+      (data) => data + "\nappended",
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.kind).toBe("modify");
+    expect(r.changed).toBe(true);
+    if (!r.changed) return;
+    expect(deps.files.get("inbox/x.md")).toBe("ORIG\nappended");
+    const entry = deps.journal.get(r.undoId);
+    expect(entry?.kind).toBe("modify");
+    expect(entry?.before).toBe("ORIG");
+    expect(entry?.after).toBe("ORIG\nappended");
+  });
+
+  test("no-op: callback returns unchanged content — no write, no undo", async () => {
+    const deps = makeDeps({ "inbox/x.md": "SAME" });
+    const r = await processFileImpl("inbox/x.md", (data) => data, deps);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.changed).toBe(false);
+    // No undoId in the no-op branch — nothing to undo.
+    expect((r as { undoId?: string }).undoId).toBeUndefined();
+  });
+
+  test("ProcessAbort → ok:false with aborted:true, no write, no undo", async () => {
+    const deps = makeDeps({ "inbox/x.md": "KEEP" });
+    const r = await processFileImpl(
+      "inbox/x.md",
+      () => {
+        throw new ProcessAbort("target line not found");
+      },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.aborted).toBe(true);
+    expect(r.error).toMatch(/target line not found/);
+    expect(deps.files.get("inbox/x.md")).toBe("KEEP");
+  });
+
+  test("refuses when file does not exist", async () => {
+    const deps = makeDeps();
+    const r = await processFileImpl("missing.md", (d) => d + "!", deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toMatch(/does not exist/i);
+  });
+
+  test("refuses on unsaved-editor conflict (guard runs before atomic section)", async () => {
+    const deps = makeDeps({ "notes.md": "DISK" });
+    const r = await processFileImpl("notes.md", (d) => d + "X", {
+      ...deps,
+      workspace: {
+        getLeavesOfType: () => [
+          {
+            view: {
+              file: { path: "notes.md" },
+              getViewData: () => "DIRTY_BUFFER",
+            },
+          },
+        ],
+      },
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toMatch(/unsaved changes/i);
+    expect(deps.files.get("notes.md")).toBe("DISK");
+  });
+
+  test("falls back to modify() when vault lacks process()", async () => {
+    const deps = makeDeps({ "inbox/x.md": "ORIG" });
+    // Remove process to force fallback.
+    (deps.vault as { process?: unknown }).process = undefined;
+    const r = await processFileImpl(
+      "inbox/x.md",
+      (data) => data + " + fallback",
+      deps,
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.changed).toBe(true);
+    if (!r.changed) return;
+    expect(deps.files.get("inbox/x.md")).toBe("ORIG + fallback");
+    const entry = deps.journal.get(r.undoId);
+    expect(entry?.before).toBe("ORIG");
+    expect(entry?.after).toBe("ORIG + fallback");
+  });
+
+  test("fallback path honors ProcessAbort", async () => {
+    const deps = makeDeps({ "inbox/x.md": "KEEP" });
+    (deps.vault as { process?: unknown }).process = undefined;
+    const r = await processFileImpl(
+      "inbox/x.md",
+      () => {
+        throw new ProcessAbort("nothing to do");
+      },
+      deps,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.aborted).toBe(true);
+    expect(r.error).toMatch(/nothing to do/);
+    expect(deps.files.get("inbox/x.md")).toBe("KEEP");
+  });
+
+  test("parallel same-path callers see linearized before/after (no lost updates)", async () => {
+    const deps = makeDeps({ "inbox/log.md": "" });
+    const N = 20;
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        processFileImpl(
+          "inbox/log.md",
+          (data) => (data ? data + "\n" : "") + `line-${i}`,
+          deps,
+        ),
+      ),
+    );
+    for (const r of results) expect(r.ok).toBe(true);
+    const final = deps.files.get("inbox/log.md") ?? "";
+    const lines = final.split("\n").filter((l) => l.length > 0);
+    expect(lines.length).toBe(N);
+    // Every line-i must appear exactly once.
+    const seen = new Set(lines);
+    expect(seen.size).toBe(N);
+    for (let i = 0; i < N; i++) expect(seen.has(`line-${i}`)).toBe(true);
   });
 });
 

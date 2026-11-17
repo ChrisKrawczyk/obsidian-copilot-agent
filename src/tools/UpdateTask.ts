@@ -36,7 +36,7 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from "./TaskFormat";
-import { editFileImpl } from "./WriteTools";
+import { processFileImpl, ProcessAbort } from "./WriteTools";
 import type { WriteNoteToolsDeps } from "./WriteNoteTools";
 import {
   resolveVaultPath,
@@ -44,7 +44,6 @@ import {
   lookupTFile,
   VaultPathError,
 } from "./VaultPath";
-import type { TFileLike } from "./ReadTools";
 
 export interface UpdateTaskInput {
   path: string;
@@ -115,57 +114,85 @@ export async function updateTaskImpl(
   }
   const fileUnknown = lookupTFile(vaultRel, deps.vault);
   if (!fileUnknown) return { ok: false, reason: "not_found" };
-  const file = fileUnknown as TFileLike;
 
-  let content: string;
-  try {
-    if (deps.vault.read) content = await deps.vault.read(file);
-    else if (deps.vault.cachedRead) content = await deps.vault.cachedRead(file);
-    else return { ok: false, reason: "read_failed", error: "no reader" };
-  } catch (e) {
-    return { ok: false, reason: "read_failed", error: (e as Error).message ?? String(e) };
+  // Compute step runs INSIDE the atomic RMW callback: we split the
+  // observed on-disk content, identify the target line, parse it,
+  // and apply the patch. All errors surface via ProcessAbort so the
+  // atomic section performs no write and no undo entry is recorded.
+  // Structured error and result data are captured through closures
+  // (the callback signature must be `(data: string) => string`).
+  let abortResult: UpdateTaskResult | null = null;
+  let idxOut = -1;
+  let beforeOut = "";
+  let afterOut = "";
+  let changedFieldsOut: string[] = [];
+
+  const wr = await processFileImpl(
+    vaultRel,
+    (content) => {
+      const lines = content.split("\n");
+      const targetIdx = identifyTargetLine(input, lines);
+      if (!targetIdx.ok) {
+        abortResult = targetIdx.err;
+        throw new ProcessAbort("identify_target_failed");
+      }
+      const idx = targetIdx.line;
+      const before = lines[idx];
+
+      const parsedR = parseTaskLine(before);
+      if (!parsedR.ok) {
+        abortResult = { ok: false, reason: "not_a_task", raw: before };
+        throw new ProcessAbort("not_a_task");
+      }
+      const parsed = parsedR.parsed;
+
+      const today = formatYmd(deps.now());
+      const { patched, changedFields } = applyPatch(parsed, input.patch, today);
+      const newLine = parsed.leadingIndent + formatTaskLine(patched, parsed.source);
+
+      idxOut = idx;
+      beforeOut = before;
+      afterOut = newLine;
+      changedFieldsOut = changedFields;
+
+      if (newLine === before) {
+        // No-op: return unchanged content so processFileImpl skips
+        // the write and does not record an undo entry.
+        return content;
+      }
+      lines[idx] = newLine;
+      return lines.join("\n");
+    },
+    deps,
+  );
+
+  if (!wr.ok) {
+    // Structured abort (target-line-based error surfaces the
+    // caller-shaped result).
+    if (abortResult !== null) return abortResult;
+    return { ok: false, reason: "write_failed", error: wr.error };
   }
 
-  const lines = content.split("\n");
-  const targetIdx = identifyTargetLine(input, lines);
-  if (!targetIdx.ok) return targetIdx.err;
-  const idx = targetIdx.line;
-  const before = lines[idx];
-
-  const parsedR = parseTaskLine(before);
-  if (!parsedR.ok) return { ok: false, reason: "not_a_task", raw: before };
-  const parsed = parsedR.parsed;
-
-  const today = formatYmd(deps.now());
-  const { patched, changedFields } = applyPatch(parsed, input.patch, today);
-  const newLine = parsed.leadingIndent + formatTaskLine(patched, parsed.source);
-
-  if (newLine === before) {
+  if (!wr.changed) {
     return {
       ok: true,
       path: vaultRel,
-      line: idx + 1,
+      line: idxOut + 1,
       changed: false,
       changedFields: [],
-      before,
-      after: before,
+      before: beforeOut,
+      after: beforeOut,
     };
   }
-
-  lines[idx] = newLine;
-  const newContent = lines.join("\n");
-
-  const wr = await editFileImpl(vaultRel, newContent, deps);
-  if (!wr.ok) return { ok: false, reason: "write_failed", error: wr.error };
 
   return {
     ok: true,
     path: vaultRel,
-    line: idx + 1,
+    line: idxOut + 1,
     changed: true,
-    changedFields,
-    before,
-    after: newLine,
+    changedFields: changedFieldsOut,
+    before: beforeOut,
+    after: afterOut,
     undoId: wr.undoId,
     undoSurface: "journal",
   };

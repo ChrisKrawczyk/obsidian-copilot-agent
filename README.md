@@ -2,7 +2,30 @@
 
 An [Obsidian](https://obsidian.md) plugin that brings an in-vault AI agent powered by the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 
-> **Status:** v0.9 — Adds an inline readiness indicator on the chat composer and automatic tool refresh when slow-authenticating MCP servers connect after the composer is already open. Builds on v0.8's importable preset packs, v0.7's authenticated MCP servers, v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+> **Status:** v0.10 — Six new / upgraded read-only vault-navigation tools (`search_content` modes, `resolve_link`, `get_outlinks`, `get_note_structure`, `search_vault`, `related_notes`) let the agent locate, inspect, and traverse notes without asking the human. Builds on v0.9's readiness indicator + live MCP tool refresh, v0.8's importable preset packs, v0.7's authenticated MCP servers, v0.6's BRAT install + in-plugin Copilot CLI binary fetcher, v0.5's MCP client support, v0.4's per-conversation model picker, v0.3's multi-conversation persistence, and v0.2's vault-aware tools. Working end-to-end on Windows desktop; macOS/Linux ship as **alpha — please report issues**.
+
+## Install
+
+This plugin ships via [BRAT (Beta Reviewers Auto-update Tool)](https://github.com/TfTHacker/obsidian42-brat) rather than the official Community Plugins catalog. Requires **Obsidian desktop** (mobile is not supported — the plugin ships a native Copilot CLI binary).
+
+1. In Obsidian → **Settings → Community plugins**, install and enable **BRAT** from the catalog.
+2. Open the command palette and run **BRAT: Add a beta plugin for testing**.
+3. Paste `ChrisKrawczyk/obsidian-copilot-agent` and confirm. BRAT will grab the latest release (`v0.10.0` at time of writing).
+4. Once BRAT finishes, go to **Settings → Community plugins** and enable **Copilot Agent**.
+5. On first enable the plugin downloads a platform-specific Copilot CLI binary (~150 MB, one time). Then click **Connect** in **Settings → Copilot Agent** to run the GitHub OAuth device-flow sign-in.
+
+Detailed platform matrix, first-launch behavior, and known limitations are documented in the [full install section below](#install-via-brat).
+
+## What's new in v0.10
+
+- **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
+  - **`search_content` modes.** The existing full-text search tool now accepts `mode: "substring" | "regex" | "fuzzy"` and returns match spans for precise re-reads. Omitting `mode` preserves v0.9 behavior.
+  - **`resolve_link`.** Resolves a wikilink or markdown link to its target vault path, source-aware — matches Obsidian's own click behavior.
+  - **`get_outlinks`.** Lists a note's outgoing links + embeds with resolved paths and link-form (wikilink vs. markdown) discrimination.
+  - **`get_note_structure`.** Returns a note's headings, sections, and block IDs with line numbers — no body prose. Use before `read_file` to plan a targeted read.
+  - **`search_vault`.** Compound query: AND-combines tag / folder / `modifiedSince` / text filters in one call. Short-circuits without body reads when structural filters exclude every note.
+  - **`related_notes`.** Ranks vault neighbours by shared tags + shared outlinks + shared backlinks (weighted 3 / 2 / 1).
+- **Full quick reference:** [`docs/agent-vault-tools.md`](docs/agent-vault-tools.md).
 
 ## What's new in v0.9
 
@@ -250,7 +273,7 @@ Before any non-private distribution we register a dedicated OAuth App (tracked a
 
 The Copilot SDK delegates model and tool execution to the `@github/copilot` CLI runtime. Obsidian.exe ships with the `ELECTRON_RUN_AS_NODE` Electron fuse disabled for security, so we can't reuse it as the Node interpreter. Instead we ship the platform-specific single-executable application (SEA) the npm package provides.
 
-As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from `@github/copilot-sdk`'s transitive `@github/copilot` dependency. See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
+As of v0.6, the binary is **not vendored in the GitHub Release** — the plugin fetches it on first launch from `registry.npmjs.org`, verifies the sha512 against the registry's published metadata, and extracts only the platform-specific binary file (no JavaScript from the package is executed). Subsequent launches reuse the cached binary via a `.copilot-binary-version` marker file. The pinned version is baked at build time from the exact-pinned `@github/copilot` devDependency, which must match the CLI version the installed `@github/copilot-sdk` targets (`COPILOT_CLI_VERSION` in the SDK's `dist/cliVersion.js`). See [`.paw/work/packaging-release/Docs.md`](.paw/work/packaging-release/Docs.md) for the full trust chain.
 
 ## Tests
 

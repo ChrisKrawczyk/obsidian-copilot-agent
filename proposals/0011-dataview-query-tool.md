@@ -108,8 +108,10 @@ manifests as an *optional peer* the user separately installs.
 3. **Registration timing.** Dataview may load *after* our plugin. Do we
    register at Obsidian layout-ready, or subscribe to
    `workspace.on('plugins-loaded')` (private) and add the tool
-   mid-session using the same swap mechanism that shipped in v0.9 for
-   MCP tool refresh?
+   mid-session? Mid-session addition is now cheap: since the SDK
+   `session.setTools` adoption (proposal 0003), every live
+   conversation can be re-tooled in place at the next turn boundary
+   via `AgentSession.applyToolListChange()`, with no session swap.
 
 ## Not doing
 
