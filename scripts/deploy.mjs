@@ -22,7 +22,7 @@
  *   - Settings → Community plugins → toggle Copilot Agent off + on.
  *
  * The `copilot.exe` binary is intentionally NOT redeployed every time
- * (it's ~150 MB and changes only when @github/copilot-sdk is bumped).
+ * (it's ~150 MB and changes only when the pinned @github/copilot devDependency is bumped).
  * Run with `--with-binary` to force-copy the platform binary as well.
  */
 import { existsSync, readFileSync, copyFileSync, statSync, writeFileSync } from "node:fs";

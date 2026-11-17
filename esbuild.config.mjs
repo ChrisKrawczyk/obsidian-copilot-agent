@@ -17,6 +17,9 @@ const ctx = await esbuild.context({
   external: [
     "obsidian",
     "electron",
+    // Native FFI dep of @github/copilot-sdk, only loaded by the in-process
+    // transport. We always use stdio with an explicit CLI path.
+    "koffi",
     ...builtinModules,
     ...builtinModules.map((m) => `node:${m}`),
   ],
