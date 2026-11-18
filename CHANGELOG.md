@@ -3,6 +3,25 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.10.5] - 2026-11-17
+
+Settings fixes for Obsidian 1.15, which opens Settings in its own popout window. Importing a preset pack works again, and the Add server form is easier to reach.
+
+### Fixed
+
+- **"Import pack from file…" did nothing.** The hidden file input was created in the main window's document. Chromium only opens a file chooser from the window the user clicked in, so the request was silently blocked. The picker now opens in the Settings window. (`src/settings/presets/packFileIO.ts`.)
+- **Settings appeared to close after importing a pack or removing a server.** Those confirmation prompts used the main window's `confirm()`, which brought the main window in front of Settings. Prompts now come from the Settings window. (`src/settings/McpServersSection.ts`.)
+
+### Changed
+
+- **The Add server form opens where you can see it.** **Preset** is now the first field, and the form scrolls into view and focuses it. Edit forms also scroll into view.
+- **Pack import confirms what to do next.** A Notice reports how many presets were imported and points to **Add server → Preset**. (Importing a pack still doesn't configure or connect any server.)
+
+### Under the hood
+
+- 1632 tests, all passing.
+
+
 ## [0.10.4] - 2026-11-17
 
 Live MCP tool refresh, done properly. Open conversations now pick up MCP tool changes in place at the next turn boundary, with history intact, using the Copilot SDK's native `session.setTools`. Two cases that previously left stale tools in open conversations are now covered: removing a server and a server changing its tool list.
