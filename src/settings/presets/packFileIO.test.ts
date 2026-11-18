@@ -35,6 +35,45 @@ describe("PackFileReader injection contract", () => {
   });
 });
 
+describe("createDesktopPackFileReader (Electron runtime)", () => {
+  test("opens the picker in the caller's document, not the global one", async () => {
+    (globalThis as Record<string, unknown>).window = {
+      process: { versions: { electron: "43.0.0" } },
+    };
+    const listeners: Record<string, () => void> = {};
+    const file = { size: 2, name: "p.json", text: async () => "{}" };
+    const input = {
+      type: "",
+      accept: "",
+      style: {} as Record<string, string>,
+      files: null as unknown,
+      addEventListener: (name: string, fn: () => void) => {
+        listeners[name] = fn;
+      },
+      remove: vi.fn(),
+      click: vi.fn(() => {
+        input.files = [file];
+        listeners.change?.();
+      }),
+    };
+    const ownerDocument = {
+      createElement: vi.fn(() => input),
+      body: { appendChild: vi.fn() },
+    };
+    try {
+      const r = await createDesktopPackFileReader().pickAndReadPackFile(
+        ownerDocument as unknown as Document,
+      );
+      expect(ownerDocument.createElement).toHaveBeenCalledWith("input");
+      expect(ownerDocument.body.appendChild).toHaveBeenCalledWith(input);
+      expect(input.click).toHaveBeenCalledOnce();
+      expect(r).toEqual({ ok: true, text: "{}", sourcePath: "p.json", byteLength: 2 });
+    } finally {
+      delete (globalThis as Record<string, unknown>).window;
+    }
+  });
+});
+
 describe("createDesktopPackFileReader (non-Electron runtime)", () => {
   test("returns io error when not running in Electron", async () => {
     const reader = createDesktopPackFileReader();

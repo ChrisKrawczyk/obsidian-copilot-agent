@@ -40,6 +40,10 @@ class FakeElement {
     this.listeners.set(name, [...(this.listeners.get(name) ?? []), fn]);
   }
   click(): void { for (const fn of this.listeners.get("click") ?? []) fn({ target: this }); }
+  scrolledIntoView = false;
+  focused = false;
+  scrollIntoView(): void { this.scrolledIntoView = true; }
+  focus(): void { this.focused = true; }
   toggleAttribute(key: string, force?: boolean): void {
     if (force === false) this.attributes.delete(key);
     else this.attributes.set(key, "");
@@ -236,6 +240,51 @@ describe("McpServersSection — pack import (FR-001/FR-002/SC-001/SC-003/SC-007)
     expect(importPrompt).toBeDefined();
     expect(importPrompt!.body).toContain("Vendor Pack");
     expect(importPrompt!.body).toContain("/v.json");
+    await vi.waitFor(() =>
+      expect(ctx.notices).toEqual([
+        'Imported "Vendor Pack" (1 preset). Use Add server → Preset to configure one.',
+      ]),
+    );
+  });
+
+  test("Add form shows Preset first, scrolls into view, and focuses it", async () => {
+    const ctx = await mount();
+    ctx.root.byAria("Add MCP server").click();
+    const dialog = ctx.root.queryAll((e) => e.getAttribute("role") === "dialog")[0];
+    expect(dialog).toBeDefined();
+    const firstFieldCaption = dialog.queryAll((e) => e.className === "copilot-agent-mcp-field-caption")[0];
+    expect(firstFieldCaption.textContent).toBe("Preset");
+    expect(dialog.scrolledIntoView).toBe(true);
+    expect(dialog.byAria("Preset").focused).toBe(true);
+  });
+
+  test("import confirm uses the settings window, not the global window", async () => {
+    const text = JSON.stringify(pack("vendor"));
+    const r = reader({ ok: true, text, sourcePath: "/v.json", byteLength: text.length });
+    const io = memoryIo({});
+    const settings = new McpSettingsStore(io);
+    await settings.load();
+    const packs = new PresetPacksStore(io);
+    await packs.load();
+    const root = new FakeElement();
+    const section = new McpServersSection({
+      store: settings,
+      manager: manager() as never,
+      safetyStore: { revokeGrantsForServer: vi.fn(async () => undefined) },
+      vaultRoot: "C:\\vault",
+      notify: () => undefined,
+      presetPacksStore: packs,
+      packFileReader: r as never,
+    });
+    section.mount(root as never);
+    const confirm = vi.fn(() => false);
+    (root.children[0] as unknown as { ownerDocument: unknown }).ownerDocument = {
+      defaultView: { confirm },
+    };
+    root.byAria("Import preset pack from file").click();
+    await flush();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(packs.snapshot()).toHaveLength(0);
   });
 
   test("confirmNew → declined keeps store empty", async () => {

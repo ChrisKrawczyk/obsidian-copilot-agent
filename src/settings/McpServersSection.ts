@@ -304,6 +304,9 @@ export class McpServersSection {
       attr: { role: "dialog", "aria-label": existing ? "Edit MCP server" : "Add MCP server" },
     });
     child(modal, "h4", { text: existing ? "Edit MCP server" : "Add MCP server" });
+    // The preset dropdown is built further down (it needs the field refs),
+    // but renders into this slot so it appears first in the Add form.
+    const presetSlot = existing ? null : child(modal, "div", { cls: "copilot-agent-mcp-preset-slot" });
     const id = input(modal, "Server ID", existing?.id ?? "", {
       placeholder: "fs-vault",
       hint: "Stable internal slug used for approvals and the tool-name prefix. Lowercase letters, digits, '-' or '_'. Hard to change later — pick something you'll keep.",
@@ -455,7 +458,8 @@ export class McpServersSection {
     // use the pure `applyEffectivePresetToForm` helper, then render the
     // same non-blocking preflight hint plus any templatized-secret hint.
     // Import/render remains inert; dropdown selection may probe PATH.
-    if (!existing) {
+    let initialFocus: HTMLElement = existing ? name : id;
+    if (presetSlot) {
       const packsSnapshot = this.options.presetPacksStore?.snapshot() ?? [];
       const registry = buildEffectiveRegistry(BUILT_IN_PACK, packsSnapshot);
       const dropdownModel = buildPresetDropdownModel(registry);
@@ -464,9 +468,10 @@ export class McpServersSection {
         dropdownModel.emptyOption.value,
         ...dropdownModel.groups.flatMap((g) => g.options.map((o) => o.value)),
       ];
-      const presetSelect = select(modal, "Preset", presetIds, "", {
+      const presetSelect = select(presetSlot, "Preset", presetIds, "", {
         hint: "Optional. Pre-fills the form for a known MCP service.",
       });
+      initialFocus = presetSelect;
       // Rewrite option text where supported (real DOM). For real-DOM
       // builds we also re-arrange options into <optgroup> elements so
       // imported packs visually cluster under their pack label. The
@@ -483,7 +488,7 @@ export class McpServersSection {
         }
         applyOptgroupsToSelect(presetSelect, dropdownModel, effectiveById);
       }
-      const presetHint = child(modal, "div", {
+      const presetHint = child(presetSlot, "div", {
         cls: "copilot-agent-mcp-preset-hint",
         attr: { role: "status", "aria-label": "Preset preflight hint" },
       });
@@ -654,6 +659,7 @@ export class McpServersSection {
         closeForm(modal);
       }).catch((err: unknown) => setText(message, err instanceof Error ? err.message : String(err)));
     });
+    revealForm(modal, initialFocus);
   }
 
   private async saveForm(config: McpServerConfig, existing: McpServerConfig | undefined, denyKeys: string[]): Promise<void> {
@@ -699,7 +705,7 @@ export class McpServersSection {
   }
 
   private async remove(server: McpServerConfig): Promise<void> {
-    if (!confirmRemove(server.name)) return;
+    if (!confirmRemove(server.name, this.hostWindow())) return;
     await this.options.manager.remove(server.id);
     const meta = await this.options.store.removeServer(server.id);
     await this.options.safetyStore.revokeGrantsForServer(server.id);
@@ -912,7 +918,9 @@ export class McpServersSection {
       attr: { "aria-label": "Import preset pack from file" },
     });
     on(importBtn, "click", () => {
-      void this.handleImportPack();
+      void this.handleImportPack(
+        (importBtn as unknown as { ownerDocument?: Document }).ownerDocument,
+      );
     });
 
     const list = child(section, "div", {
@@ -955,14 +963,14 @@ export class McpServersSection {
     });
   }
 
-  private async handleImportPack(): Promise<void> {
+  private async handleImportPack(ownerDocument?: Document): Promise<void> {
     const packsStore = this.options.presetPacksStore;
     const reader = this.options.packFileReader;
     if (!packsStore || !reader) {
       this.notify("[Copilot Agent] Pack import is unavailable in this build.");
       return;
     }
-    const picked = await reader.pickAndReadPackFile();
+    const picked = await reader.pickAndReadPackFile(ownerDocument);
     const outcome = runImportFromReaderResult(picked, (text) =>
       findExistingRecord(packsStore.snapshot(), text),
     );
@@ -994,6 +1002,7 @@ export class McpServersSection {
         if (!ok) return;
         try {
           await applyConfirmedImport(packsStore, outcome.pack, outcome.sourcePath);
+          this.notifyPackImported(outcome.pack);
         } catch (err) {
           this.noticeError(err);
         }
@@ -1005,12 +1014,20 @@ export class McpServersSection {
         if (!ok) return;
         try {
           await applyConfirmedImport(packsStore, outcome.pack, outcome.sourcePath);
+          this.notifyPackImported(outcome.pack);
         } catch (err) {
           this.noticeError(err);
         }
         return;
       }
     }
+  }
+
+  private notifyPackImported(pack: { label: string; presets: readonly unknown[] }): void {
+    const n = pack.presets.length;
+    this.notify(
+      `Imported "${pack.label}" (${n} preset${n === 1 ? "" : "s"}). Use Add server → Preset to configure one.`,
+    );
   }
 
   private async handleRemovePack(packId: string, label: string): Promise<void> {
@@ -1032,10 +1049,22 @@ export class McpServersSection {
     if (this.options.confirmPackAction) {
       return Promise.resolve(this.options.confirmPackAction(title, body));
     }
-    if (typeof window !== "undefined" && typeof window.confirm === "function") {
-      return window.confirm(`${title}\n\n${body}`);
+    const win = this.hostWindow();
+    if (win && typeof win.confirm === "function") {
+      return win.confirm(`${title}\n\n${body}`);
     }
     return true;
+  }
+
+  /**
+   * Window that owns the settings DOM. Obsidian 1.15+ shows Settings in a
+   * popout window; native dialogs opened from the main `window` raise the
+   * main window over it, so the settings popout appears to close.
+   */
+  private hostWindow(): Window | undefined {
+    const view = (this.root as unknown as { ownerDocument?: Document } | null)?.ownerDocument?.defaultView;
+    if (view) return view;
+    return typeof window !== "undefined" ? window : undefined;
   }
 }
 
@@ -1190,10 +1219,17 @@ function setHidden(el: DomEl | null, hidden: boolean): void {
   else el.removeAttribute("hidden");
 }
 
-function confirmRemove(name: string): boolean {
+function confirmRemove(name: string, win: Window | undefined): boolean {
   const prompt = `Remove MCP server "${name}"?`;
-  if (typeof window !== "undefined" && typeof window.confirm === "function") return window.confirm(prompt);
+  if (win && typeof win.confirm === "function") return win.confirm(prompt);
   return true;
+}
+
+function revealForm(modal: HTMLElement, focusTarget: HTMLElement): void {
+  if (typeof modal.scrollIntoView === "function") {
+    modal.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+  if (typeof focusTarget.focus === "function") focusTarget.focus({ preventScroll: true });
 }
 
 function envToText(env: Record<string, string>): string {
