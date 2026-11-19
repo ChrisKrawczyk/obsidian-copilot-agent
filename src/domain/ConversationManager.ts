@@ -33,11 +33,13 @@ import type {
 } from "./ConversationRuntime";
 import type { UndoJournalPersistOp, UndoEntry } from "./UndoJournal";
 import type { ConversationsStore } from "../persistence/ConversationsStore";
-import type {
-  PersistedContextBoundary,
-  PersistedConversation,
-  PersistedMessage,
-  PersistedUndoEntry,
+import {
+  cloneSafetyGrants,
+  type PersistedContextBoundary,
+  type PersistedConversation,
+  type PersistedMessage,
+  type PersistedSafetyGrants,
+  type PersistedUndoEntry,
 } from "../persistence/PersistedShape";
 
 /** Spec FR-002 soft cap. */
@@ -226,6 +228,9 @@ export class ConversationManager {
       if (c.contextBoundary !== undefined) {
         meta.contextBoundary = cloneBoundary(c.contextBoundary);
       }
+      if (c.safetyGrants !== undefined) {
+        meta.safetyGrants = cloneSafetyGrants(c.safetyGrants);
+      }
       this.conversations.set(c.id, meta);
       // Defensive: ensure the store has a row for every catalog entry
       // (so `setActiveId(meta.id)` further down can't throw). In the
@@ -246,6 +251,9 @@ export class ConversationManager {
               : {}),
             ...(c.contextBoundary !== undefined
               ? { contextBoundary: c.contextBoundary }
+              : {}),
+            ...(c.safetyGrants !== undefined
+              ? { safetyGrants: c.safetyGrants }
               : {}),
             messages: c.messages,
             undoEntries: c.undoEntries,
@@ -494,6 +502,20 @@ export class ConversationManager {
     conv.contextBoundary = cloneBoundary(boundary);
     this.persistMetadataOnly(conv);
     this.emit({ kind: "metadata-changed", id });
+  }
+
+  /**
+   * Replace the conversation's saved "approve for session" grants.
+   * Silently ignores unknown ids: grants can change while a removed
+   * conversation's runtime is still winding down.
+   */
+  setSafetyGrants(id: string, grants: PersistedSafetyGrants | null): void {
+    const conv = this.conversations.get(id);
+    if (!conv) return;
+    const empty = !grants || Object.keys(grants).length === 0;
+    if (empty && !conv.safetyGrants) return;
+    conv.safetyGrants = empty ? null : cloneSafetyGrants(grants);
+    this.persistMetadataOnly(conv);
   }
 
   /**
@@ -906,6 +928,9 @@ function cloneMeta(c: Conversation): Conversation {
   }
   if (c.contextBoundary !== undefined) {
     out.contextBoundary = cloneBoundary(c.contextBoundary);
+  }
+  if (c.safetyGrants !== undefined) {
+    out.safetyGrants = cloneSafetyGrants(c.safetyGrants);
   }
   return out;
 }

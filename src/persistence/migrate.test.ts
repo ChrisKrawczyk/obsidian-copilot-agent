@@ -344,4 +344,17 @@ describe("migrate — v0.4 modelId round-trip", () => {
     expect(r.state.conversations[0].sdkSessionId).toBeNull();
     expect("contextBoundary" in r.state.conversations[0]).toBe(false);
   });
+
+  it("keeps well-formed safetyGrants entries and drops junk", () => {
+    const r = migrate(
+      v2Blob({
+        safetyGrants: { vault: "yes", mcp: ["mcp:s:e:t", 7, ""], builtin: "shell" },
+      }),
+    );
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].safetyGrants).toEqual({ mcp: ["mcp:s:e:t"] });
+
+    const empty = migrate(v2Blob({ safetyGrants: { vault: false } }));
+    expect("safetyGrants" in empty.state.conversations[0]).toBe(false);
+  });
 });

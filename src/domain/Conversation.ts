@@ -8,11 +8,13 @@
  * lazily by `ConversationManager` on first activation.
  */
 
-import type {
-  PersistedContextBoundary,
-  PersistedConversation,
-  PersistedMessage,
-  PersistedUndoEntry,
+import {
+  cloneSafetyGrants,
+  type PersistedContextBoundary,
+  type PersistedConversation,
+  type PersistedMessage,
+  type PersistedSafetyGrants,
+  type PersistedUndoEntry,
 } from "../persistence/PersistedShape";
 
 export interface Conversation {
@@ -41,6 +43,8 @@ export interface Conversation {
   sdkSessionId?: string | null;
   /** UI-only marker: earlier messages weren't restored to the agent. */
   contextBoundary?: PersistedContextBoundary | null;
+  /** Per-conversation "approve for session" grants. */
+  safetyGrants?: PersistedSafetyGrants | null;
 }
 
 /** Snapshot of the per-conversation persisted shape needed for runtime
@@ -64,6 +68,7 @@ export function conversationFromPersisted(
       modelId: p.modelId === undefined ? undefined : p.modelId,
       sdkSessionId: p.sdkSessionId === undefined ? undefined : p.sdkSessionId,
       contextBoundary: cloneBoundary(p.contextBoundary),
+      safetyGrants: cloneSafetyGrants(p.safetyGrants),
     },
     messages: p.messages,
     undoEntries: p.undoEntries,
@@ -82,6 +87,7 @@ export function conversationToPersistedMetadata(
     modelId: c.modelId === undefined ? undefined : c.modelId,
     sdkSessionId: c.sdkSessionId === undefined ? undefined : c.sdkSessionId,
     contextBoundary: cloneBoundary(c.contextBoundary),
+    safetyGrants: cloneSafetyGrants(c.safetyGrants),
   };
 }
 

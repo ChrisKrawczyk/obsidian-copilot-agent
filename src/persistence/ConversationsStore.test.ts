@@ -288,7 +288,11 @@ describe("ConversationsStore — v0.4 modelId round-trip", () => {
       state: "sent" as const,
     };
     store.upsertConversation(
-      newConv("c1", { sdkSessionId: "sess-1", contextBoundary: boundary }),
+      newConv("c1", {
+        sdkSessionId: "sess-1",
+        contextBoundary: boundary,
+        safetyGrants: { vault: true, builtin: ["shell"] },
+      }),
     );
     await store.flushNow();
 
@@ -301,6 +305,10 @@ describe("ConversationsStore — v0.4 modelId round-trip", () => {
     await store2.load();
     expect(store2.listConversations()[0].sdkSessionId).toBe("sess-1");
     expect(store2.listConversations()[0].contextBoundary).toEqual(boundary);
+    expect(store2.listConversations()[0].safetyGrants).toEqual({
+      vault: true,
+      builtin: ["shell"],
+    });
   });
 });
 

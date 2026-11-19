@@ -10,6 +10,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - **The agent remembers a conversation after Obsidian restarts or the plugin reloads.** Previously the transcript reappeared but every reload started a new agent session, so the agent lost earlier context. Each conversation now saves its Copilot session id and resumes that session, with its full history, the next time you send a message. (`src/sdk/AgentSession.ts`, `src/main.ts`.)
 - **Deleting a conversation deletes its agent session.** The session's folder under the plugin's `session-state/` directory is removed too. Folders left by earlier versions are not cleaned up.
 
+### Changed
+
+- **"Approve for Session" grants belong to the conversation and survive reloads.** Previously one in-memory set of grants covered every conversation and was cleared on reload, so a resumed conversation asked again for tools you'd already approved. Grants are now saved with the conversation and apply only to it. Deleting or resetting the conversation clears them. MCP grants are still tied to the server's trust epoch, so changing the server's configuration revokes them. (`src/domain/SafetyPolicy.ts`, `src/main.ts`.)
+
 ### Added
 
 - **"Include earlier context" when a session can't be resumed.** This covers conversations saved before this fix and sessions that are missing or unreadable. A divider marks where the agent's memory starts. **Include earlier context** opens an editable excerpt above the composer: up to 12 recent messages, about 8 KB, with tool names but no tool arguments or results. The excerpt is sent once with your next message and isn't added to your message in the transcript. The agent is told to treat it as untrusted history. **Dismiss** hides the offer. (`src/domain/priorContextExcerpt.ts`, `src/ui/ChatView.ts`.)

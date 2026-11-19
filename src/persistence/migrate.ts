@@ -29,6 +29,7 @@
 import {
   CURRENT_SCHEMA_VERSION,
   type PersistedContextBoundary,
+  type PersistedSafetyGrants,
   type PersistedConversation,
   type PersistedConversationsState,
   type PersistedMessage,
@@ -169,6 +170,7 @@ function validateConversation(raw: unknown): PersistedConversation | null {
         : null;
   }
   const contextBoundary = validateContextBoundary(c.contextBoundary);
+  const safetyGrants = validateSafetyGrants(c.safetyGrants);
 
   const messages: PersistedMessage[] = [];
   for (const m of c.messages) {
@@ -201,7 +203,30 @@ function validateConversation(raw: unknown): PersistedConversation | null {
   if (contextBoundary !== undefined) {
     out.contextBoundary = contextBoundary;
   }
+  if (safetyGrants !== undefined) {
+    out.safetyGrants = safetyGrants;
+  }
   return out;
+}
+
+/** Lenient: keeps only well-formed grant entries; never fatal. */
+function validateSafetyGrants(raw: unknown): PersistedSafetyGrants | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as Record<string, unknown>;
+  const strings = (v: unknown): string[] | undefined => {
+    if (!Array.isArray(v)) return undefined;
+    const out = v.filter((s): s is string => typeof s === "string" && s.length > 0);
+    return out.length > 0 ? out : undefined;
+  };
+  const out: PersistedSafetyGrants = {};
+  if (g.vault === true) out.vault = true;
+  const extraVault = strings(g.extraVault);
+  if (extraVault) out.extraVault = extraVault;
+  const mcp = strings(g.mcp);
+  if (mcp) out.mcp = mcp;
+  const builtin = strings(g.builtin);
+  if (builtin) out.builtin = builtin;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** Lenient: malformed markers are dropped (undefined), never fatal. */

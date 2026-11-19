@@ -662,6 +662,20 @@ describe("ConversationManager — setSdkSessionId / setContextBoundary", () => {
     expect(row?.sdkSessionId).toBe("sess-1");
     expect(row?.contextBoundary?.reason).toBe("resume-failed");
   });
+
+  test("setSafetyGrants persists, survives metadata writes, and clears to null", () => {
+    const { m, upsertSpy, state } = setup();
+    m.setSafetyGrants("conv-1", { builtin: ["shell"] });
+    m.rename("conv-1", "Renamed");
+    expect(state.byId.get("conv-1")?.safetyGrants).toEqual({ builtin: ["shell"] });
+
+    m.setSafetyGrants("conv-1", {});
+    expect(state.byId.get("conv-1")?.safetyGrants).toBeNull();
+    const calls = upsertSpy.mock.calls.length;
+    m.setSafetyGrants("conv-1", {});
+    expect(upsertSpy).toHaveBeenCalledTimes(calls);
+    expect(() => m.setSafetyGrants("nope", { vault: true })).not.toThrow();
+  });
 });
 
 // v0.4 (model-picker) Phase 1: per-conversation modelId binding lives

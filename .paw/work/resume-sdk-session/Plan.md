@@ -97,3 +97,11 @@ Deferred (follow-ups):
 - Deleting a conversation while signed out or with a failed delete RPC leaves its session folder. Needs a persisted pending-delete queue; it fits with cleaning up the existing orphaned folders.
 - Deleting a conversation races with re-activating it during runtime disposal. This is pre-existing `ConversationManager` behavior.
 - A failed resume is only discovered during the first send, which goes out without earlier context (the known deviation above). Fixing it would need eager init on activation.
+
+## Scope addition: per-conversation session grants
+
+Found in manual testing: after a reload, a resumed conversation asked again for tools approved with **Approve for Session**. The grants lived in one in-memory `SafetyState` shared by all conversations (spec FR-013). The user chose per-conversation grants saved with the chat.
+- `SafetyState` takes initial grants and an `onChange` callback, and exposes `snapshot()`. `main.ts` builds one per runtime from `metadata.safetyGrants` and persists through `ConversationManager.setSafetyGrants`.
+- `safetyGrants` flows through `PersistedShape`, `migrate` (lenient), the `ConversationsStore` clone, `Conversation` conversions and `ConversationManager`.
+- Reset clears them. Delete discards them with the conversation. MCP keys embed the trust epoch, so a change to the server's configuration revokes them.
+- The prompt help text, README and CHANGELOG describe the new scope.

@@ -401,7 +401,6 @@ export default class CopilotAgentPlugin extends Plugin {
     }
     const exposeRawFsToolsAtStartup =
       safetySettingsStore.snapshot().exposeRawFsTools;
-    const safetyState = new SafetyState();
     const vaultRoot =
       (this.app.vault.adapter as { getBasePath?: () => string }).getBasePath?.() ??
       baseDirectory;
@@ -712,6 +711,9 @@ export default class CopilotAgentPlugin extends Plugin {
           builtinToolNames: vaultTools.map((tool) => tool.name),
           notify: (message) => new Notice(message, 8000),
         });
+      const safetyState = new SafetyState(metadata.safetyGrants, (grants) =>
+        conversationManager.setSafetyGrants(metadata.id, grants),
+      );
 
       const session = new CopilotAgentSession({
         cliPath,
@@ -756,6 +758,7 @@ export default class CopilotAgentPlugin extends Plugin {
               }
             } else if (info.cause === "reset") {
               conversationManager.setContextBoundary(metadata.id, null);
+              safetyState.clear();
             }
           } catch (err) {
             console.warn("[copilot-agent] persisting SDK session id failed", err);

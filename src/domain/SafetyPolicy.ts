@@ -29,6 +29,7 @@ export interface SafetyDecisionResult {
 }
 
 import type { McpServerId, McpTrustEpoch } from "../mcp/McpTypes";
+import type { PersistedSafetyGrants } from "../persistence/PersistedShape";
 
 export interface SafetyPolicyInput {
   source: SafetySource;
@@ -58,8 +59,10 @@ export interface SafetyConfig {
 }
 
 /**
- * In-memory session-grants tracked by SafetyPolicy. Cleared on plugin
- * reload, conversation reset, or Obsidian restart per spec FR-013.
+ * Session-grants tracked by SafetyPolicy, one instance per conversation.
+ * They are saved with the conversation (via `onChange`) so they survive
+ * reloads together with the resumed SDK session, and cleared when the
+ * conversation is reset. Deleting the conversation discards them.
  *
  * Grants are intentionally narrow: a vault-write session grant covers
  * the WHOLE vault scope; an MCP grant covers a single exact
@@ -74,11 +77,24 @@ export class SafetyState {
   private readonly mcpGranted = new Set<string>();
   private readonly builtinGranted = new Set<string>();
 
+  constructor(
+    initial?: PersistedSafetyGrants | null,
+    private readonly onChange?: (grants: PersistedSafetyGrants) => void,
+  ) {
+    if (!initial) return;
+    this.vaultGranted = initial.vault === true;
+    for (const k of initial.extraVault ?? []) if (k) this.extraVaultGranted.add(k);
+    for (const k of initial.mcp ?? []) if (k) this.mcpGranted.add(k);
+    for (const k of initial.builtin ?? []) if (k) this.builtinGranted.add(k);
+  }
+
   grantVault(): void {
+    if (this.vaultGranted) return;
     this.vaultGranted = true;
+    this.changed();
   }
   grantExtraVault(rootPath: string): void {
-    if (rootPath) this.extraVaultGranted.add(rootPath);
+    if (rootPath) this.addTo(this.extraVaultGranted, rootPath);
   }
   grantMcp(
     serverId: McpServerId,
@@ -86,11 +102,11 @@ export class SafetyState {
     trustEpoch: McpTrustEpoch,
   ): void {
     const key = formatMcpGrantKey(serverId, toolName, trustEpoch);
-    if (key) this.mcpGranted.add(key);
+    if (key) this.addTo(this.mcpGranted, key);
   }
   /** Grant by kind (e.g. "shell") or by tool name (for custom-tool kind). */
   grantBuiltin(key: string): void {
-    if (key) this.builtinGranted.add(key);
+    if (key) this.addTo(this.builtinGranted, key);
   }
 
   isVaultGranted(): boolean {
@@ -111,12 +127,42 @@ export class SafetyState {
     return this.builtinGranted.has(key);
   }
 
-  /** Clear all session grants. Called on plugin reload / clear conversation. */
+  /** Clear all session grants. Called on conversation reset. */
   clear(): void {
+    const had =
+      this.vaultGranted ||
+      this.extraVaultGranted.size > 0 ||
+      this.mcpGranted.size > 0 ||
+      this.builtinGranted.size > 0;
     this.vaultGranted = false;
     this.extraVaultGranted.clear();
     this.mcpGranted.clear();
     this.builtinGranted.clear();
+    if (had) this.changed();
+  }
+
+  snapshot(): PersistedSafetyGrants {
+    const out: PersistedSafetyGrants = {};
+    if (this.vaultGranted) out.vault = true;
+    if (this.extraVaultGranted.size > 0) out.extraVault = [...this.extraVaultGranted];
+    if (this.mcpGranted.size > 0) out.mcp = [...this.mcpGranted];
+    if (this.builtinGranted.size > 0) out.builtin = [...this.builtinGranted];
+    return out;
+  }
+
+  private addTo(set: Set<string>, key: string): void {
+    if (set.has(key)) return;
+    set.add(key);
+    this.changed();
+  }
+
+  private changed(): void {
+    if (!this.onChange) return;
+    try {
+      this.onChange(this.snapshot());
+    } catch (err) {
+      console.warn("[copilot-agent] persisting session grants failed", err);
+    }
   }
 }
 

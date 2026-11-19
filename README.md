@@ -250,7 +250,7 @@ The plugin enforces a single deny-by-default permission gate that every mutating
 SafetyPolicy decides among `auto-apply` (no prompt), `require-approval` (chat-inline Approve/Reject), or `reject`, based on:
 
 1. The configured default mode (v0.1 default: `require-approval`).
-2. Per-call session grants ("Approve for session" on a prompt).
+2. Per-conversation session grants ("Approve for session" on a prompt). They're saved with the conversation, so they last across reloads, and they apply only to that conversation. MCP grants stop applying when the server's configuration changes.
 3. Persistent settings — path allowlist (vault-relative directories that skip the prompt) and per-built-in auto-approve toggles.
 
 After any approved built-in vault write, an **Undo** affordance appears on the tool-call block and reverses the change. MCP calls intentionally have no Undo because they may affect external systems outside the vault.
