@@ -9,6 +9,7 @@ import {
   type SdkPermissionResult,
   type SdkSession,
   type SdkTool,
+  type StreamEvent,
 } from "./AgentSession";
 import { denyAll } from "../domain/PermissionDecision";
 import { SafetyState, formatMcpGrantKey } from "../domain/SafetyPolicy";
@@ -781,10 +782,11 @@ describe("CopilotAgentSession", () => {
     const ret = await iter.return!();
     expect(ret.done).toBe(true);
     // Generator's finally must have aborted the SDK turn and
-    // unsubscribed each event subscription exactly once. Phase 5
-    // subscribes to delta + tool.start + tool.complete = 3 subs.
+    // unsubscribed each event subscription exactly once: delta,
+    // tool.start, tool.complete, user.message, assistant.message,
+    // session.idle and session.error.
     expect(abortCalls).toBe(1);
-    expect(unsubCalls).toBe(3);
+    expect(unsubCalls).toBe(7);
 
     await agent.dispose();
   });
@@ -2804,5 +2806,361 @@ describe("CopilotAgentSession — applyToolListChange (session.setTools)", () =>
     } finally {
       debugSpy.mockRestore();
     }
+  });
+});
+
+describe("CopilotAgentSession follow-ups (steering and queueing)", () => {
+  type Handler = (event: unknown) => void;
+
+  function wireBus(h: FakeHandles) {
+    const handlers = new Map<string, Handler>();
+    h.session.on = ((eventType: string, handler: Handler) => {
+      handlers.set(eventType, handler);
+      return () => handlers.delete(eventType);
+    }) as SdkSession["on"];
+    const emit = (type: string, event: Record<string, unknown> = {}) =>
+      handlers.get(type)?.({ type, ...event });
+    const sends: Array<{ prompt: string; mode?: string; clientTurnId?: string }> = [];
+    let n = 0;
+    h.session.send = async (opts) => {
+      sends.push(opts);
+      n += 1;
+      return `msg-${n}`;
+    };
+    const run = deferred<unknown>();
+    h.session.sendAndWait = (prompt) => {
+      h.sendCalls.push(prompt);
+      return run.promise;
+    };
+    return { emit, sends, run, handlers };
+  }
+
+  async function startStream(agent: CopilotAgentSession) {
+    let ready = false;
+    const unsub = agent.onFollowUpAvailabilityChange(() => {
+      ready = agent.canSendFollowUp();
+    });
+    const iter = agent.sendMessageStreaming("first")[Symbol.asyncIterator]();
+    const events: StreamEvent[] = [];
+    let finished = false;
+    const pump = (async () => {
+      try {
+        while (true) {
+          const r = await iter.next();
+          if (r.done) break;
+          events.push(r.value);
+        }
+      } finally {
+        finished = true;
+        unsub();
+      }
+    })();
+    await flush();
+    return { events, pump, isFinished: () => finished, isReady: () => ready };
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  test("steering consumed mid-run splits segments and keeps the stream until idle", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    expect(s.isReady()).toBe(true);
+    expect(agent.canSendFollowUp()).toBe(true);
+    await agent.sendFollowUp("f1", "use bullet points", "steer");
+    expect(bus.sends).toEqual([
+      { prompt: "use bullet points", mode: "immediate", clientTurnId: "f1" },
+    ]);
+
+    bus.emit("assistant.message", { data: { content: "Draft one" } });
+    bus.emit("user.message", {
+      data: { content: "use bullet points", clientTurnId: "f1", delivery: "steering" },
+    });
+    bus.emit("assistant.message", { data: { content: "- one\n- two" } });
+    bus.emit("session.idle");
+    bus.run.resolve({ data: { content: "- one\n- two" } });
+    await s.pump;
+
+    expect(s.events).toEqual([
+      {
+        type: "follow_up_consumed",
+        id: "f1",
+        text: "use bullet points",
+        mode: "steer",
+        previousSegmentContent: "Draft one",
+      },
+      { type: "complete", content: "- one\n- two", toolCalls: [] },
+    ]);
+    expect(agent.canSendFollowUp()).toBe(false);
+    await agent.dispose();
+  });
+
+  test("queued follow-up keeps the stream open past sendAndWait until its run idles", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "then summarise", "queue");
+    expect(bus.sends[0]).toMatchObject({ mode: "enqueue", clientTurnId: "q1" });
+
+    bus.emit("assistant.message", { data: { content: "Answer one" } });
+    bus.run.resolve({ data: { content: "Answer one" } });
+    await flush();
+    expect(s.isFinished()).toBe(false);
+
+    bus.emit("user.message", { data: { messageId: "msg-1", delivery: "queued" } });
+    bus.emit("assistant.message", { data: { content: "Summary" } });
+    await flush();
+    expect(s.isFinished()).toBe(false);
+    bus.emit("session.idle");
+    await s.pump;
+
+    expect(s.events.map((e) => e.type)).toEqual(["follow_up_consumed", "complete"]);
+    expect(s.events[1]).toMatchObject({ type: "complete", content: "Summary" });
+    await agent.dispose();
+  });
+
+  test("withdrawing an unread follow-up removes it so the stream ends at settle", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const withdrawCalls: unknown[] = [];
+    h.session.rpc = {
+      queue: {
+        withdrawMessage: async (p) => {
+          withdrawCalls.push(p);
+          return { removed: true };
+        },
+      },
+    };
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "later", "queue");
+    expect(await agent.withdrawFollowUp("q1")).toBe(true);
+    expect(withdrawCalls).toEqual([{ messageId: "msg-1", expectedPrompt: "later" }]);
+
+    bus.run.resolve({ data: { content: "done" } });
+    await s.pump;
+    expect(s.events).toEqual([{ type: "complete", content: "done", toolCalls: [] }]);
+    expect(h.abortCalls).toBe(0);
+    await agent.dispose();
+  });
+
+  test("cancelCurrent ends a stream that is waiting on a queued run", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "later", "queue");
+    bus.run.resolve({ data: { content: "done" } });
+    await flush();
+    expect(s.isFinished()).toBe(false);
+
+    await agent.cancelCurrent();
+    await s.pump;
+    expect(h.abortCalls).toBe(1);
+    expect(s.events).toEqual([{ type: "complete", content: "done", toolCalls: [] }]);
+    await agent.dispose();
+  });
+
+  test("a failed follow-up send rejects and does not hold the stream open", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    h.session.send = async () => {
+      throw new Error("send failed");
+    };
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await expect(agent.sendFollowUp("f1", "x", "steer")).rejects.toThrow("send failed");
+    bus.run.resolve({ data: { content: "done" } });
+    await s.pump;
+    expect(s.events).toEqual([{ type: "complete", content: "done", toolCalls: [] }]);
+    await agent.dispose();
+  });
+
+  test("sendFollowUp rejects when no stream is live", async () => {
+    const h = makeFakeSdk();
+    wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    expect(agent.canSendFollowUp()).toBe(false);
+    await expect(agent.sendFollowUp("f1", "x", "steer")).rejects.toThrow(/No reply/);
+    await agent.dispose();
+  });
+
+  test("an idle that arrives before the send is acknowledged still ends the stream", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const ack = deferred<string>();
+    h.session.send = () => ack.promise;
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    const sending = agent.sendFollowUp("q1", "next", "queue");
+    bus.run.resolve({ data: { content: "one" } });
+    bus.emit("user.message", { data: { clientTurnId: "q1", delivery: "queued" } });
+    bus.emit("assistant.message", { data: { content: "two" } });
+    bus.emit("session.idle");
+    ack.resolve("msg-1");
+    await sending;
+    await s.pump;
+    expect(s.events.at(-1)).toMatchObject({ type: "complete", content: "two" });
+    await agent.dispose();
+  });
+
+  test("a withdrawal that wins after consumption drops the transcript split", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const withdrawn = deferred<{ removed: boolean; interrupted?: boolean }>();
+    h.session.rpc = { queue: { withdrawMessage: () => withdrawn.promise } };
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("f1", "oops", "steer");
+    const result = agent.withdrawFollowUp("f1");
+    await flush();
+    bus.emit("assistant.message_delta", { data: { deltaContent: "Draft" } });
+    bus.emit("assistant.message", { data: { content: "Draft" } });
+    bus.emit("user.message", { data: { clientTurnId: "f1", delivery: "steering" } });
+    bus.emit("assistant.message_delta", { data: { deltaContent: "more" } });
+    bus.emit("assistant.message", { data: { content: "more" } });
+    await flush();
+    expect(s.events).toEqual([{ type: "delta", text: "Draft" }]);
+
+    withdrawn.resolve({ removed: true, interrupted: true });
+    expect(await result).toBe(true);
+    bus.run.resolve({ data: { content: "Draft" } });
+    await s.pump;
+    expect(s.events).toEqual([
+      { type: "delta", text: "Draft" },
+      { type: "complete", content: "Draft", toolCalls: [] },
+    ]);
+    await agent.dispose();
+  });
+
+  test("a withdrawal that loses releases the held consumption in order", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const withdrawn = deferred<{ removed: boolean }>();
+    h.session.rpc = { queue: { withdrawMessage: () => withdrawn.promise } };
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("f1", "keep", "steer");
+    const result = agent.withdrawFollowUp("f1");
+    await flush();
+    bus.emit("user.message", { data: { clientTurnId: "f1", delivery: "steering" } });
+    bus.emit("assistant.message_delta", { data: { deltaContent: "after" } });
+    withdrawn.resolve({ removed: false });
+    expect(await result).toBe(false);
+    bus.emit("session.idle");
+    bus.run.resolve({ data: { content: "x" } });
+    await s.pump;
+    expect(s.events.map((e) => e.type)).toEqual(["follow_up_consumed", "delta", "complete"]);
+    await agent.dispose();
+  });
+
+  test("a session.error in a queued run fails the stream", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "next", "queue");
+    bus.run.resolve({ data: { content: "one" } });
+    bus.emit("session.error", {
+      data: { message: "rate limited", originatingMessageId: "msg-1" },
+    });
+    await expect(s.pump).rejects.toThrow("rate limited");
+    await agent.dispose();
+  });
+
+  test("a follow-up that fails to send after an earlier run idled doesn't hang the stream", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "next", "queue");
+    bus.run.resolve({ data: { content: "one" } });
+    bus.emit("user.message", { data: { clientTurnId: "q1", delivery: "queued" } });
+    bus.emit("assistant.message", { data: { content: "two" } });
+    h.session.send = async () => {
+      throw new Error("send failed");
+    };
+    bus.emit("session.idle");
+    await expect(agent.sendFollowUp("q2", "later", "queue")).rejects.toThrow("send failed");
+    await s.pump;
+    expect(s.events.at(-1)).toMatchObject({ type: "complete", content: "two" });
+    await agent.dispose();
+  });
+
+  test("a split omits the segment's final text when deltas streamed past it", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("f1", "steer", "steer");
+    bus.emit("assistant.message", { data: { content: "Checking…" } });
+    bus.emit("assistant.message_delta", { data: { deltaContent: "Found 3" } });
+    bus.emit("user.message", { data: { clientTurnId: "f1", delivery: "steering" } });
+    bus.emit("session.idle");
+    bus.run.resolve({ data: { content: "x" } });
+    await s.pump;
+    const consumed = s.events.find((e) => e.type === "follow_up_consumed");
+    expect(consumed).toMatchObject({ previousSegmentContent: undefined });
+    await agent.dispose();
+  });
+
+  test("dispose fails a stream that is waiting on a queued run", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    await agent.sendFollowUp("q1", "next", "queue");
+    bus.run.resolve({ data: { content: "one" } });
+    await flush();
+    await agent.dispose();
+    await expect(s.pump).rejects.toThrow(/Session ended/);
+  });
+
+  test("Stop during an in-flight send re-aborts once the send lands", async () => {
+    const h = makeFakeSdk();
+    const bus = wireBus(h);
+    const ack = deferred<string>();
+    h.session.send = () => ack.promise;
+    const agent = makeAgent(h);
+    await agent.init();
+    const s = await startStream(agent);
+
+    const sending = agent.sendFollowUp("q1", "next", "queue");
+    bus.run.resolve({ data: { content: "one" } });
+    await agent.cancelCurrent();
+    await flush();
+    expect(s.isFinished()).toBe(false);
+    ack.resolve("msg-1");
+    await sending;
+    await s.pump;
+    expect(h.abortCalls).toBe(2);
+    await agent.dispose();
   });
 });

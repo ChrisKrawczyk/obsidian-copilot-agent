@@ -16,6 +16,19 @@ This plugin ships via [BRAT (Beta Reviewers Auto-update Tool)](https://github.co
 
 Detailed platform matrix, first-launch behavior, and known limitations are documented in the [full install section below](#install-via-brat).
 
+## Steering a running response
+
+You don't have to wait for the agent to finish. While a response is streaming, the composer stays active:
+
+| Action | How |
+|---|---|
+| **Steer** — add guidance to the turn in progress | Type and press **Enter** |
+| **Queue** — send as the next turn once this one finishes | **Ctrl+Enter** (Cmd+Enter on macOS) |
+| **Take back** an unread message | **↑** in an empty composer, or the **×** on the message |
+| **Stop and send** — abandon the current turn and send now | **⌄** button next to Stop → **Stop and send** |
+
+Unread messages appear above the composer labeled **Steering** or **Queued**. When the agent reads one, the reply so far is closed and your message appears in the transcript, followed by the rest of the response. Stop discards any unread messages (a notice tells you how many).
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
@@ -156,7 +169,7 @@ MCP integration, extra-vault filesystem roots, mid-session settings reload, tag 
 
 ## What's new in v0.2
 
-- **Keyboard-first chat input** — Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty input is rejected. While a response is streaming Enter is inert (Stop is the only cancel path).
+- **Keyboard-first chat input** — Enter sends, Shift+Enter inserts a newline, IME composition is respected, empty input is rejected. While a response is streaming Enter is inert (Stop is the only cancel path). *Superseded:* Enter now steers a running response — see [Steering a running response](#steering-a-running-response).
 - **Vault-aware preamble** — a deterministic system block prepended to the first send of each session: vault root path, timezone, today, and an inventory of the vault-aware tools (so the model picks them instead of `shell` for discovery). Includes an authoring-conventions block covering wikilinks, hash-prefixed tags, and Tasks-plugin checkbox syntax. Configurable via Settings → Copilot Agent → Vault Awareness (Default / Custom / None).
 3. **Thirteen Obsidian-API-backed capabilities** registered alongside the v0.1 tools:
   - Read-only (auto-approved): `get_active_note`, `list_recent_notes`, `find_backlinks`, `vault_tree`, `vault_metadata`, `find_tasks`, plus `open_note` (navigation only).

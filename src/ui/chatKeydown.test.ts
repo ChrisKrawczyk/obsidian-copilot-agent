@@ -68,17 +68,50 @@ describe("decideKeydownAction", () => {
     expect(decideKeydownAction(snapshot({ key: "Tab" }))).toBe("passthrough");
   });
 
-  it("Ctrl+Enter and Cmd+Enter no longer have special meaning (treated as plain Enter)", () => {
-    // The pure decision function does not see ctrlKey/metaKey at all; the
-    // caller is contractually obliged to not bind them. We assert that the
-    // function's behaviour with non-empty text is plain submit, mirroring
-    // Enter. This guards against accidental future divergence in the caller.
-    expect(decideKeydownAction(snapshot())).toBe("submit");
+  it("Ctrl/Cmd+Enter submits like Enter when idle", () => {
+    expect(decideKeydownAction(snapshot({ modKey: true }))).toBe("submit");
   });
 
   it("Shift+Enter beats streaming guard (newline still works while a stream is in flight)", () => {
     expect(
       decideKeydownAction(snapshot({ shiftKey: true, isStreaming: true })),
     ).toBe("newline");
+  });
+
+  describe("follow-ups while streaming", () => {
+    const live = { isStreaming: true, canFollowUp: true };
+
+    it("Enter steers and Ctrl/Cmd+Enter queues", () => {
+      expect(decideKeydownAction(snapshot(live))).toBe("steer");
+      expect(decideKeydownAction(snapshot({ ...live, modKey: true }))).toBe("queue");
+    });
+
+    it("stays inert when follow-ups are not allowed, input is empty, or disconnected", () => {
+      expect(decideKeydownAction(snapshot({ ...live, canFollowUp: false }))).toBe(
+        "noop-prevent",
+      );
+      expect(decideKeydownAction(snapshot({ ...live, hasText: false }))).toBe(
+        "noop-prevent",
+      );
+      expect(decideKeydownAction(snapshot({ ...live, isConnected: false }))).toBe(
+        "noop-prevent",
+      );
+    });
+
+    it("IME composition still passes through", () => {
+      expect(decideKeydownAction(snapshot({ ...live, isComposing: true }))).toBe(
+        "passthrough",
+      );
+    });
+
+    it("ArrowUp in an empty composer retracts when something is retractable", () => {
+      const up = { key: "ArrowUp", keyCode: 38, hasText: false, canRetract: true };
+      expect(decideKeydownAction(snapshot(up))).toBe("retract");
+      expect(decideKeydownAction(snapshot({ ...up, hasText: true }))).toBe("passthrough");
+      expect(decideKeydownAction(snapshot({ ...up, canRetract: false }))).toBe(
+        "passthrough",
+      );
+      expect(decideKeydownAction(snapshot({ ...up, shiftKey: true }))).toBe("passthrough");
+    });
   });
 });
