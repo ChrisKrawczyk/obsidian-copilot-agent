@@ -1484,6 +1484,9 @@ export class ChatView extends ItemView {
       this.sendLabelEl.setText("Stop");
       setIcon(this.sendIconEl, "square");
       this.inputEl.disabled = this.currentAuthKind !== "connected";
+      // The pre-stream disable dropped focus; hand it back so the user
+      // can type a follow-up straight away.
+      this.refocusComposer();
     } else {
       this.sendBtnEl.toggleClass("is-loading", false);
       this.sendBtnEl.toggleClass("mod-warning", false);
@@ -1519,8 +1522,11 @@ export class ChatView extends ItemView {
     this.pendingFollowUps.push({ id, text, mode });
     this.inputEl.value = "";
     this.refreshFollowUpUi();
+    this.refocusComposer();
     try {
       await session.sendFollowUp(id, text, mode);
+      // A menu click may have moved focus while the send was in flight.
+      this.refocusComposer();
     } catch (e) {
       const idx = this.pendingFollowUps.findIndex((f) => f.id === id);
       // Already discarded by Stop/model switch/turn end; don't resurrect it.
@@ -1552,6 +1558,7 @@ export class ChatView extends ItemView {
       if (this.pendingFollowUps.some((f) => f.id === id)) {
         new Notice("Too late to take that back — the agent already has it.", 4000);
       }
+      this.refocusComposer();
       return;
     }
     this.pendingFollowUps = this.pendingFollowUps.filter((f) => f.id !== id);
@@ -1572,6 +1579,22 @@ export class ChatView extends ItemView {
     this.inputEl.focus();
     const end = this.inputEl.value.length;
     this.inputEl.setSelectionRange(end, end);
+  }
+
+  /**
+   * Focus the composer unless the user has moved on to something else
+   * (another pane or input). Focus that fell to `<body>` (a disabled
+   * textarea, a closed menu) or stayed inside this view is reclaimed.
+   */
+  private refocusComposer(): void {
+    if (!this.inputEl || this.inputEl.disabled) return;
+    const doc = this.inputEl.ownerDocument;
+    const active = doc.activeElement;
+    if (active === this.inputEl) return;
+    if (active && active !== doc.body && !this.containerEl.contains(active)) {
+      return;
+    }
+    this.inputEl.focus();
   }
 
   private applyDraftRestore(): void {
