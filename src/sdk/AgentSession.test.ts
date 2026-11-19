@@ -2344,7 +2344,7 @@ describe("CopilotAgentSession — SDK session resume", () => {
     return calls;
   }
 
-  test("resumes the persisted session and skips the preamble", async () => {
+  test("resumes the persisted session and re-sends the preamble", async () => {
     const h = makeFakeSdk();
     const calls = withResume(h, async (id) =>
       Object.assign(Object.create(h.session) as SdkSession, { sessionId: id }),
@@ -2358,8 +2358,109 @@ describe("CopilotAgentSession — SDK session resume", () => {
     await agent.sendMessage("hello");
     expect(calls.resume).toEqual(["sess-1"]);
     expect(calls.create).toBe(0);
-    expect(h.sendCalls).toEqual(["hello"]);
+    expect(h.sendCalls[0]).toBe("PREAMBLE\n\n---\n\n## User request\n\nhello");
     expect(opened).toHaveBeenCalledWith({ sessionId: "sess-1", resumed: true, cause: "init" });
+    await agent.dispose();
+  });
+
+  test("a one-off resume failure keeps the saved session and retries it", async () => {
+    const h = makeFakeSdk();
+    let fail = true;
+    const calls = withResume(h, async (id) => {
+      if (fail) {
+        fail = false;
+        throw new Error("session is locked");
+      }
+      return Object.assign(Object.create(h.session) as SdkSession, { sessionId: id });
+    });
+    h.client.getSessionMetadata = async () => ({ sessionId: "sess-1" });
+    const opened = vi.fn();
+    const agent = makeAgent(h, denyAll, { resumeSessionId: "sess-1", onSessionOpened: opened });
+    await expect(agent.sendMessage("hello")).rejects.toThrow(/Couldn't reopen.*session is locked/);
+    expect(calls.create).toBe(0);
+    expect(opened).not.toHaveBeenCalled();
+    await agent.sendMessage("hello");
+    expect(calls.resume).toEqual(["sess-1", "sess-1"]);
+    expect(calls.create).toBe(0);
+    expect(opened).toHaveBeenCalledWith({ sessionId: "sess-1", resumed: true, cause: "init" });
+    await agent.dispose();
+  });
+
+  test("a session that keeps failing to resume is replaced on the second attempt", async () => {
+    const h = makeFakeSdk();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = withResume(h, async () => {
+      throw new Error("corrupt");
+    });
+    h.client.getSessionMetadata = async () => ({ sessionId: "bad" });
+    const opened = vi.fn();
+    const agent = makeAgent(h, denyAll, { resumeSessionId: "bad", onSessionOpened: opened });
+    await expect(agent.sendMessage("one")).rejects.toThrow(/Couldn't reopen/);
+    await agent.sendMessage("two");
+    expect(calls.create).toBe(1);
+    expect(opened).toHaveBeenCalledWith({
+      sessionId: "new-1",
+      resumed: false,
+      resumeFailedFor: "bad",
+      cause: "init",
+    });
+    warn.mockRestore();
+    await agent.dispose();
+  });
+
+  test("concurrent deferred recoveries resume the session once and keep the user's model pick", async () => {
+    const h = makeFakeSdk();
+    (h.client as { listModels: () => Promise<unknown> }).listModels = async () => {
+      throw new Error("boom");
+    };
+    const calls = withResume(h, async (id) =>
+      Object.assign(Object.create(h.session) as SdkSession, { sessionId: id }),
+    );
+    const { ModelCatalog } = await import("./ModelCatalog");
+    let catalogModelsFn: () => Promise<Array<{ id: string }>> = async () => {
+      throw new Error("catalog down");
+    };
+    const catalog = new ModelCatalog(
+      () =>
+        ({
+          createSession: () => Promise.reject(new Error("x")),
+          listModels: () => catalogModelsFn(),
+        }) as unknown as SdkClient,
+    );
+    await catalog.refresh();
+    let gateCalls = 0;
+    const slow = deferred<void>();
+    const agent = new CopilotAgentSession(
+      {
+        cliPath: "/fake/copilot.exe",
+        gitHubToken: "fake-token",
+        baseDirectory: "/fake/plugin",
+        decider: denyAll,
+        catalog,
+        resumeSessionId: "sess-1",
+        mcpReadinessGate: async () => {
+          gateCalls += 1;
+          await slow.promise;
+        },
+      },
+      async () => h.sdk,
+    );
+    await agent.init();
+    expect(agent.hasDeferredSession()).toBe(true);
+
+    catalogModelsFn = async () => [{ id: "gpt-4o" }];
+    await catalog.refresh();
+    await new Promise((r) => setTimeout(r, 0));
+    const swap = agent.swapModel("claude-x");
+    await new Promise((r) => setTimeout(r, 0));
+    slow.resolve();
+    await swap;
+
+    expect(gateCalls).toBe(1);
+    expect(calls.resume).toEqual(["sess-1"]);
+    expect(agent.hasDeferredSession()).toBe(false);
+    expect(agent.getModel()).toBe("claude-x");
+    expect(h.setModelCalls).toEqual(["claude-x"]);
     await agent.dispose();
   });
 

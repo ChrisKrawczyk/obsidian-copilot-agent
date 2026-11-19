@@ -148,7 +148,7 @@ export class MessageRenderer {
     this.boundaryEl?.detach();
     this.boundaryEl = null;
     if (view) {
-      const el = createDiv({ cls: "copilot-agent-context-boundary" });
+      const el = this.listEl.createDiv({ cls: "copilot-agent-context-boundary" });
       el.createSpan({ cls: "copilot-agent-context-boundary-label", text: view.label });
       for (const action of view.actions) {
         const btn = el.createEl("button", {

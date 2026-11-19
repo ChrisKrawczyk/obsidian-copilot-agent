@@ -8,7 +8,7 @@ import { ChatState } from "../domain/ChatState";
 import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
-import { boundaryLabel, buildPriorContextExcerpt } from "../domain/priorContextExcerpt";
+import { boundaryLabel, buildPriorContextExcerpt, wrapPriorContext } from "../domain/priorContextExcerpt";
 import type { UndoJournal } from "../domain/UndoJournal";
 import type { ConversationManager } from "../domain/ConversationManager";
 import type { PersistedMessage } from "../persistence/PersistedShape";
@@ -1054,7 +1054,7 @@ export class ChatView extends ItemView {
     const draft = this.priorContextDraft;
     const priorContext =
       draft && draft.convId === this.boundConversationId
-        ? this.priorContextTextEl?.value.trim() || undefined
+        ? (wrapPriorContext(this.priorContextTextEl?.value ?? "") ?? undefined)
         : undefined;
     if (draft && this.priorContextPanelEl) this.priorContextPanelEl.style.display = "none";
 
@@ -1139,6 +1139,7 @@ export class ChatView extends ItemView {
     }
 
     let receivedAnyDelta = false;
+    let receivedAnyEvent = false;
     let finalContent = "";
     let finalToolCalls: import("../domain/types").ToolCall[] = [];
     let failure: unknown = null;
@@ -1149,6 +1150,7 @@ export class ChatView extends ItemView {
         text,
         priorContext ? { priorContext } : undefined,
       )) {
+        if (ev.type !== "complete") receivedAnyEvent = true;
         if (this.userRequestedStop) {
           // Drain the iterator but don't apply any further updates.
           // The placeholder is already frozen as `interrupted`; we
@@ -1250,13 +1252,20 @@ export class ChatView extends ItemView {
     this.currentStreamState = undefined;
     this.currentStreamSession = undefined;
 
-    if (draft && this.priorContextDraft === draft) {
-      // Once the agent has seen any of the turn, treat the excerpt as
-      // delivered so it isn't sent twice; otherwise keep the draft.
-      if (!failure || receivedAnyDelta) {
-        this.closePriorContextDraft();
-        if (priorContext) this.updateBoundaryState(draft.convId, "sent");
-      } else if (this.priorContextPanelEl && draft.convId === this.boundConversationId) {
+    if (draft) {
+      // Any streamed text or tool event means the agent accepted the turn,
+      // so the excerpt must not be offered again. (`complete` alone doesn't
+      // count: it is also yielded when a turn is stopped before sending.)
+      // Recorded on the originating conversation even after a switch.
+      const reachedAgent = receivedAnyEvent || (!failure && !cancelled);
+      if (reachedAgent) {
+        if (priorContext) this.updateBoundaryState(draft.convId, "sent", draft.afterMessageId);
+        if (this.priorContextDraft === draft) this.closePriorContextDraft();
+      } else if (
+        this.priorContextDraft === draft &&
+        this.priorContextPanelEl &&
+        draft.convId === this.boundConversationId
+      ) {
         this.priorContextPanelEl.style.display = "";
       }
     }
@@ -1418,9 +1427,15 @@ export class ChatView extends ItemView {
   private updateBoundaryState(
     convId: string,
     next: "offered" | "sent" | "dismissed",
+    expectedAfterMessageId?: string,
   ): void {
     const boundary = this.manager.get(convId)?.contextBoundary;
     if (!boundary) return;
+    // The boundary may have moved (e.g. a resume failed mid-send); the
+    // update only applies to the boundary the action was taken on.
+    if (expectedAfterMessageId !== undefined && boundary.afterMessageId !== expectedAfterMessageId) {
+      return;
+    }
     try {
       this.manager.setContextBoundary(convId, { ...boundary, state: next });
     } catch (e) {
@@ -1457,9 +1472,9 @@ export class ChatView extends ItemView {
       return;
     }
     this.priorContextDraft = { convId: conv.id, afterMessageId: boundary.afterMessageId };
-    this.priorContextTextEl.value = excerpt.text;
+    this.priorContextTextEl.value = excerpt.body;
     this.priorContextMetaEl?.setText(
-      `Earlier context (${excerpt.included} of ${excerpt.total} messages) will be sent with your next message. You can edit it.`,
+      `Earlier context (${excerpt.included} of ${excerpt.total} messages) will be sent once with your next message, marked as untrusted history. You can edit it.`,
     );
     this.priorContextPanelEl.style.display = "";
     this.refreshContextBoundary();

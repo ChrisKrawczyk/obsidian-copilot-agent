@@ -14,6 +14,9 @@ export const DEFAULT_EXCERPT_CAPS: ExcerptCaps = {
 };
 
 export interface PriorContextExcerpt {
+  /** User-editable transcript lines, without the untrusted-record wrapper. */
+  body: string;
+  /** `body` as it would be sent, i.e. `wrapPriorContext(body)`. */
   text: string;
   included: number;
   total: number;
@@ -38,7 +41,29 @@ export function boundaryAnchor(messages: readonly Message[]): string | null {
     end--;
     if (messages[end - 1]?.role === "user") end--;
   }
-  return end > 0 ? messages[end - 1].id : null;
+  if (!messages.slice(0, end).some(isEligible)) return null;
+  return messages[end - 1].id;
+}
+
+function wrap(body: string): string {
+  return `${WRAPPER_OPEN}\n${FRAMING}\n\n${body}\n${WRAPPER_CLOSE}`;
+}
+
+const WRAPPER_OVERHEAD = wrap("").length;
+
+/**
+ * Turn the (possibly user-edited) excerpt body into the text sent to the
+ * agent. The framing and wrapper are re-applied here, not taken from the
+ * editor, so edits can't drop the untrusted-data framing or exceed the cap.
+ * Returns null for an empty body.
+ */
+export function wrapPriorContext(
+  body: string,
+  maxTotalChars: number = DEFAULT_EXCERPT_CAPS.maxTotalChars,
+): string | null {
+  const trimmed = escapeWrapperTokens(body.trim());
+  if (!trimmed) return null;
+  return wrap(truncateMiddle(trimmed, Math.max(0, maxTotalChars - WRAPPER_OVERHEAD)));
 }
 
 /** Divider label for the boundary. */
@@ -68,8 +93,8 @@ function truncateMiddle(s: string, limit: number): string {
 function isEligible(m: Message): boolean {
   if (m.role !== "user" && m.role !== "assistant") return false;
   if (m.status !== "complete" && m.status !== "interrupted") return false;
-  if (m.role === "assistant" && m.content.trim() === "" && !m.toolCalls?.length) return false;
-  return true;
+  if (m.content.trim() !== "") return true;
+  return m.role === "assistant" && !!m.toolCalls?.some((tc) => toolMarker(tc) !== null);
 }
 
 function toolMarker(tc: ToolCall): string | null {
@@ -112,7 +137,11 @@ function render(entries: ReadonlyMap<number, string>, total: number): string {
     next = i + 1;
   }
   if (total > next) parts.push(omissionLine(total - next));
-  return `${WRAPPER_OPEN}\n${FRAMING}\n\n${parts.join("\n\n")}\n${WRAPPER_CLOSE}`;
+  return parts.join("\n\n");
+}
+
+function renderedLength(entries: ReadonlyMap<number, string>, total: number): number {
+  return WRAPPER_OVERHEAD + render(entries, total).length;
 }
 
 /**
@@ -144,14 +173,15 @@ export function buildPriorContextExcerpt(
     for (let attempt = 0; attempt < 3; attempt++) {
       const entry = formatEntry(anchorMsg, limit, includeTools);
       entries.set(anchor, entry);
-      const excess = render(entries, total).length - caps.maxTotalChars;
+      const excess = renderedLength(entries, total) - caps.maxTotalChars;
       if (excess <= 0) {
         fitted = entry;
         break;
       }
       const currentLen = truncateMiddle(escapeWrapperTokens(anchorMsg.content), limit).length;
-      if (currentLen === 0) break;
-      limit = Math.max(0, currentLen - excess);
+      limit = currentLen - excess;
+      // Content can't shrink to fit; never emit a header with its text cut to nothing.
+      if (limit <= 0) break;
     }
     if (fitted !== null) break;
   }
@@ -161,11 +191,12 @@ export function buildPriorContextExcerpt(
   for (let i = total - 1; i >= 0 && entries.size < Math.max(1, caps.maxMessages); i--) {
     if (i === anchor) continue;
     entries.set(i, formatEntry(eligible[i], caps.maxMessageChars, true));
-    if (render(entries, total).length > caps.maxTotalChars) {
+    if (renderedLength(entries, total) > caps.maxTotalChars) {
       entries.delete(i);
       break;
     }
   }
 
-  return { text: render(entries, total), included: entries.size, total };
+  const body = render(entries, total);
+  return { body, text: wrap(body), included: entries.size, total };
 }

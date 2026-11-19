@@ -422,6 +422,8 @@ const SDK_IDLE_TIMEOUT_MS = 180_000;
 // our idle watchdog. Set high; our bumpIdleTimer is the actual guard.
 const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
+/** Resume attempts on a session that still exists before starting a new one. */
+const MAX_RESUME_FAILURES = 2;
 
 /**
  * v0.4 (model-picker) Phase 2: pure heuristic resolver extracted from
@@ -629,6 +631,10 @@ export class CopilotAgentSession implements AgentSession {
    * runtime restart (token rotation, reconnect) resumes the same history.
    */
   private resumeId: string | null = null;
+  /** Consecutive resume failures of `resumeId` while its state still exists on disk. */
+  private resumeFailures = 0;
+  /** In-flight deferred recovery, so concurrent triggers share one open. */
+  private recoverInFlight: Promise<void> | null = null;
   /**
    * Diagnostics hook: records the text actually sent to the SDK on the
    * most recent first-send and on the most recent subsequent send. Used
@@ -1676,7 +1682,37 @@ export class CopilotAgentSession implements AgentSession {
    *    `createSession()`, we disconnect the half-built session and
    *    leave state untouched.
    */
-  private async tryRecoverDeferred(preferred?: string): Promise<void> {
+  private tryRecoverDeferred(preferred?: string): Promise<void> {
+    if (this.recoverInFlight) {
+      return this.recoverInFlight.then(() => this.applyPreferredAfterRecovery(preferred));
+    }
+    const run: Promise<void> = this.recoverDeferred(preferred).finally(() => {
+      if (this.recoverInFlight === run) this.recoverInFlight = null;
+    });
+    this.recoverInFlight = run;
+    return run;
+  }
+
+  /**
+   * A model pick that arrived while another trigger was already
+   * recovering: apply it to the session that recovery adopted, or retry
+   * recovery with it if that attempt failed.
+   */
+  private async applyPreferredAfterRecovery(preferred?: string): Promise<void> {
+    if (!preferred || this.disposed) return;
+    const session = this.session;
+    if (session) {
+      if (this.selectedModel !== preferred && typeof session.setModel === "function") {
+        await Promise.resolve(session.setModel(preferred));
+      }
+      this.selectedModel = preferred;
+      this.preferredModelOverride = preferred;
+    } else if (this.deferredSession) {
+      await this.tryRecoverDeferred(preferred);
+    }
+  }
+
+  private async recoverDeferred(preferred?: string): Promise<void> {
     if (!this.deferredSession || !this.client || this.session || this.disposed) {
       return;
     }
@@ -1704,7 +1740,12 @@ export class CopilotAgentSession implements AgentSession {
       return;
     }
     if (this.disposed || this.initEpoch !== epoch || this.session) {
-      await safeCall(() => opened.session.disconnect?.());
+      // Never detach a handle that shares the adopted session's id: the
+      // SDK detaches by id, which would cut off the live session too.
+      const live = this.session as SdkSession | null;
+      if (opened.session.sessionId === undefined || opened.session.sessionId !== live?.sessionId) {
+        await safeCall(() => opened.session.disconnect?.());
+      }
       return;
     }
     this.selectedModel = model;
@@ -1726,18 +1767,28 @@ export class CopilotAgentSession implements AgentSession {
 
   /**
    * Resume the remembered SDK session when possible so the agent keeps
-   * its history across restarts; otherwise create a fresh one. Resume
-   * failures (missing/corrupt/locked state) are not fatal.
+   * its history across restarts; otherwise create a fresh one. The saved
+   * session is only replaced when it no longer exists or resume has
+   * failed twice in a row; a one-off failure (lock, connection) is
+   * rethrown so the next attempt retries instead of orphaning history.
    */
   private async openSession(client: SdkClient, model: string): Promise<OpenedSession> {
     const resumeId = this.resumeId;
     if (resumeId && client.resumeSession) {
       try {
         const session = await client.resumeSession(resumeId, this.sessionConfig(model));
+        this.resumeFailures = 0;
         return { session, resumed: true };
       } catch (e) {
+        if (!(await this.shouldAbandonResume(client, resumeId))) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(
+            `Couldn't reopen this conversation's agent session (${msg}). Send your message again to retry.`,
+          );
+        }
         console.warn("[AgentSession] resumeSession failed; creating a new session", e);
         const session = await client.createSession(this.sessionConfig(model));
+        this.resumeFailures = 0;
         return { session, resumed: false, resumeFailedFor: resumeId };
       }
     }
@@ -1745,9 +1796,23 @@ export class CopilotAgentSession implements AgentSession {
     return { session, resumed: false };
   }
 
+  private async shouldAbandonResume(client: SdkClient, id: string): Promise<boolean> {
+    if (!client.getSessionMetadata) return true;
+    try {
+      if ((await client.getSessionMetadata(id)) === undefined) return true;
+    } catch {
+      // Can't tell whether it still exists; count it as a failed attempt.
+    }
+    this.resumeFailures += 1;
+    return this.resumeFailures >= MAX_RESUME_FAILURES;
+  }
+
   private adoptSession(opened: OpenedSession, cause: SessionOpenedInfo["cause"]): void {
     this.session = opened.session;
-    this.firstSendOfSession = !opened.resumed;
+    // Re-send the preamble on resume too: a session may have been
+    // persisted before its first send, and the preamble's date, vault
+    // settings and tool list may have changed since it was last sent.
+    this.firstSendOfSession = true;
     const id = opened.session.sessionId;
     if (!id) return;
     this.resumeId = id;
@@ -2558,6 +2623,8 @@ export interface SdkClient {
   resumeSession?: (sessionId: string, opts: SdkSessionOptions) => Promise<SdkSession>;
   /** Permanently delete a persisted session's on-disk state. */
   deleteSession?: (sessionId: string) => Promise<void>;
+  /** Persisted session metadata, or undefined if no such session exists. */
+  getSessionMetadata?: (sessionId: string) => Promise<unknown>;
   stop?: () => Promise<unknown>;
   forceStop?: () => Promise<void>;
 }
