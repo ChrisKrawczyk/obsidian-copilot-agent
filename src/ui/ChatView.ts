@@ -190,6 +190,9 @@ export class ChatView extends ItemView {
   /** Steering/queued messages sent into the live stream that the agent
    *  has not read yet, oldest first. */
   private pendingFollowUps: { id: string; text: string; mode: FollowUpMode }[] = [];
+  /** Taken-back or unsent follow-up text whose conversation wasn't
+   *  showing when it came back; restored on the next bind. */
+  private readonly draftRestores = new Map<string, string>();
   private followUpStripEl?: HTMLElement;
   private sendMenuBtnEl?: HTMLButtonElement;
   private unsubState?: () => void;
@@ -610,6 +613,7 @@ export class ChatView extends ItemView {
           this.unsubState = this.state.subscribe(() => this.syncList());
           this.syncList();
           this.refreshFollowUpUi();
+          this.applyDraftRestore();
           // Phase 8b: after switching or creating a conversation the
           // ConversationPicker retains keyboard focus (it was just
           // clicked), so typing goes nowhere until the user clicks
@@ -969,14 +973,16 @@ export class ChatView extends ItemView {
   private renderAuth(state: AuthState): void {
     this.currentAuthKind = state.kind;
     const isConnected = state.kind === "connected";
-    // Composer is gated on connection. Don't disable mid-send — the
-    // send pipeline owns `pending`/`streaming`.
-    if (!this.pending && !this.streaming) {
+    // Composer is gated on connection. Don't touch it mid-send (the
+    // send pipeline owns `pending`), but while streaming it hosts
+    // follow-ups, which need a live connection.
+    if (!this.pending || this.streaming) {
       this.inputEl.disabled = !isConnected;
       // Send button disable state is computed by refreshSendGate()
       // below (which considers catalog state too) — don't overwrite
       // here.
     }
+    this.refreshFollowUpUi();
     if (this.connectBtnEl) {
       this.connectBtnEl.style.display = isConnected ? "none" : "";
     }
@@ -1196,6 +1202,9 @@ export class ChatView extends ItemView {
     this.streamDone = new Promise<void>((r) => (resolveStreamDone = r));
 
     this.setStreaming(true);
+    const unsubFollowUps = session.onFollowUpAvailabilityChange?.(() =>
+      this.refreshFollowUpUi(),
+    );
     try {
       for await (const ev of session.sendMessageStreaming(text)) {
         if (this.userRequestedStop) {
@@ -1324,6 +1333,7 @@ export class ChatView extends ItemView {
     // request and the SDK delivering it) must NOT overwrite that —
     // the user's intent wins. Set cancelled unconditionally on stop.
     const cancelled = this.userRequestedStop;
+    unsubFollowUps?.();
     this.userRequestedStop = false;
     this.stopping = false;
     this.currentPlaceholderId = undefined;
@@ -1491,6 +1501,7 @@ export class ChatView extends ItemView {
   private canFollowUp(): boolean {
     return (
       this.streaming &&
+      this.currentAuthKind === "connected" &&
       !this.stopping &&
       !this.userRequestedStop &&
       this.currentStreamConversationId !== null &&
@@ -1504,6 +1515,7 @@ export class ChatView extends ItemView {
     const text = this.inputEl.value.trim();
     if (!text || !session?.sendFollowUp || !this.canFollowUp()) return;
     const id = `followup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const convId = this.boundConversationId;
     this.pendingFollowUps.push({ id, text, mode });
     this.inputEl.value = "";
     this.refreshFollowUpUi();
@@ -1511,8 +1523,10 @@ export class ChatView extends ItemView {
       await session.sendFollowUp(id, text, mode);
     } catch (e) {
       const idx = this.pendingFollowUps.findIndex((f) => f.id === id);
-      if (idx >= 0) this.pendingFollowUps.splice(idx, 1);
-      this.restoreComposerText(text);
+      // Already discarded by Stop/model switch/turn end; don't resurrect it.
+      if (idx < 0) return;
+      this.pendingFollowUps.splice(idx, 1);
+      this.restoreComposerText(text, convId);
       this.refreshFollowUpUi();
       const msg = e instanceof Error ? e.message : String(e);
       new Notice(`Could not send message: ${msg}`, 6000);
@@ -1527,6 +1541,7 @@ export class ChatView extends ItemView {
     const session = this.currentStreamSession;
     const entry = this.pendingFollowUps.find((f) => f.id === id);
     if (!entry || !session?.withdrawFollowUp) return;
+    const convId = this.boundConversationId;
     let removed = false;
     try {
       removed = await session.withdrawFollowUp(id);
@@ -1540,16 +1555,32 @@ export class ChatView extends ItemView {
       return;
     }
     this.pendingFollowUps = this.pendingFollowUps.filter((f) => f.id !== id);
-    this.restoreComposerText(entry.text);
+    this.restoreComposerText(entry.text, convId);
     this.refreshFollowUpUi();
   }
 
-  private restoreComposerText(text: string): void {
+  private restoreComposerText(text: string, convId: string | null): void {
+    // The user may have switched conversations while the request was in
+    // flight; keep the text for when they come back.
+    if (convId !== null && this.boundConversationId !== convId) {
+      const prev = this.draftRestores.get(convId);
+      this.draftRestores.set(convId, prev ? `${prev}\n\n${text}` : text);
+      return;
+    }
     const current = this.inputEl.value.trim();
     this.inputEl.value = current ? `${text}\n\n${current}` : text;
     this.inputEl.focus();
     const end = this.inputEl.value.length;
     this.inputEl.setSelectionRange(end, end);
+  }
+
+  private applyDraftRestore(): void {
+    const convId = this.boundConversationId;
+    if (convId === null || !this.inputEl) return;
+    const text = this.draftRestores.get(convId);
+    if (text === undefined) return;
+    this.draftRestores.delete(convId);
+    this.restoreComposerText(text, convId);
   }
 
   /** Forget unread follow-ups when the turn is being cut short. */
