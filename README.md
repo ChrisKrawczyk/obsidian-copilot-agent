@@ -29,6 +29,12 @@ You don't have to wait for the agent to finish. While a response is streaming, t
 
 Unread messages appear above the composer labeled **Steering** or **Queued**. When the agent reads one, the reply so far is closed and your message appears in the transcript, followed by the rest of the response. Stop discards any unread messages (a notice tells you how many).
 
+## Conversations across restarts
+
+Each conversation keeps its own Copilot agent session, stored under the plugin folder's `session-state/` directory. When you reopen Obsidian and send a message, the conversation picks up that session with the agent's full memory. Deleting a conversation deletes its session.
+
+Sometimes a session can't be resumed: the conversation was saved before session resume was added, or the session data is missing or unreadable. In that case a divider shows where the agent's memory starts. Click **Include earlier context** to send a short, editable excerpt of the earlier messages with your next message, or **Dismiss** to continue without it. The excerpt includes message text and tool names only. It's sent once and isn't added to your message in the transcript.
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
@@ -257,7 +263,7 @@ The plugin enforces a single deny-by-default permission gate that every mutating
 SafetyPolicy decides among `auto-apply` (no prompt), `require-approval` (chat-inline Approve/Reject), or `reject`, based on:
 
 1. The configured default mode (v0.1 default: `require-approval`).
-2. Per-call session grants ("Approve for session" on a prompt).
+2. Per-conversation session grants ("Approve for session" on a prompt). They're saved with the conversation, so they last across reloads, and they apply only to that conversation. MCP grants stop applying when the server's configuration changes.
 3. Persistent settings — path allowlist (vault-relative directories that skip the prompt) and per-built-in auto-approve toggles.
 
 After any approved built-in vault write, an **Undo** affordance appears on the tool-call block and reverses the change. MCP calls intentionally have no Undo because they may affect external systems outside the vault.

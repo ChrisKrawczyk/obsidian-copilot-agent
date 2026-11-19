@@ -323,4 +323,38 @@ describe("migrate — v0.4 modelId round-trip", () => {
     expect(r.state.conversations[1].modelId).toBe("gpt-4o");
     expect(r.state.activeConversationId).toBe("c1");
   });
+
+  it("keeps valid sdkSessionId and contextBoundary", () => {
+    const boundary = { afterMessageId: "m1", reason: "legacy", state: "offered" };
+    const r = migrate(v2Blob({ sdkSessionId: "sess-1", contextBoundary: boundary }));
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].sdkSessionId).toBe("sess-1");
+    expect(r.state.conversations[0].contextBoundary).toEqual(boundary);
+  });
+
+  it("normalizes invalid sdkSessionId to null and drops a malformed contextBoundary", () => {
+    const r = migrate(
+      v2Blob({
+        sdkSessionId: 42,
+        contextBoundary: { afterMessageId: "m1", reason: "nope", state: "sent" },
+      }),
+    );
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations).toHaveLength(1);
+    expect(r.state.conversations[0].sdkSessionId).toBeNull();
+    expect("contextBoundary" in r.state.conversations[0]).toBe(false);
+  });
+
+  it("keeps well-formed safetyGrants entries and drops junk", () => {
+    const r = migrate(
+      v2Blob({
+        safetyGrants: { vault: "yes", mcp: ["mcp:s:e:t", 7, ""], builtin: "shell" },
+      }),
+    );
+    expect(r.recovered).toBe(false);
+    expect(r.state.conversations[0].safetyGrants).toEqual({ mcp: ["mcp:s:e:t"] });
+
+    const empty = migrate(v2Blob({ safetyGrants: { vault: false } }));
+    expect("safetyGrants" in empty.state.conversations[0]).toBe(false);
+  });
 });

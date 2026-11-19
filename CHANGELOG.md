@@ -8,10 +8,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 
 - **Steer or queue while the agent is working.** The composer stays usable during a response. **Enter** sends your message into the running turn (steering) and **Ctrl+Enter** (Cmd+Enter on macOS) queues it as the next turn. Messages the agent hasn't read yet appear above the composer. Take one back with **↑** in an empty composer or its **×** button, and its text returns to the input. The **⌄** button next to Stop offers the same actions plus **Stop and send**. Stop (or a mid-stream model switch) discards unread messages and tells you how many. (`src/ui/ChatView.ts`, `src/sdk/AgentSession.ts`.)
+- **"Include earlier context" when a session can't be resumed.** This covers conversations saved before this fix and sessions that are missing or unreadable. A divider marks where the agent's memory starts. **Include earlier context** opens an editable excerpt above the composer: up to 12 recent messages, about 8 KB, with tool names but no tool arguments or results. The excerpt is sent once with your next message and isn't added to your message in the transcript. The agent is told to treat it as untrusted history. **Dismiss** hides the offer. (`src/domain/priorContextExcerpt.ts`, `src/ui/ChatView.ts`.)
 
 ### Changed
 
 - **Transcript order matches what the agent saw.** When a steering or queued message is read, the current reply is closed and your message appears after it, followed by the rest of the response. This order is saved with the conversation.
+- **"Approve for Session" grants belong to the conversation and survive reloads.** Previously one in-memory set of grants covered every conversation and was cleared on reload, so a resumed conversation asked again for tools you'd already approved. Grants are now saved with the conversation and apply only to it. Deleting or resetting the conversation clears them. MCP grants are still tied to the server's trust epoch, so changing the server's configuration revokes them. (`src/domain/SafetyPolicy.ts`, `src/main.ts`.)
+
+### Fixed
+
+- **The agent remembers a conversation after Obsidian restarts or the plugin reloads.** Previously the transcript reappeared but every reload started a new agent session, so the agent lost earlier context. Each conversation now saves its Copilot session id and resumes that session, with its full history, the next time you send a message. (`src/sdk/AgentSession.ts`, `src/main.ts`.)
+- **Deleting a conversation deletes its agent session.** The session's folder under the plugin's `session-state/` directory is removed too. Folders left by earlier versions are not cleaned up.
 
 ## [0.10.5] - 2026-11-17
 

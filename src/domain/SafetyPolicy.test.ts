@@ -247,3 +247,33 @@ describe("SafetyState clear()", () => {
     expect(s.isExtraVaultGranted("/some/root")).toBe(false);
   });
 });
+
+describe("SafetyState persistence", () => {
+  test("hydrates from saved grants and reports changes once per new grant", () => {
+    const key = formatMcpGrantKey(serverA, "read", epoch1);
+    const changes: unknown[] = [];
+    const s = new SafetyState({ mcp: [key], builtin: ["shell"] }, (g) => changes.push(g));
+    expect(s.isMcpGranted(serverA, "read", epoch1)).toBe(true);
+    expect(s.isMcpGranted(serverA, "read", epoch2)).toBe(false);
+    expect(s.isBuiltinGranted("shell")).toBe(true);
+
+    s.grantBuiltin("shell");
+    expect(changes).toHaveLength(0);
+
+    s.grantVault();
+    expect(changes).toEqual([{ vault: true, mcp: [key], builtin: ["shell"] }]);
+
+    s.clear();
+    expect(changes[1]).toEqual({});
+    s.clear();
+    expect(changes).toHaveLength(2);
+  });
+
+  test("a throwing onChange does not break granting", () => {
+    const s = new SafetyState(null, () => {
+      throw new Error("disk full");
+    });
+    s.grantVault();
+    expect(s.isVaultGranted()).toBe(true);
+  });
+});

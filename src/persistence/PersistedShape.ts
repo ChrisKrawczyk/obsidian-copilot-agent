@@ -60,6 +60,42 @@ export interface PersistedUndoEntry {
   undone?: boolean;
 }
 
+/**
+ * UI-only marker: the agent session behind this conversation was replaced,
+ * so messages up to `afterMessageId` were not restored to the agent.
+ * Never sent to the agent.
+ */
+export interface PersistedContextBoundary {
+  afterMessageId: string;
+  reason: "legacy" | "resume-failed";
+  state: "offered" | "sent" | "dismissed";
+}
+
+/**
+ * "Approve for session" grants scoped to one conversation. Saved with
+ * the conversation so they survive reloads alongside the resumed SDK
+ * session. MCP keys embed the server trust epoch, so config changes
+ * invalidate them.
+ */
+export interface PersistedSafetyGrants {
+  vault?: boolean;
+  extraVault?: string[];
+  mcp?: string[];
+  builtin?: string[];
+}
+
+export function cloneSafetyGrants(
+  g: PersistedSafetyGrants | null | undefined,
+): PersistedSafetyGrants | null | undefined {
+  if (!g) return g;
+  const out: PersistedSafetyGrants = {};
+  if (g.vault) out.vault = true;
+  if (g.extraVault) out.extraVault = [...g.extraVault];
+  if (g.mcp) out.mcp = [...g.mcp];
+  if (g.builtin) out.builtin = [...g.builtin];
+  return out;
+}
+
 export interface PersistedConversation {
   id: string;
   name: string;
@@ -81,6 +117,15 @@ export interface PersistedConversation {
    * `modelId`. (Spec.md Edge Cases — Undo journal interaction.)
    */
   modelId?: string | null;
+  /**
+   * Copilot SDK session id bound to this conversation, used to resume
+   * the agent session across restarts. Missing/null means "none yet".
+   */
+  sdkSessionId?: string | null;
+  /** UI-only context-boundary marker; see `PersistedContextBoundary`. */
+  contextBoundary?: PersistedContextBoundary | null;
+  /** Per-conversation "approve for session" grants. */
+  safetyGrants?: PersistedSafetyGrants | null;
   messages: PersistedMessage[];
   /** SF-2: capped at 50 entries on record (oldest evicted first). */
   undoEntries: PersistedUndoEntry[];

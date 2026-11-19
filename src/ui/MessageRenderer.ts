@@ -46,6 +46,17 @@ interface MessageSlot {
   pendingStreamText?: string;
 }
 
+export interface BoundaryAction {
+  label: string;
+  onClick: () => void;
+}
+
+export interface BoundaryView {
+  afterMessageId: string;
+  label: string;
+  actions: BoundaryAction[];
+}
+
 /**
  * Owns the per-message render lifecycle for ChatView. Strategy:
  *
@@ -67,6 +78,8 @@ interface MessageSlot {
  */
 export class MessageRenderer {
   private readonly slots = new Map<string, MessageSlot>();
+  private boundary: BoundaryView | null = null;
+  private boundaryEl: HTMLElement | null = null;
   /**
    * Phase 6: handlers used when rendering tool-call blocks (approval
    * and undo button clicks). Mutable so ChatView can set them after
@@ -134,11 +147,49 @@ export class MessageRenderer {
         this.slots.delete(id);
       }
     }
+    this.placeBoundary();
     this.listEl.scrollTop = this.listEl.scrollHeight;
+  }
+
+  /**
+   * Show (or clear with `null`) a divider after `afterMessageId` marking
+   * where the agent's memory of this conversation starts.
+   */
+  setBoundary(view: BoundaryView | null): void {
+    this.boundary = view;
+    this.boundaryEl?.detach();
+    this.boundaryEl = null;
+    if (view) {
+      const el = this.listEl.createDiv({ cls: "copilot-agent-context-boundary" });
+      el.createSpan({ cls: "copilot-agent-context-boundary-label", text: view.label });
+      for (const action of view.actions) {
+        const btn = el.createEl("button", {
+          cls: "copilot-agent-context-boundary-action",
+          text: action.label,
+        });
+        btn.addEventListener("click", action.onClick);
+      }
+      this.boundaryEl = el;
+    }
+    this.placeBoundary();
+  }
+
+  private placeBoundary(): void {
+    const el = this.boundaryEl;
+    if (!el || !this.boundary) return;
+    const anchor = this.slots.get(this.boundary.afterMessageId)?.wrapperEl;
+    if (!anchor) {
+      el.detach();
+      return;
+    }
+    if (anchor.nextSibling !== el) anchor.after(el);
   }
 
   /** Tear down all per-message Component scopes. Called from ChatView.onClose. */
   dispose(): void {
+    this.boundaryEl?.detach();
+    this.boundaryEl = null;
+    this.boundary = null;
     for (const slot of this.slots.values()) {
       this.cancelRaf(slot);
       slot.component.unload();

@@ -277,6 +277,39 @@ describe("ConversationsStore — v0.4 modelId round-trip", () => {
     expect(r.recovered).toBe(false);
     expect(store.listConversations()[0].modelId).toBeNull();
   });
+
+  it("round-trips sdkSessionId and contextBoundary through upsert + reload", async () => {
+    const io = makeIO();
+    const { store } = makeStore({ io });
+    await store.load();
+    const boundary = {
+      afterMessageId: "m1",
+      reason: "resume-failed" as const,
+      state: "sent" as const,
+    };
+    store.upsertConversation(
+      newConv("c1", {
+        sdkSessionId: "sess-1",
+        contextBoundary: boundary,
+        safetyGrants: { vault: true, builtin: ["shell"] },
+      }),
+    );
+    await store.flushNow();
+
+    const snap = store.listConversations()[0];
+    expect(snap.sdkSessionId).toBe("sess-1");
+    expect(snap.contextBoundary).toEqual(boundary);
+    expect(snap.contextBoundary).not.toBe(boundary);
+
+    const { store: store2 } = makeStore({ io });
+    await store2.load();
+    expect(store2.listConversations()[0].sdkSessionId).toBe("sess-1");
+    expect(store2.listConversations()[0].contextBoundary).toEqual(boundary);
+    expect(store2.listConversations()[0].safetyGrants).toEqual({
+      vault: true,
+      builtin: ["shell"],
+    });
+  });
 });
 
 describe("ConversationsStore — debounce + flushNow", () => {

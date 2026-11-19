@@ -209,9 +209,9 @@ function renderApprovalPrompt(
   helpText.classList.add("copilot-agent-toolcall-approval-help");
   helpText.textContent =
     "Approve runs this call once. " +
-    "Approve for Session lets the assistant make similar calls without " +
-    "asking again until you reload the plugin, clear the conversation, " +
-    "or restart Obsidian.";
+    "Approve for Session lets the assistant make similar calls in this " +
+    "conversation without asking again, including after a reload. " +
+    "Other conversations still ask.";
   wrap.appendChild(helpText);
 
   const buttons = document.createElement("div");

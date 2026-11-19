@@ -170,6 +170,38 @@ export interface AgentSessionOptions {
    * null/empty to skip prepending.
    */
   preamble?: () => string | null;
+  /**
+   * SDK session id persisted for this conversation. When set, opening a
+   * session tries `client.resumeSession(id)` first and falls back to
+   * `createSession()` if the runtime can't resume it.
+   */
+  resumeSessionId?: string | null;
+  /** Called every time an SDK session is opened (resumed or created). */
+  onSessionOpened?: (info: SessionOpenedInfo) => void;
+}
+
+export interface SessionOpenedInfo {
+  sessionId: string;
+  /** True when an existing SDK session was resumed with its history. */
+  resumed: boolean;
+  /** Set when a resume of this id was attempted but a fresh session was created. */
+  resumeFailedFor?: string;
+  /** `reset` when `resetConversation()` deliberately started over. */
+  cause: "init" | "reset";
+}
+
+export interface SendStreamingOptions {
+  /**
+   * Prior-conversation excerpt the user chose to include. Sent between
+   * the preamble and the user's request; never shown as their message.
+   */
+  priorContext?: string;
+}
+
+interface OpenedSession {
+  session: SdkSession;
+  resumed: boolean;
+  resumeFailedFor?: string;
 }
 
 /**
@@ -284,7 +316,10 @@ export interface AgentSession {
    * cleanly; whatever partial text was already yielded is left to the
    * caller to render (Phase 4 freezes it as `interrupted`).
    */
-  sendMessageStreaming(text: string): AsyncIterable<StreamEvent>;
+  sendMessageStreaming(
+    text: string,
+    options?: SendStreamingOptions,
+  ): AsyncIterable<StreamEvent>;
   /**
    * Abort an in-flight `sendMessage`/`sendMessageStreaming`. Safe to
    * call when nothing is in flight (no-op). The SDK session itself
@@ -429,6 +464,8 @@ const SDK_IDLE_TIMEOUT_MS = 180_000;
 // our idle watchdog. Set high; our bumpIdleTimer is the actual guard.
 const SDK_HARD_CEILING_MS = 30 * 60_000;
 const STOP_TIMEOUT_MS = 5_000;
+/** Resume attempts on a session that still exists before starting a new one. */
+const MAX_RESUME_FAILURES = 2;
 
 /**
  * v0.4 (model-picker) Phase 2: pure heuristic resolver extracted from
@@ -643,6 +680,16 @@ export class CopilotAgentSession implements AgentSession {
    */
   private firstSendOfSession = true;
   /**
+   * SDK session id to resume on the next open. Seeded from
+   * `opts.resumeSessionId` and updated whenever a session opens, so a
+   * runtime restart (token rotation, reconnect) resumes the same history.
+   */
+  private resumeId: string | null = null;
+  /** Consecutive resume failures of `resumeId` while its state still exists on disk. */
+  private resumeFailures = 0;
+  /** In-flight deferred recovery, so concurrent triggers share one open. */
+  private recoverInFlight: Promise<void> | null = null;
+  /**
    * Diagnostics hook: records the text actually sent to the SDK on the
    * most recent first-send and on the most recent subsequent send. Used
    * by unit tests to verify (a) preamble was prepended on first send,
@@ -672,6 +719,7 @@ export class CopilotAgentSession implements AgentSession {
   ) {
     this.sdkLoader = sdkLoader ?? defaultSdkLoader;
     this.currentToken = opts.gitHubToken ?? null;
+    this.resumeId = opts.resumeSessionId || null;
     this.toolsList = opts.tools ? [...opts.tools] : undefined;
     this.customToolNames = new Set(
       (this.toolsList ?? []).map((t) => t.name).filter(Boolean) as string[],
@@ -813,7 +861,10 @@ export class CopilotAgentSession implements AgentSession {
    * - On any non-cancel error we re-throw so the chat layer can render
    *   the failure.
    */
-  async *sendMessageStreaming(text: string): AsyncIterable<StreamEvent> {
+  async *sendMessageStreaming(
+    text: string,
+    options?: SendStreamingOptions,
+  ): AsyncIterable<StreamEvent> {
     try {
       await this.init();
     } catch (err) {
@@ -1319,7 +1370,7 @@ export class CopilotAgentSession implements AgentSession {
 
     // Kick off the turn but DON'T await — we need to interleave with
     // the queue draining loop below.
-    const outgoing = this.wrapWithPreamble(text);
+    const outgoing = this.wrapWithPreamble(text, options?.priorContext);
     session
       .sendAndWait(outgoing, SDK_HARD_CEILING_MS)
       .then(
@@ -1580,31 +1631,35 @@ export class CopilotAgentSession implements AgentSession {
    * The marker line distinguishes the preamble block from the user's
    * actual prompt so future log analysis / tests can detect it.
    */
-  private wrapWithPreamble(text: string): string {
+  private wrapWithPreamble(text: string, priorContext?: string): string {
+    const request = priorContext
+      ? priorContext + "\n\n---\n\n## User request\n\n" + text
+      : text;
     if (!this.firstSendOfSession) {
-      this.lastFollowupSendText = text;
-      return text;
+      this.lastFollowupSendText = request;
+      return request;
     }
     this.firstSendOfSession = false;
     const preambleFn = this.opts.preamble;
     if (!preambleFn) {
-      this.lastFirstSendText = text;
-      return text;
+      this.lastFirstSendText = request;
+      return request;
     }
     let preamble: string | null;
     try {
       preamble = preambleFn();
     } catch (e) {
       console.warn("[AgentSession] preamble callback threw", e);
-      this.lastFirstSendText = text;
-      return text;
+      this.lastFirstSendText = request;
+      return request;
     }
     if (!preamble) {
-      this.lastFirstSendText = text;
-      return text;
+      this.lastFirstSendText = request;
+      return request;
     }
-    const combined =
-      preamble + "\n\n---\n\n## User request\n\n" + text;
+    const combined = priorContext
+      ? preamble + "\n\n---\n\n" + request
+      : preamble + "\n\n---\n\n## User request\n\n" + text;
     this.lastFirstSendText = combined;
     return combined;
   }
@@ -1765,6 +1820,8 @@ export class CopilotAgentSession implements AgentSession {
 
   async resetConversation(): Promise<void> {
     this.cancelAllPendingApprovals("Conversation was reset.");
+    const oldId = this.session?.sessionId ?? this.resumeId;
+    this.resumeId = null;
     this.currentFollowUps?.cancel(
       new Error("Conversation was reset before the reply finished."),
     );
@@ -1773,6 +1830,7 @@ export class CopilotAgentSession implements AgentSession {
       this.session = null;
       return;
     }
+    const client = this.client;
     // Keep the running client; just swap the SDK session so model
     // context resets without paying the runtime-startup cost again.
     const oldSession = this.session;
@@ -1780,20 +1838,15 @@ export class CopilotAgentSession implements AgentSession {
     if (oldSession) {
       await safeCall(() => oldSession.disconnect?.());
     }
+    if (oldId && client.deleteSession) {
+      await safeCall(() => client.deleteSession!(oldId));
+    }
     if (!this.selectedModel) {
-      this.selectedModel = await this.pickModel(this.client, this.preferredModelOverride ?? this.opts.preferredModel);
+      this.selectedModel = await this.pickModel(client, this.preferredModelOverride ?? this.opts.preferredModel);
     }
     await this.awaitMcpReadinessGate();
-    const fresh = await this.client.createSession({
-      model: this.selectedModel,
-      availableTools: ["builtin:*", "custom:*", "mcp:*"],
-      streaming: true,
-      tools: this.toolsForSession(),
-      onPermissionRequest: (request: SdkPermissionRequest) =>
-        this.handlePermission(request),
-    });
-    this.session = fresh;
-    this.firstSendOfSession = true;
+    const fresh = await client.createSession(this.sessionConfig(this.selectedModel));
+    this.adoptSession({ session: fresh, resumed: false }, "reset");
   }
 
   async dispose(): Promise<void> {
@@ -1989,14 +2042,8 @@ export class CopilotAgentSession implements AgentSession {
       this.selectedModel = model;
 
       await this.awaitMcpReadinessGate();
-      const session = await client.createSession({
-        model,
-        availableTools: ["builtin:*", "custom:*", "mcp:*"],
-        streaming: true,
-        tools: this.toolsForSession(),
-        onPermissionRequest: (request: SdkPermissionRequest) =>
-          this.handlePermission(request),
-      });
+      const opened = await this.openSession(client, model);
+      const session = opened.session;
       if (this.disposed || this.initEpoch !== epoch) {
         await safeCall(() => session.disconnect?.());
         await safeCall(() => client.stop?.());
@@ -2011,8 +2058,7 @@ export class CopilotAgentSession implements AgentSession {
             : "AgentSession runtime torn down during init",
         );
       }
-      this.session = session;
-      this.firstSendOfSession = true;
+      this.adoptSession(opened, "init");
     } catch (err) {
       // On any failure after the client was constructed, make sure we
       // don't leak the runtime process.
@@ -2039,7 +2085,37 @@ export class CopilotAgentSession implements AgentSession {
    *    `createSession()`, we disconnect the half-built session and
    *    leave state untouched.
    */
-  private async tryRecoverDeferred(preferred?: string): Promise<void> {
+  private tryRecoverDeferred(preferred?: string): Promise<void> {
+    if (this.recoverInFlight) {
+      return this.recoverInFlight.then(() => this.applyPreferredAfterRecovery(preferred));
+    }
+    const run: Promise<void> = this.recoverDeferred(preferred).finally(() => {
+      if (this.recoverInFlight === run) this.recoverInFlight = null;
+    });
+    this.recoverInFlight = run;
+    return run;
+  }
+
+  /**
+   * A model pick that arrived while another trigger was already
+   * recovering: apply it to the session that recovery adopted, or retry
+   * recovery with it if that attempt failed.
+   */
+  private async applyPreferredAfterRecovery(preferred?: string): Promise<void> {
+    if (!preferred || this.disposed) return;
+    const session = this.session;
+    if (session) {
+      if (this.selectedModel !== preferred && typeof session.setModel === "function") {
+        await Promise.resolve(session.setModel(preferred));
+      }
+      this.selectedModel = preferred;
+      this.preferredModelOverride = preferred;
+    } else if (this.deferredSession) {
+      await this.tryRecoverDeferred(preferred);
+    }
+  }
+
+  private async recoverDeferred(preferred?: string): Promise<void> {
     if (!this.deferredSession || !this.client || this.session || this.disposed) {
       return;
     }
@@ -2058,30 +2134,101 @@ export class CopilotAgentSession implements AgentSession {
       return;
     }
     if (this.disposed || this.initEpoch !== epoch) return;
-    let session: SdkSession;
+    let opened: OpenedSession;
     try {
       await this.awaitMcpReadinessGate();
-      session = await client.createSession({
-        model,
-        availableTools: ["builtin:*", "custom:*", "mcp:*"],
-        streaming: true,
-        tools: this.toolsForSession(),
-        onPermissionRequest: (request: SdkPermissionRequest) =>
-          this.handlePermission(request),
-      });
+      opened = await this.openSession(client, model);
     } catch (e) {
       console.warn("[AgentSession] deferred createSession failed", e);
       return;
     }
     if (this.disposed || this.initEpoch !== epoch || this.session) {
-      await safeCall(() => session.disconnect?.());
+      // Never detach a handle that shares the adopted session's id: the
+      // SDK detaches by id, which would cut off the live session too.
+      const live = this.session as SdkSession | null;
+      if (opened.session.sessionId === undefined || opened.session.sessionId !== live?.sessionId) {
+        await safeCall(() => opened.session.disconnect?.());
+      }
       return;
     }
     this.selectedModel = model;
     this.preferredModelOverride = model;
-    this.session = session;
-    this.firstSendOfSession = true;
+    this.adoptSession(opened, "init");
     this.deferredSession = false;
+  }
+
+  private sessionConfig(model: string): SdkSessionOptions {
+    return {
+      model,
+      availableTools: ["builtin:*", "custom:*", "mcp:*"],
+      streaming: true,
+      tools: this.toolsForSession(),
+      onPermissionRequest: (request: SdkPermissionRequest) =>
+        this.handlePermission(request),
+    };
+  }
+
+  /**
+   * Resume the remembered SDK session when possible so the agent keeps
+   * its history across restarts; otherwise create a fresh one. The saved
+   * session is only replaced when it no longer exists or resume has
+   * failed twice in a row; a one-off failure (lock, connection) is
+   * rethrown so the next attempt retries instead of orphaning history.
+   */
+  private async openSession(client: SdkClient, model: string): Promise<OpenedSession> {
+    const resumeId = this.resumeId;
+    if (resumeId && client.resumeSession) {
+      try {
+        const session = await client.resumeSession(resumeId, this.sessionConfig(model));
+        this.resumeFailures = 0;
+        return { session, resumed: true };
+      } catch (e) {
+        if (!(await this.shouldAbandonResume(client, resumeId))) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(
+            `Couldn't reopen this conversation's agent session (${msg}). Send your message again to retry.`,
+          );
+        }
+        console.warn("[AgentSession] resumeSession failed; creating a new session", e);
+        const session = await client.createSession(this.sessionConfig(model));
+        this.resumeFailures = 0;
+        return { session, resumed: false, resumeFailedFor: resumeId };
+      }
+    }
+    const session = await client.createSession(this.sessionConfig(model));
+    return { session, resumed: false };
+  }
+
+  private async shouldAbandonResume(client: SdkClient, id: string): Promise<boolean> {
+    if (!client.getSessionMetadata) return true;
+    try {
+      if ((await client.getSessionMetadata(id)) === undefined) return true;
+    } catch {
+      // Can't tell whether it still exists; count it as a failed attempt.
+    }
+    this.resumeFailures += 1;
+    return this.resumeFailures >= MAX_RESUME_FAILURES;
+  }
+
+  private adoptSession(opened: OpenedSession, cause: SessionOpenedInfo["cause"]): void {
+    this.session = opened.session;
+    // Re-send the preamble on resume too: a session may have been
+    // persisted before its first send, and the preamble's date, vault
+    // settings and tool list may have changed since it was last sent.
+    this.firstSendOfSession = true;
+    const id = opened.session.sessionId;
+    if (!id) return;
+    this.resumeId = id;
+    try {
+      this.opts.onSessionOpened?.({
+        sessionId: id,
+        resumed: opened.resumed,
+        cause,
+        ...(opened.resumeFailedFor ? { resumeFailedFor: opened.resumeFailedFor } : {}),
+      });
+    } catch (e) {
+      console.warn("[AgentSession] onSessionOpened callback threw", e);
+    }
   }
 
   private async pickModel(
@@ -2875,6 +3022,12 @@ export interface SdkClient {
   ping?: () => Promise<unknown> | unknown;
   listModels?: () => Promise<SdkModelInfo[]>;
   createSession: (opts: SdkSessionOptions) => Promise<SdkSession>;
+  /** Reopen a persisted session with its history; throws if it can't. */
+  resumeSession?: (sessionId: string, opts: SdkSessionOptions) => Promise<SdkSession>;
+  /** Permanently delete a persisted session's on-disk state. */
+  deleteSession?: (sessionId: string) => Promise<void>;
+  /** Persisted session metadata, or undefined if no such session exists. */
+  getSessionMetadata?: (sessionId: string) => Promise<unknown>;
   stop?: () => Promise<unknown>;
   forceStop?: () => Promise<void>;
 }
@@ -2921,6 +3074,8 @@ export interface SdkToolExecutionCompleteEvent {
 }
 
 export interface SdkSession {
+  /** Runtime-assigned id; persisted so the session can be resumed later. */
+  readonly sessionId?: string;
   /**
    * Replace this client's tools and handlers in place, preserving
    * conversation state (`@github/copilot-sdk >= 1.0.17`, experimental).

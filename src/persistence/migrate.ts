@@ -28,6 +28,8 @@
 
 import {
   CURRENT_SCHEMA_VERSION,
+  type PersistedContextBoundary,
+  type PersistedSafetyGrants,
   type PersistedConversation,
   type PersistedConversationsState,
   type PersistedMessage,
@@ -160,6 +162,16 @@ function validateConversation(raw: unknown): PersistedConversation | null {
     modelId = null;
   }
 
+  let sdkSessionId: string | null | undefined;
+  if (c.sdkSessionId !== undefined) {
+    sdkSessionId =
+      typeof c.sdkSessionId === "string" && c.sdkSessionId.length > 0
+        ? c.sdkSessionId
+        : null;
+  }
+  const contextBoundary = validateContextBoundary(c.contextBoundary);
+  const safetyGrants = validateSafetyGrants(c.safetyGrants);
+
   const messages: PersistedMessage[] = [];
   for (const m of c.messages) {
     const validated = validateMessage(m);
@@ -185,7 +197,50 @@ function validateConversation(raw: unknown): PersistedConversation | null {
   if (modelId !== undefined) {
     out.modelId = modelId;
   }
+  if (sdkSessionId !== undefined) {
+    out.sdkSessionId = sdkSessionId;
+  }
+  if (contextBoundary !== undefined) {
+    out.contextBoundary = contextBoundary;
+  }
+  if (safetyGrants !== undefined) {
+    out.safetyGrants = safetyGrants;
+  }
   return out;
+}
+
+/** Lenient: keeps only well-formed grant entries; never fatal. */
+function validateSafetyGrants(raw: unknown): PersistedSafetyGrants | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as Record<string, unknown>;
+  const strings = (v: unknown): string[] | undefined => {
+    if (!Array.isArray(v)) return undefined;
+    const out = v.filter((s): s is string => typeof s === "string" && s.length > 0);
+    return out.length > 0 ? out : undefined;
+  };
+  const out: PersistedSafetyGrants = {};
+  if (g.vault === true) out.vault = true;
+  const extraVault = strings(g.extraVault);
+  if (extraVault) out.extraVault = extraVault;
+  const mcp = strings(g.mcp);
+  if (mcp) out.mcp = mcp;
+  const builtin = strings(g.builtin);
+  if (builtin) out.builtin = builtin;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Lenient: malformed markers are dropped (undefined), never fatal. */
+function validateContextBoundary(
+  raw: unknown,
+): PersistedContextBoundary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const b = raw as Record<string, unknown>;
+  if (typeof b.afterMessageId !== "string") return undefined;
+  if (b.reason !== "legacy" && b.reason !== "resume-failed") return undefined;
+  if (b.state !== "offered" && b.state !== "sent" && b.state !== "dismissed") {
+    return undefined;
+  }
+  return { afterMessageId: b.afterMessageId, reason: b.reason, state: b.state };
 }
 
 function validateMessage(raw: unknown): PersistedMessage | null {

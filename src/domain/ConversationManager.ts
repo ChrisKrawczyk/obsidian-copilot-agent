@@ -23,6 +23,7 @@ import type {
   Conversation,
 } from "./Conversation";
 import {
+  cloneBoundary,
   conversationToPersistedMetadata,
 } from "./Conversation";
 import type {
@@ -32,10 +33,13 @@ import type {
 } from "./ConversationRuntime";
 import type { UndoJournalPersistOp, UndoEntry } from "./UndoJournal";
 import type { ConversationsStore } from "../persistence/ConversationsStore";
-import type {
-  PersistedConversation,
-  PersistedMessage,
-  PersistedUndoEntry,
+import {
+  cloneSafetyGrants,
+  type PersistedContextBoundary,
+  type PersistedConversation,
+  type PersistedMessage,
+  type PersistedSafetyGrants,
+  type PersistedUndoEntry,
 } from "../persistence/PersistedShape";
 
 /** Spec FR-002 soft cap. */
@@ -136,6 +140,11 @@ export interface ConversationManagerOptions {
    * to the Obsidian SDK.
    */
   onUnavailableDefault?: (configuredDefault: string) => void;
+  /**
+   * Called once after a conversation is permanently removed (runtime
+   * disposed, store row deleted). Errors are logged, never rethrown.
+   */
+  onConversationRemoved?: (conv: Conversation) => void | Promise<void>;
 }
 
 export type ConversationChangeEvent =
@@ -163,6 +172,9 @@ export class ConversationManager {
     configuredDefault?: string | null;
   };
   private readonly onUnavailableDefault?: (configuredDefault: string) => void;
+  private readonly onConversationRemoved?: (
+    conv: Conversation,
+  ) => void | Promise<void>;
   private readonly conversations = new Map<string, Conversation>();
   private readonly runtimes = new Map<string, ConversationRuntime>();
   private readonly listeners = new Set<ConversationListener>();
@@ -175,6 +187,7 @@ export class ConversationManager {
     this.now = opts.now ?? (() => Date.now());
     this.resolveCreationModelId = opts.resolveCreationModelId;
     this.onUnavailableDefault = opts.onUnavailableDefault;
+    this.onConversationRemoved = opts.onConversationRemoved;
   }
 
   // ---------------- Hydration ----------------
@@ -209,6 +222,15 @@ export class ConversationManager {
       if (c.modelId !== undefined) {
         meta.modelId = c.modelId;
       }
+      if (c.sdkSessionId !== undefined) {
+        meta.sdkSessionId = c.sdkSessionId;
+      }
+      if (c.contextBoundary !== undefined) {
+        meta.contextBoundary = cloneBoundary(c.contextBoundary);
+      }
+      if (c.safetyGrants !== undefined) {
+        meta.safetyGrants = cloneSafetyGrants(c.safetyGrants);
+      }
       this.conversations.set(c.id, meta);
       // Defensive: ensure the store has a row for every catalog entry
       // (so `setActiveId(meta.id)` further down can't throw). In the
@@ -224,6 +246,15 @@ export class ConversationManager {
             lastActiveAt: c.lastActiveAt,
             archived: c.archived === true ? true : undefined,
             ...(c.modelId !== undefined ? { modelId: c.modelId } : {}),
+            ...(c.sdkSessionId !== undefined
+              ? { sdkSessionId: c.sdkSessionId }
+              : {}),
+            ...(c.contextBoundary !== undefined
+              ? { contextBoundary: c.contextBoundary }
+              : {}),
+            ...(c.safetyGrants !== undefined
+              ? { safetyGrants: c.safetyGrants }
+              : {}),
             messages: c.messages,
             undoEntries: c.undoEntries,
           });
@@ -429,6 +460,65 @@ export class ConversationManager {
   }
 
   /**
+   * Bind (or clear with `null`) the Copilot SDK session id used to
+   * resume this conversation's agent session across restarts.
+   * Metadata-only write; no-op when unchanged.
+   */
+  setSdkSessionId(id: string, sdkSessionId: string | null): void {
+    const conv = this.conversations.get(id);
+    if (!conv) {
+      throw new Error(`setSdkSessionId: no conversation with id "${id}"`);
+    }
+    const prev = conv.sdkSessionId === undefined ? null : conv.sdkSessionId;
+    if (prev === sdkSessionId) return;
+    conv.sdkSessionId = sdkSessionId;
+    this.persistMetadataOnly(conv);
+    this.emit({ kind: "metadata-changed", id });
+  }
+
+  /**
+   * Set (or clear with `null`) the UI-only context-boundary marker.
+   * Compared by value; no-op when unchanged.
+   */
+  setContextBoundary(
+    id: string,
+    boundary: PersistedContextBoundary | null,
+  ): void {
+    const conv = this.conversations.get(id);
+    if (!conv) {
+      throw new Error(`setContextBoundary: no conversation with id "${id}"`);
+    }
+    const prev = conv.contextBoundary ?? null;
+    if (prev === null && boundary === null) return;
+    if (
+      prev !== null &&
+      boundary !== null &&
+      prev.afterMessageId === boundary.afterMessageId &&
+      prev.reason === boundary.reason &&
+      prev.state === boundary.state
+    ) {
+      return;
+    }
+    conv.contextBoundary = cloneBoundary(boundary);
+    this.persistMetadataOnly(conv);
+    this.emit({ kind: "metadata-changed", id });
+  }
+
+  /**
+   * Replace the conversation's saved "approve for session" grants.
+   * Silently ignores unknown ids: grants can change while a removed
+   * conversation's runtime is still winding down.
+   */
+  setSafetyGrants(id: string, grants: PersistedSafetyGrants | null): void {
+    const conv = this.conversations.get(id);
+    if (!conv) return;
+    const empty = !grants || Object.keys(grants).length === 0;
+    if (empty && !conv.safetyGrants) return;
+    conv.safetyGrants = empty ? null : cloneSafetyGrants(grants);
+    this.persistMetadataOnly(conv);
+  }
+
+  /**
    * Spec FR-005: if a conversation still bears one of the manager-
    * generated placeholder names, derive a name from the first user
    * message and rename. No-op when the name has already been
@@ -484,6 +574,19 @@ export class ConversationManager {
     }
     this.conversations.delete(id);
     if (this.store) this.store.removeConversation(id);
+    if (this.onConversationRemoved) {
+      // Fire-and-forget: cleanup (e.g. an SDK RPC) must not delay the UI.
+      try {
+        const pending = this.onConversationRemoved(cloneMeta(conv));
+        if (pending) {
+          void Promise.resolve(pending).catch((err) =>
+            console.error("[ConversationManager] onConversationRemoved threw", err),
+          );
+        }
+      } catch (err) {
+        console.error("[ConversationManager] onConversationRemoved threw", err);
+      }
+    }
     if (this.activeId === id) {
       const previous = this.activeId;
       const fallback = this.pickFallbackActive();
@@ -819,6 +922,15 @@ function cloneMeta(c: Conversation): Conversation {
   };
   if (c.modelId !== undefined) {
     out.modelId = c.modelId;
+  }
+  if (c.sdkSessionId !== undefined) {
+    out.sdkSessionId = c.sdkSessionId;
+  }
+  if (c.contextBoundary !== undefined) {
+    out.contextBoundary = cloneBoundary(c.contextBoundary);
+  }
+  if (c.safetyGrants !== undefined) {
+    out.safetyGrants = cloneSafetyGrants(c.safetyGrants);
   }
   return out;
 }

@@ -40,6 +40,7 @@ import type { PluginDataIO } from "../auth/TokenStore";
 import { migrate } from "./migrate";
 import {
   CURRENT_SCHEMA_VERSION,
+  cloneSafetyGrants,
   type PersistedConversation,
   type PersistedConversationsState,
   type PersistedMessage,
@@ -559,6 +560,15 @@ function cloneConversation(c: PersistedConversation): PersistedConversation {
   // v0.3-migrated row.
   if (c.modelId !== undefined) {
     out.modelId = c.modelId;
+  }
+  if (c.sdkSessionId !== undefined) {
+    out.sdkSessionId = c.sdkSessionId;
+  }
+  if (c.contextBoundary !== undefined) {
+    out.contextBoundary = c.contextBoundary ? { ...c.contextBoundary } : null;
+  }
+  if (c.safetyGrants !== undefined) {
+    out.safetyGrants = cloneSafetyGrants(c.safetyGrants);
   }
   return out;
 }
