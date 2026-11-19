@@ -3,7 +3,9 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.11.0] - 2026-11-19
+
+You can now steer or queue messages while the agent is working. Conversations, including tools you approved for the session, now carry over when Obsidian restarts or the plugin reloads.
 
 ### Added
 
