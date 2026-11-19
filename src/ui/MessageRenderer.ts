@@ -22,6 +22,8 @@ interface MessageSlot {
   lastContent: string;
   /** Last `status` we rendered (drives wrapper CSS classes). */
   lastStatus: Message["status"];
+  /** Role the slot was built for; a change rebuilds the slot in place. */
+  lastRole: Message["role"];
   /**
    * Cheap signature of the last rendered toolCalls so we can skip
    * re-rendering when nothing changed. Captures id + outcome + result
@@ -107,6 +109,16 @@ export class MessageRenderer {
       const existing = this.slots.get(m.id);
       if (!existing) {
         this.appendMessage(m);
+        continue;
+      }
+      if (existing.lastRole !== m.role) {
+        // Steering turns an empty assistant placeholder into the user
+        // message; rebuild the slot where the old one sat.
+        this.cancelRaf(existing);
+        existing.component.unload();
+        this.slots.delete(m.id);
+        this.appendMessage(m);
+        existing.wrapperEl.replaceWith(this.slots.get(m.id)!.wrapperEl);
         continue;
       }
       const contentChanged = existing.lastContent !== m.content;
@@ -212,6 +224,7 @@ export class MessageRenderer {
       component,
       lastContent: m.content,
       lastStatus: m.status,
+      lastRole: m.role,
       lastToolCallsSig: toolCallsSig(m.toolCalls),
     };
     this.slots.set(m.id, slot);

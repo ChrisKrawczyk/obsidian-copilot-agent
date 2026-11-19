@@ -261,7 +261,24 @@ export type StreamEvent =
       id: string;
       choice: ApprovalChoice;
     }
+  | {
+      // A steering/queued follow-up (see `sendFollowUp`) was delivered
+      // to the model. Marks a transcript boundary: everything streamed
+      // before belongs to the previous assistant segment, whose final
+      // text (last root `assistant.message`) is `previousSegmentContent`.
+      type: "follow_up_consumed";
+      id: string;
+      text: string;
+      mode: FollowUpMode;
+      previousSegmentContent?: string;
+    }
   | { type: "complete"; content: string; toolCalls: AssistantToolCall[] };
+
+/**
+ * `steer` joins the running turn (read before the next model request);
+ * `queue` runs as its own turn once the current one finishes.
+ */
+export type FollowUpMode = "steer" | "queue";
 
 /** User's response to a pending approval prompt. */
 export type ApprovalChoice =
@@ -309,6 +326,31 @@ export interface AgentSession {
    * remains usable for the next turn.
    */
   cancelCurrent(): Promise<void>;
+  /**
+   * True while a `sendMessageStreaming` iterator is live and the SDK
+   * supports follow-up delivery (`session.send`).
+   */
+  canSendFollowUp?(): boolean;
+  /**
+   * Notified whenever `canSendFollowUp()` may have changed (a stream
+   * became ready for follow-ups, or stopped accepting them). Returns an
+   * unsubscribe function.
+   */
+  onFollowUpAvailabilityChange?(listener: () => void): () => void;
+  /**
+   * Send a follow-up into the live stream. `id` is caller-chosen and
+   * unique; it is echoed by the `follow_up_consumed` stream event when
+   * the model reads the message. The live iterator keeps running until
+   * every follow-up has been consumed (or withdrawn) and the session is
+   * idle. Rejects when no stream is live or delivery fails.
+   */
+  sendFollowUp?(id: string, text: string, mode: FollowUpMode): Promise<void>;
+  /**
+   * Take back a follow-up the model has not read yet. Resolves `true`
+   * if the runtime removed it, `false` if it was already consumed or
+   * is unknown.
+   */
+  withdrawFollowUp?(id: string): Promise<boolean>;
   /** Reset the SDK session so model context is forgotten. */
   resetConversation(): Promise<void>;
   /**
@@ -566,6 +608,18 @@ export class CopilotAgentSession implements AgentSession {
    * approval flows don't trip the idle watchdog.
    */
   private bumpIdleTimer: (() => void) | null = null;
+  /**
+   * Set during sendMessageStreaming: follow-up delivery/withdrawal and
+   * the cancel hook that lets `cancelCurrent` end a stream that is only
+   * waiting on queued runs (no `sendAndWait` left to reject).
+   */
+  private currentFollowUps: {
+    send: (id: string, text: string, mode: FollowUpMode) => Promise<void>;
+    withdraw: (id: string) => Promise<boolean>;
+    /** With a reason, the stream ends with that error instead of success. */
+    cancel: (reason?: Error) => void;
+  } | null = null;
+  private readonly followUpAvailabilityListeners = new Set<() => void>();
   /**
    * Set of tool names we registered as custom tools, used to classify
    * tool sources (`custom` vs `builtin`/`mcp`) in the chat UI.
@@ -841,8 +895,15 @@ export class CopilotAgentSession implements AgentSession {
      * SDK after settlement can't corrupt state.
      */
     let acceptingDeltas = true;
+    // While a withdrawal races a consumption, events are held here so
+    // the transcript split can be dropped if the withdrawal wins.
+    let held: StreamEvent[] | null = null;
     const push = (ev: StreamEvent): void => {
       if (!acceptingDeltas && ev.type === "delta") return;
+      if (held) {
+        held.push(ev);
+        return;
+      }
       queue.push(ev);
       if (resolveWait) {
         const r = resolveWait;
@@ -856,16 +917,209 @@ export class CopilotAgentSession implements AgentSession {
     // a dead queue.
     this.currentStreamPush = push;
 
+    // Follow-ups (steering/queueing). Keyed by the caller-chosen id,
+    // which doubles as the SDK `clientTurnId` so `user.message` can be
+    // matched even before `send()` resolves.
+    type TrackedFollowUp = {
+      text: string;
+      mode: FollowUpMode;
+      consumed: boolean;
+      messageId?: string;
+      sending: Promise<void>;
+      withdrawing: boolean;
+      /** Set when consumed while a withdrawal was in flight; the
+       *  consumption is held until the withdrawal resolves. */
+      deferred?: {
+        event: StreamEvent;
+        prevAnyConsumed: boolean;
+        prevSegment: string | undefined;
+        prevIdleSeen: boolean;
+        prevDeltas: boolean;
+      };
+    };
+    const followUps = new Map<string, TrackedFollowUp>();
+    const followUpIdByMessageId = new Map<string, string>();
+    let inFlightSends = 0;
+    let deferring = 0;
+    let anyConsumed = false;
+    let idleSeen = false;
+    let cancelled = false;
+    let segmentLastAssistant: string | undefined;
+    // Deltas streamed after the last root `assistant.message` aren't in
+    // `segmentLastAssistant`, so it can't stand in for the segment text.
+    let deltasSinceAssistantMessage = false;
+    let lastConsumption: StreamEvent | undefined;
+    /**
+     * Flush held events. `drop` is a consumption the SDK withdrew: it and
+     * the text the interrupted turn streamed after it are discarded (tool
+     * events are kept — those calls really ran).
+     */
+    const releaseHeld = (drop?: StreamEvent): void => {
+      if (!held) return;
+      if (drop) {
+        const at = held.indexOf(drop);
+        if (at >= 0) {
+          const kept = held.slice(0, at);
+          let inWithdrawn = true;
+          for (const e of held.slice(at + 1)) {
+            if (e.type === "follow_up_consumed") inWithdrawn = false;
+            if (inWithdrawn && e.type === "delta") continue;
+            kept.push(e);
+          }
+          held = kept;
+        }
+      }
+      if (deferring > 0) return;
+      const events = held;
+      held = null;
+      for (const e of events) push(e);
+    };
+    const consumeFollowUp = (id: string): void => {
+      const f = followUps.get(id);
+      if (!f || f.consumed) return;
+      f.consumed = true;
+      const prevAnyConsumed = anyConsumed;
+      const prevSegment = segmentLastAssistant;
+      const prevIdleSeen = idleSeen;
+      const prevDeltas = deltasSinceAssistantMessage;
+      anyConsumed = true;
+      idleSeen = false;
+      bumpIdleTimer();
+      const event: StreamEvent = {
+        type: "follow_up_consumed",
+        id,
+        text: f.text,
+        mode: f.mode,
+        previousSegmentContent: deltasSinceAssistantMessage
+          ? undefined
+          : segmentLastAssistant,
+      };
+      segmentLastAssistant = undefined;
+      deltasSinceAssistantMessage = false;
+      lastConsumption = event;
+      if (f.withdrawing) {
+        f.deferred = {
+          event,
+          prevAnyConsumed,
+          prevSegment,
+          prevIdleSeen,
+          prevDeltas,
+        };
+        deferring += 1;
+        held = held ?? [];
+      }
+      push(event);
+    };
+    this.currentFollowUps = {
+      send: async (id, text, mode) => {
+        if (typeof session.send !== "function") {
+          throw new Error("This Copilot runtime does not support steering.");
+        }
+        if (cancelled) throw new Error("The reply was stopped.");
+        if (followUps.has(id)) throw new Error(`Duplicate follow-up id ${id}`);
+        inFlightSends += 1;
+        bumpIdleTimer();
+        const record: TrackedFollowUp = {
+          text,
+          mode,
+          consumed: false,
+          sending: Promise.resolve(),
+          withdrawing: false,
+        };
+        followUps.set(id, record);
+        const sending = (async () => {
+          try {
+            const messageId = await session.send!({
+              prompt: text,
+              mode: mode === "steer" ? "immediate" : "enqueue",
+              clientTurnId: id,
+            });
+            if (typeof messageId === "string") {
+              record.messageId = messageId;
+              followUpIdByMessageId.set(messageId, id);
+            }
+            // Admitted after Stop: abort again so it can't run unseen.
+            if (cancelled && typeof session.abort === "function") {
+              void Promise.resolve(session.abort()).catch((e) =>
+                console.warn("[AgentSession] post-cancel abort failed", e),
+              );
+            }
+          } catch (err) {
+            followUps.delete(id);
+            throw err;
+          } finally {
+            inFlightSends -= 1;
+            wakeup();
+          }
+        })();
+        record.sending = sending.catch(() => {});
+        await sending;
+      },
+      withdraw: async (id) => {
+        const f = followUps.get(id);
+        if (!f || f.consumed || f.withdrawing) return false;
+        f.withdrawing = true;
+        let removed = false;
+        try {
+          await f.sending;
+          if (!f.messageId || (f.consumed && !f.deferred)) return false;
+          const queueRpc = session.rpc?.queue;
+          if (typeof queueRpc?.withdrawMessage !== "function") return false;
+          const res = await queueRpc.withdrawMessage({
+            messageId: f.messageId,
+            expectedPrompt: f.text,
+          });
+          // The SDK is authoritative: a message it removed from the
+          // running turn's history never happened, even if we saw it.
+          removed = !!res?.removed && (!f.consumed || !!f.deferred);
+          return removed;
+        } finally {
+          f.withdrawing = false;
+          const d = f.deferred;
+          f.deferred = undefined;
+          if (removed) {
+            followUps.delete(id);
+            if (d) {
+              anyConsumed = d.prevAnyConsumed;
+              idleSeen = idleSeen || d.prevIdleSeen;
+              // Text the withdrawn turn produced doesn't belong to the
+              // segment it would have closed.
+              if (lastConsumption === d.event) {
+                segmentLastAssistant = d.prevSegment;
+                deltasSinceAssistantMessage = d.prevDeltas;
+              }
+            }
+          }
+          if (d) {
+            deferring -= 1;
+            releaseHeld(removed ? d.event : undefined);
+          }
+          wakeup();
+        }
+      },
+      cancel: (reason) => {
+        cancelled = true;
+        if (reason && !failure) failure = reason;
+        wakeup();
+      },
+    };
+    this.notifyFollowUpAvailability();
+
     // Subscribe *before* sending so the first delta isn't lost.
     let unsubDelta: (() => void) | undefined;
     let unsubToolStart: (() => void) | undefined;
     let unsubToolComplete: (() => void) | undefined;
+    let unsubUserMessage: (() => void) | undefined;
+    let unsubAssistantMessage: (() => void) | undefined;
+    let unsubIdle: (() => void) | undefined;
+    let unsubError: (() => void) | undefined;
     if (typeof session.on === "function") {
       try {
         unsubDelta = session.on("assistant.message_delta", (event) => {
           const delta = event?.data?.deltaContent;
           if (typeof delta === "string" && delta.length > 0) {
             bumpIdleTimer();
+            deltasSinceAssistantMessage = true;
             push({ type: "delta", text: delta });
           }
         });
@@ -984,9 +1238,68 @@ export class CopilotAgentSession implements AgentSession {
           e,
         );
       }
+      try {
+        unsubUserMessage = session.on("user.message", (event) => {
+          if (event?.agentId) return;
+          const d = event?.data;
+          if (!d) return;
+          const id =
+            (typeof d.clientTurnId === "string" && followUps.has(d.clientTurnId)
+              ? d.clientTurnId
+              : undefined) ??
+            (typeof d.messageId === "string"
+              ? followUpIdByMessageId.get(d.messageId)
+              : undefined);
+          if (id) consumeFollowUp(id);
+        });
+        unsubAssistantMessage = session.on("assistant.message", (event) => {
+          if (event?.agentId) return;
+          const content = event?.data?.content;
+          if (typeof content === "string" && content.length > 0) {
+            segmentLastAssistant = content;
+            deltasSinceAssistantMessage = false;
+          }
+          bumpIdleTimer();
+        });
+        unsubIdle = session.on("session.idle", (event) => {
+          if (event?.agentId) return;
+          // Unconsumed follow-ups still hold the stream open, and a later
+          // consumption clears this again, so an idle that beats a send's
+          // acknowledgement isn't lost.
+          idleSeen = true;
+          wakeup();
+        });
+        unsubError = session.on("session.error", (event) => {
+          if (event?.agentId || failure) return;
+          // `sendAndWait` rejects for the original message's errors, but
+          // not for a follow-up's (matched by `originatingMessageId`) or
+          // for queued runs that start after it settles.
+          const origin = event?.data?.originatingMessageId;
+          const forFollowUp =
+            typeof origin === "string" && followUpIdByMessageId.has(origin);
+          if (!settled && !forFollowUp) return;
+          const message = event?.data?.message;
+          failure = new Error(
+            typeof message === "string" && message.length > 0
+              ? message
+              : "The queued message failed.",
+          );
+          wakeup();
+        });
+      } catch (e) {
+        console.warn("[AgentSession] session.on follow-up subscribe failed", e);
+      }
     }
     const cleanupSubscription = (): void => {
-      for (const u of [unsubDelta, unsubToolStart, unsubToolComplete]) {
+      for (const u of [
+        unsubDelta,
+        unsubToolStart,
+        unsubToolComplete,
+        unsubUserMessage,
+        unsubAssistantMessage,
+        unsubIdle,
+        unsubError,
+      ]) {
         if (!u) continue;
         try {
           u();
@@ -997,6 +1310,10 @@ export class CopilotAgentSession implements AgentSession {
       unsubDelta = undefined;
       unsubToolStart = undefined;
       unsubToolComplete = undefined;
+      unsubUserMessage = undefined;
+      unsubAssistantMessage = undefined;
+      unsubIdle = undefined;
+      unsubError = undefined;
     };
 
     let timedOut = false;
@@ -1005,9 +1322,14 @@ export class CopilotAgentSession implements AgentSession {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timedOut = true;
-        this.cancelCurrent().catch((e) =>
-          console.warn("[AgentSession] abort on timeout failed", e),
-        );
+        wakeup();
+        // Abort the session this stream belongs to; `this.session` may
+        // already be a different one.
+        if (typeof session.abort === "function") {
+          void Promise.resolve(session.abort()).catch((e) =>
+            console.warn("[AgentSession] abort on timeout failed", e),
+          );
+        }
       }, SDK_IDLE_TIMEOUT_MS);
     };
     bumpIdleTimer();
@@ -1015,7 +1337,6 @@ export class CopilotAgentSession implements AgentSession {
     // the SDK asks for permission (an explicit sign of model activity).
     this.bumpIdleTimer = bumpIdleTimer;
 
-    let done = false;
     let settled = false; // sendAndWait has resolved or rejected
     let finalContent = "";
     let failure: unknown = null;
@@ -1027,6 +1348,25 @@ export class CopilotAgentSession implements AgentSession {
         r();
       }
     };
+    const hasPendingFollowUps = (): boolean => {
+      if (inFlightSends > 0) return true;
+      for (const f of followUps.values()) if (!f.consumed) return true;
+      return false;
+    };
+    // The original run settles via `sendAndWait`; follow-ups that turn
+    // into their own runs (queued, or steering promoted after the turn
+    // ended) only finish with a root `session.idle` seen after the last
+    // consumption.
+    const isFinished = (): boolean => {
+      if (failure || timedOut) return true;
+      if (!settled) return false;
+      // A held consumption must be released (or dropped) before ending.
+      if (deferring > 0) return false;
+      // After Stop, wait for in-flight sends so they're re-aborted.
+      if (cancelled) return inFlightSends === 0;
+      if (hasPendingFollowUps()) return false;
+      return !anyConsumed || idleSeen;
+    };
 
     // Kick off the turn but DON'T await — we need to interleave with
     // the queue draining loop below.
@@ -1037,7 +1377,6 @@ export class CopilotAgentSession implements AgentSession {
         (resp) => {
           settled = true;
           finalContent = extractText(resp) ?? "";
-          done = true;
           wakeup();
         },
         (err) => {
@@ -1055,7 +1394,6 @@ export class CopilotAgentSession implements AgentSession {
           } else {
             failure = err;
           }
-          done = true;
           wakeup();
         },
       );
@@ -1066,13 +1404,13 @@ export class CopilotAgentSession implements AgentSession {
           yield queue.shift()!;
           continue;
         }
-        if (done) break;
+        if (isFinished()) break;
         await new Promise<void>((resolve) => {
           resolveWait = resolve;
         });
       }
-      // Drain any deltas that arrived after `done` flipped but before
-      // we re-entered the loop.
+      // Drain any events that arrived after the stream finished but
+      // before we re-entered the loop.
       while (queue.length > 0) {
         yield queue.shift()!;
       }
@@ -1082,7 +1420,13 @@ export class CopilotAgentSession implements AgentSession {
       // consumer has accepted the terminal event.
       acceptingDeltas = false;
       cleanupSubscription();
+      this.clearFollowUps();
 
+      if (!failure && timedOut) {
+        failure = new Error(
+          `Model went idle for over ${SDK_IDLE_TIMEOUT_MS / 1000}s`,
+        );
+      }
       if (failure) {
         if (this.opts.onAuthError && isAuthErrorLocal(failure)) {
           try {
@@ -1096,7 +1440,9 @@ export class CopilotAgentSession implements AgentSession {
 
       yield {
         type: "complete",
-        content: finalContent,
+        // After a follow-up boundary the `sendAndWait` reply belongs to
+        // the original run, not to the last transcript segment.
+        content: anyConsumed ? (segmentLastAssistant ?? "") : finalContent,
         toolCalls: this.toolCallsThisTurn,
       };
     } finally {
@@ -1105,17 +1451,21 @@ export class CopilotAgentSession implements AgentSession {
       acceptingDeltas = false;
       cleanupSubscription();
       this.currentStreamPush = null;
+      this.clearFollowUps();
       this.cancelAllPendingApprovals(
         "Stream ended before user approved this tool call.",
       );
       // If the consumer closed the iterator early (break, throw, view
-      // teardown) the SDK turn may still be in flight. Abort it on the
-      // captured `session` so it doesn't keep running in the background
-      // and tie up the SDK channel for the next turn. We deliberately
-      // use the captured `session` rather than `this.cancelCurrent()`
-      // so a reset/reconnect that swapped `this.session` can't make us
+      // teardown), or a failure left follow-ups queued, the SDK may
+      // still be working. Abort it on the captured `session` so it
+      // doesn't keep running in the background and tie up the SDK
+      // channel for the next turn. We deliberately use the captured
+      // `session` rather than `this.cancelCurrent()` so a
+      // reset/reconnect that swapped `this.session` can't make us
       // abort a newer, unrelated turn.
-      if (!settled && typeof session.abort === "function") {
+      const runtimeBusy =
+        !settled || hasPendingFollowUps() || (anyConsumed && !idleSeen);
+      if (runtimeBusy && !cancelled && typeof session.abort === "function") {
         try {
           await Promise.resolve(session.abort());
         } catch (e) {
@@ -1139,6 +1489,9 @@ export class CopilotAgentSession implements AgentSession {
 
   async cancelCurrent(): Promise<void> {
     this.cancelAllPendingApprovals("User cancelled the turn.");
+    // Ends a stream that is waiting only on queued runs; the SDK abort
+    // below also drops anything still queued.
+    this.currentFollowUps?.cancel();
     const session = this.session;
     if (!session || typeof session.abort !== "function") return;
     try {
@@ -1146,6 +1499,48 @@ export class CopilotAgentSession implements AgentSession {
     } catch (e) {
       console.warn("[AgentSession] session.abort failed", e);
     }
+  }
+
+  canSendFollowUp(): boolean {
+    return (
+      this.currentFollowUps !== null &&
+      typeof this.session?.send === "function"
+    );
+  }
+
+  onFollowUpAvailabilityChange(listener: () => void): () => void {
+    this.followUpAvailabilityListeners.add(listener);
+    return () => {
+      this.followUpAvailabilityListeners.delete(listener);
+    };
+  }
+
+  private notifyFollowUpAvailability(): void {
+    for (const l of [...this.followUpAvailabilityListeners]) {
+      try {
+        l();
+      } catch (e) {
+        console.warn("[AgentSession] follow-up availability listener threw", e);
+      }
+    }
+  }
+
+  private clearFollowUps(): void {
+    if (this.currentFollowUps === null) return;
+    this.currentFollowUps = null;
+    this.notifyFollowUpAvailability();
+  }
+
+  async sendFollowUp(id: string, text: string, mode: FollowUpMode): Promise<void> {
+    const live = this.currentFollowUps;
+    if (!live) throw new Error("No reply in progress to steer or queue into.");
+    await live.send(id, text, mode);
+  }
+
+  async withdrawFollowUp(id: string): Promise<boolean> {
+    const live = this.currentFollowUps;
+    if (!live) return false;
+    return live.withdraw(id);
   }
 
   /**
@@ -1427,6 +1822,9 @@ export class CopilotAgentSession implements AgentSession {
     this.cancelAllPendingApprovals("Conversation was reset.");
     const oldId = this.session?.sessionId ?? this.resumeId;
     this.resumeId = null;
+    this.currentFollowUps?.cancel(
+      new Error("Conversation was reset before the reply finished."),
+    );
     if (!this.client) {
       this.initPromise = null;
       this.session = null;
@@ -1493,6 +1891,11 @@ export class CopilotAgentSession implements AgentSession {
     // runtime is no longer wanted and bail out cleanly. See the
     // `initEpoch` field docs.
     this.initEpoch++;
+    // A stream only waiting on queued runs would otherwise hang until
+    // the idle timeout once the session is gone.
+    this.currentFollowUps?.cancel(
+      new Error("Session ended before the reply finished."),
+    );
     // If init is still in flight, wait briefly so it can either finish
     // (and we then tear it down) or fail (and stay null). This closes
     // the race where Obsidian unloads — or the token rotates — mid-init
@@ -2690,6 +3093,25 @@ export interface SdkSession {
    */
   setModel?: (modelId: string, options?: unknown) => Promise<unknown> | unknown;
   /**
+   * Fire-and-forget send (SDK `MessageOptions`). Used for follow-ups
+   * while a turn runs: `mode: "immediate"` steers the running turn,
+   * `mode: "enqueue"` queues a new turn. Resolves with the message id.
+   */
+  send?: (options: {
+    prompt: string;
+    mode?: "enqueue" | "immediate";
+    clientTurnId?: string;
+  }) => Promise<string>;
+  /** Experimental pending-queue RPCs (SDK `session.rpc.queue`). */
+  rpc?: {
+    queue?: {
+      withdrawMessage?: (params: {
+        messageId: string;
+        expectedPrompt: string;
+      }) => Promise<{ removed?: boolean; interrupted?: boolean }>;
+    };
+  };
+  /**
    * Phase 4/5: subscribe to a specific event type. The SDK returns an
    * unsubscribe function. Modelled structurally so tests can stub it.
    */
@@ -2704,7 +3126,57 @@ export interface SdkSession {
     ((
       eventType: "tool.execution_complete",
       handler: (event: SdkToolExecutionCompleteEvent) => void,
+    ) => () => void) &
+    ((
+      eventType: "user.message",
+      handler: (event: SdkUserMessageEvent) => void,
+    ) => () => void) &
+    ((
+      eventType: "assistant.message",
+      handler: (event: SdkAssistantMessageEvent) => void,
+    ) => () => void) &
+    ((
+      eventType: "session.idle",
+      handler: (event: SdkSessionIdleEvent) => void,
+    ) => () => void) &
+    ((
+      eventType: "session.error",
+      handler: (event: SdkSessionErrorEvent) => void,
     ) => () => void);
+}
+
+/** A run failed (including queued runs `sendAndWait` doesn't observe). */
+export interface SdkSessionErrorEvent {
+  type: "session.error";
+  agentId?: string;
+  data: { message?: string; errorType?: string; originatingMessageId?: string };
+}
+
+/** A user message entered the conversation (initial, steering or queued). */
+export interface SdkUserMessageEvent {
+  type: "user.message";
+  /** Absent for the root agent. */
+  agentId?: string;
+  data: {
+    content?: string;
+    messageId?: string;
+    /** Echo of the `clientTurnId` passed to `send`. */
+    clientTurnId?: string;
+    delivery?: "idle" | "steering" | "queued";
+  };
+}
+
+/** A complete assistant message (one per model response in a turn). */
+export interface SdkAssistantMessageEvent {
+  type: "assistant.message";
+  agentId?: string;
+  data: { content?: string; messageId?: string };
+}
+
+/** The session finished all work, including queued turns. */
+export interface SdkSessionIdleEvent {
+  type: "session.idle";
+  agentId?: string;
 }
 
 export interface SdkPermissionRequest {

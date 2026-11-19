@@ -290,6 +290,52 @@
   gap: 0.4rem;
 }
 
+.copilot-agent-send-menu {
+  margin-left: -0.25rem;
+  padding: 0 0.25rem;
+}
+
+/* Steering / queued messages the agent hasn't read yet. */
+.copilot-agent-followups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.copilot-agent-followup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  border-left: 3px solid var(--interactive-accent);
+  font-size: var(--font-ui-small);
+}
+
+.copilot-agent-followup-queue {
+  border-left-color: var(--text-faint);
+}
+
+.copilot-agent-followup-label {
+  flex: none;
+  color: var(--text-muted);
+  font-weight: var(--font-semibold);
+}
+
+.copilot-agent-followup-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copilot-agent-followup-remove {
+  flex: none;
+}
+
 .copilot-agent-send.is-loading {
   cursor: pointer;
 }
