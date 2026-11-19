@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Steer or queue while the agent is working.** The composer stays usable during a response. **Enter** sends your message into the running turn (steering) and **Ctrl+Enter** (Cmd+Enter on macOS) queues it as the next turn. Messages the agent hasn't read yet appear above the composer. Take one back with **↑** in an empty composer or its **×** button, and its text returns to the input. The **⌄** button next to Stop offers the same actions plus **Stop and send**. Stop (or a mid-stream model switch) discards unread messages and tells you how many. (`src/ui/ChatView.ts`, `src/sdk/AgentSession.ts`.)
+
+### Changed
+
+- **Transcript order matches what the agent saw.** When a steering or queued message is read, the current reply is closed and your message appears after it, followed by the rest of the response. This order is saved with the conversation.
+
 ## [0.10.5] - 2026-11-17
 
 Settings fixes for Obsidian 1.15, which opens Settings in its own popout window. Importing a preset pack works again, and the Add server form is easier to reach.

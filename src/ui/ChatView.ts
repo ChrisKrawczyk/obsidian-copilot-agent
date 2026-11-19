@@ -1,11 +1,13 @@
 import {
   ItemView,
+  Menu,
   Notice,
   WorkspaceLeaf,
   setIcon,
 } from "obsidian";
 import { ChatState } from "../domain/ChatState";
-import type { AgentSession } from "../sdk/AgentSession";
+import type { AgentSession, FollowUpMode } from "../sdk/AgentSession";
+import { splitTurnAtFollowUp } from "./followUpFlow";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
 import type { UndoJournal } from "../domain/UndoJournal";
@@ -31,6 +33,13 @@ import { redactSensitive } from "../mcp/redactSensitive";
 import { truncateMcpText, escapeMcpPlainText } from "../sdk/approvalText";
 
 export const CHAT_VIEW_TYPE = "copilot-agent-chat";
+
+const IDLE_PLACEHOLDER = "Ask Copilot…";
+const MOD_KEY_LABEL =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform ?? "")
+    ? "Cmd"
+    : "Ctrl";
+const STREAMING_PLACEHOLDER = `Steer the agent (Enter) · add to queue (${MOD_KEY_LABEL}+Enter)`;
 
 /**
  * v0.3 Phase 6 (FR-016): precomputed Set of raw-FS tool names so the
@@ -172,6 +181,17 @@ export class ChatView extends ItemView {
    *  mid-stream (Phase 5 picker). Without this, this.agent points at
    *  the NEW active runtime and we'd never abort the actual stream. */
   private currentStreamSession?: AgentSession;
+  /** Conversation id the in-flight stream belongs to. Follow-ups are
+   *  only offered while the view is bound to this conversation. */
+  private currentStreamConversationId: string | null = null;
+  /** Resolves once the in-flight `handleSend` has fully settled
+   *  (post-persist, composer re-enabled). Used by "Stop and send". */
+  private streamDone?: Promise<void>;
+  /** Steering/queued messages sent into the live stream that the agent
+   *  has not read yet, oldest first. */
+  private pendingFollowUps: { id: string; text: string; mode: FollowUpMode }[] = [];
+  private followUpStripEl?: HTMLElement;
+  private sendMenuBtnEl?: HTMLButtonElement;
   private unsubState?: () => void;
   private unsubAuth?: () => void;
   private unsubManager?: () => void;
@@ -472,9 +492,13 @@ export class ChatView extends ItemView {
         console.warn("[ChatView] catalog retry failed", err),
       );
     });
+    this.followUpStripEl = composer.createDiv({
+      cls: "copilot-agent-followups",
+    });
+    this.followUpStripEl.style.display = "none";
     this.inputEl = composer.createEl("textarea", {
       cls: "copilot-agent-input",
-      attr: { rows: "3", placeholder: "Ask Copilot…" },
+      attr: { rows: "3", placeholder: IDLE_PLACEHOLDER },
     });
     this.inputEl.addEventListener("compositionstart", () => {
       this.isComposing = true;
@@ -494,12 +518,29 @@ export class ChatView extends ItemView {
         isStreaming: this.streaming,
         isPending: this.pending,
         isConnected: this.currentAuthKind === "connected",
+        modKey: e.ctrlKey || e.metaKey,
+        canFollowUp: this.canFollowUp(),
+        canRetract: this.canFollowUp() && this.pendingFollowUps.length > 0,
       });
       switch (action) {
         case "submit":
           e.preventDefault();
           void this.submitMessage();
           break;
+        case "steer":
+          e.preventDefault();
+          void this.sendFollowUp("steer");
+          break;
+        case "queue":
+          e.preventDefault();
+          void this.sendFollowUp("queue");
+          break;
+        case "retract": {
+          e.preventDefault();
+          const last = this.pendingFollowUps[this.pendingFollowUps.length - 1];
+          if (last) void this.withdrawFollowUp(last.id);
+          break;
+        }
         case "noop-prevent":
           // Suppress newline-then-no-send to avoid surprising the user, but
           // do NOT route into the Stop handler — only the Stop button
@@ -533,6 +574,13 @@ export class ChatView extends ItemView {
     });
     setIcon(this.sendIconEl, "send");
     this.sendBtnEl.addEventListener("click", () => void this.handleSendOrStop());
+    this.sendMenuBtnEl = composerActions.createEl("button", {
+      cls: "copilot-agent-send-menu clickable-icon",
+      attr: { "aria-label": "More send options" },
+    });
+    setIcon(this.sendMenuBtnEl, "chevron-down");
+    this.sendMenuBtnEl.style.display = "none";
+    this.sendMenuBtnEl.addEventListener("click", () => this.openSendMenu());
 
     // "Open settings" button shown when not connected.
     this.connectBtnEl = composer.createEl("button", {
@@ -561,6 +609,7 @@ export class ChatView extends ItemView {
           this.unsubState?.();
           this.unsubState = this.state.subscribe(() => this.syncList());
           this.syncList();
+          this.refreshFollowUpUi();
           // Phase 8b: after switching or creating a conversation the
           // ConversationPicker retains keyboard focus (it was just
           // clicked), so typing goes nowhere until the user clicks
@@ -764,6 +813,7 @@ export class ChatView extends ItemView {
         this.userRequestedStop = true;
         const streamState = this.currentStreamState ?? targetRuntime.state;
         streamState.interruptStreaming(this.currentPlaceholderId);
+        this.dropPendingFollowUps("Model switched");
       }
       await targetRuntime.setModelId(newModelId, { persist: true });
     } catch (e) {
@@ -996,6 +1046,7 @@ export class ChatView extends ItemView {
       streamState.interruptStreaming(this.currentPlaceholderId);
     }
     this.sendBtnEl.disabled = true;
+    this.dropPendingFollowUps("Stopped");
     try {
       // Cancel the ORIGINATING session, not whatever `this.agent` now
       // points at — a mid-stream `setActive(other)` swaps `this.agent`
@@ -1064,6 +1115,7 @@ export class ChatView extends ItemView {
     this.currentPlaceholderId = placeholderId;
     this.currentStreamState = state;
     this.currentStreamSession = session;
+    this.currentStreamConversationId = convId;
     // Persist the user message immediately so a crash mid-stream
     // doesn't lose the prompt. The assistant placeholder is also
     // persisted as `pending` so the conversation row has a slot for
@@ -1126,6 +1178,22 @@ export class ChatView extends ItemView {
     let finalContent = "";
     let finalToolCalls: import("../domain/types").ToolCall[] = [];
     let failure: unknown = null;
+    // Steering/queueing splits one stream into several assistant
+    // segments. `activePlaceholderId` is the segment receiving output;
+    // tool calls stay with the segment they started in.
+    let activePlaceholderId = placeholderId;
+    const segmentIds: string[] = [placeholderId];
+    const toolOwner = new Map<string, string>();
+    const toolTarget = (toolId: string): string => {
+      let owner = toolOwner.get(toolId);
+      if (!owner) {
+        owner = activePlaceholderId;
+        toolOwner.set(toolId, owner);
+      }
+      return owner;
+    };
+    let resolveStreamDone!: () => void;
+    this.streamDone = new Promise<void>((r) => (resolveStreamDone = r));
 
     this.setStreaming(true);
     try {
@@ -1138,11 +1206,42 @@ export class ChatView extends ItemView {
         }
         if (ev.type === "delta") {
           receivedAnyDelta = true;
-          state.appendDelta(placeholderId, ev.text);
+          state.appendDelta(activePlaceholderId, ev.text);
+        } else if (ev.type === "follow_up_consumed") {
+          this.pendingFollowUps = this.pendingFollowUps.filter(
+            (f) => f.id !== ev.id,
+          );
+          this.refreshFollowUpUi();
+          const split = splitTurnAtFollowUp(
+            state,
+            activePlaceholderId,
+            ev.text,
+            ev.previousSegmentContent,
+          );
+          if (convId) {
+            this.persistSegment(state, convId, activePlaceholderId);
+            if (!split.converted) {
+              this.persistSegment(state, convId, split.userMessageId, true);
+            }
+            this.manager.persistMessageAppend(convId, {
+              id: split.nextPlaceholderId,
+              role: "assistant",
+              content: "",
+              status: "interrupted",
+              createdAt: Date.now(),
+            });
+          }
+          if (split.converted) {
+            segmentIds.splice(segmentIds.indexOf(activePlaceholderId), 1);
+          }
+          activePlaceholderId = split.nextPlaceholderId;
+          segmentIds.push(activePlaceholderId);
+          this.currentPlaceholderId = activePlaceholderId;
+          receivedAnyDelta = false;
         } else if (ev.type === "tool_call_start") {
           // Live tool-call block. We map AgentSession's structural
           // type to the domain ToolCall shape (they share fields).
-          state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(toolTarget(ev.toolCall.id), {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -1160,7 +1259,7 @@ export class ChatView extends ItemView {
           // `"undoId"` field set by createFileImpl/editFileImpl/
           // deleteFileImpl. If absent, undoId stays undefined.
           const undoId = extractUndoId(ev.content);
-          state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(toolTarget(ev.id), {
             id: ev.id,
             kind: "tool",
             outcome: ev.outcome,
@@ -1175,7 +1274,7 @@ export class ChatView extends ItemView {
           // Pass undefined for fields the prior state may have set
           // (resultContent, detail, undoId, undone) so a same-id
           // re-prompt doesn't render stale post-execution chrome.
-          state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(toolTarget(ev.toolCall.id), {
             id: ev.toolCall.id,
             kind: ev.toolCall.kind,
             name: ev.toolCall.name,
@@ -1198,7 +1297,7 @@ export class ChatView extends ItemView {
               : ev.choice.kind === "cancelled"
                 ? "cancelled"
                 : "approved";
-          state.upsertToolCall(placeholderId, {
+          state.upsertToolCall(toolTarget(ev.id), {
             id: ev.id,
             kind: "tool",
             outcome: newOutcome,
@@ -1230,16 +1329,26 @@ export class ChatView extends ItemView {
     this.currentPlaceholderId = undefined;
     this.currentStreamState = undefined;
     this.currentStreamSession = undefined;
+    this.currentStreamConversationId = null;
+    const unread = this.pendingFollowUps.length;
+    this.pendingFollowUps = [];
+    this.refreshFollowUpUi();
+    if (unread > 0 && !cancelled) {
+      new Notice(
+        `${unread} message${unread === 1 ? " was" : "s were"} not delivered before the turn ended.`,
+        6000,
+      );
+    }
 
     if (cancelled) {
       // User clicked Stop or intentionally switched model mid-stream.
       // In both cases the SDK may surface an abort error, but the
       // user intent is a clean interruption and must not show an error
       // Notice or overwrite the frozen placeholder.
-      state.interruptStreaming(placeholderId);
+      state.interruptStreaming(activePlaceholderId);
     } else if (failure) {
       const msg = failure instanceof Error ? failure.message : String(failure);
-      state.update(placeholderId, {
+      state.update(activePlaceholderId, {
         content: `**Error:** ${msg}`,
         status: "error",
       });
@@ -1258,65 +1367,93 @@ export class ChatView extends ItemView {
       // adds any final-only entries we hadn't seen). We never
       // wholesale replace `toolCalls` here, so denied/streamed blocks
       // are preserved verbatim even if the final summary omits them.
+      let lastSegmentHasTools = false;
       for (const tc of finalToolCalls) {
-        state.upsertToolCall(placeholderId, tc);
+        const target = toolTarget(tc.id);
+        if (target === activePlaceholderId) lastSegmentHasTools = true;
+        state.upsertToolCall(target, tc);
       }
       let content = finalContent;
-      if (!content && !receivedAnyDelta && finalToolCalls.length === 0) {
+      if (!content && !receivedAnyDelta && !lastSegmentHasTools) {
         content = "_(empty response)_";
       }
       // If streaming yielded content but the final is empty, keep what
       // we streamed rather than blanking the message.
       if (!content && receivedAnyDelta) {
         // Just flip status; ChatState already holds the streamed text.
-        state.update(placeholderId, {
+        state.update(activePlaceholderId, {
           status: "complete",
         });
       } else {
-        state.update(placeholderId, {
+        state.update(activePlaceholderId, {
           content,
           status: "complete",
         });
       }
     }
 
-    // v0.3 Phase 4 (FR-007): land the final assistant message in the
+    // v0.3 Phase 4 (FR-007): land the final assistant message(s) in the
     // persisted store. We snapshot from `state` (the originating
     // runtime), so a mid-stream conversation switch can't redirect
     // the write to the wrong row. `ConversationsStore` debounces, so
-    // this single replace coalesces with the earlier pending-append.
+    // this coalesces with the earlier pending-append. Earlier segments
+    // are re-persisted too, since late tool results may land in them.
     if (convId) {
-      const finalMsg = state
-        .getMessages()
-        .find((m) => m.id === placeholderId);
-      if (finalMsg) {
-        const status: PersistedMessage["status"] =
-          finalMsg.status === "complete"
-            ? "complete"
-            : finalMsg.status === "error"
-              ? "error"
-              : "interrupted";
-        // Filter out non-persisted tool-call outcomes (e.g. the
-        // transient `pending_approval` pseudo-state used while a
-        // prompt is awaiting the user). Only terminal outcomes
-        // belong in the persisted shape.
-        const persistedToolCalls = toPersistedToolCalls(finalMsg.toolCalls);
-        this.manager.persistMessageReplace(convId, placeholderId, {
-          content: finalMsg.content,
-          status,
-          toolCalls: persistedToolCalls,
-        });
-      }
+      for (const id of segmentIds) this.persistSegment(state, convId, id);
     }
 
     this.setBusy(false);
     this.inputEl.focus();
+    resolveStreamDone();
+  }
+
+  /**
+   * Mirror one transcript message from `state` into the persisted store,
+   * either appending it or replacing the row with the same id.
+   */
+  private persistSegment(
+    state: ChatState,
+    convId: string,
+    msgId: string,
+    append = false,
+  ): void {
+    const msg = state.getMessages().find((m) => m.id === msgId);
+    if (!msg) return;
+    // Volatile statuses (pending/streaming) collapse to `interrupted`.
+    // Filter out non-persisted tool-call outcomes (e.g. the transient
+    // `pending_approval` pseudo-state used while a prompt is awaiting
+    // the user). Only terminal outcomes belong in the persisted shape.
+    const status: PersistedMessage["status"] =
+      msg.status === "complete"
+        ? "complete"
+        : msg.status === "error"
+          ? "error"
+          : "interrupted";
+    const toolCalls = toPersistedToolCalls(msg.toolCalls);
+    if (append) {
+      this.manager.persistMessageAppend(convId, {
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        status,
+        createdAt: msg.createdAt,
+        ...(toolCalls ? { toolCalls } : {}),
+      });
+    } else {
+      this.manager.persistMessageReplace(convId, msgId, {
+        role: msg.role,
+        content: msg.content,
+        status,
+        toolCalls,
+      });
+    }
   }
 
   private setBusy(busy: boolean): void {
     this.pending = busy;
     const gated = this.currentAuthKind !== "connected";
-    // Input stays disabled until the turn fully completes (post-streaming).
+    // Input is disabled in the pre-stream window; setStreaming(true)
+    // re-enables it so the user can steer or queue follow-ups.
     this.inputEl.disabled = busy || gated;
     if (!busy) {
       // Re-evaluate the gate (includes catalog/model reasons) rather
@@ -1336,6 +1473,7 @@ export class ChatView extends ItemView {
       this.sendBtnEl.toggleClass("mod-cta", false);
       this.sendLabelEl.setText("Stop");
       setIcon(this.sendIconEl, "square");
+      this.inputEl.disabled = this.currentAuthKind !== "connected";
     } else {
       this.sendBtnEl.toggleClass("is-loading", false);
       this.sendBtnEl.toggleClass("mod-warning", false);
@@ -1343,6 +1481,164 @@ export class ChatView extends ItemView {
       this.sendLabelEl.setText("Send");
       setIcon(this.sendIconEl, "send");
       this.refreshSendGate();
+    }
+    this.refreshFollowUpUi();
+  }
+
+  // ---- steering / queued follow-ups ----
+
+  /** True when text typed now can be delivered into the live stream. */
+  private canFollowUp(): boolean {
+    return (
+      this.streaming &&
+      !this.stopping &&
+      !this.userRequestedStop &&
+      this.currentStreamConversationId !== null &&
+      this.boundConversationId === this.currentStreamConversationId &&
+      (this.currentStreamSession?.canSendFollowUp?.() ?? false)
+    );
+  }
+
+  private async sendFollowUp(mode: FollowUpMode): Promise<void> {
+    const session = this.currentStreamSession;
+    const text = this.inputEl.value.trim();
+    if (!text || !session?.sendFollowUp || !this.canFollowUp()) return;
+    const id = `followup-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    this.pendingFollowUps.push({ id, text, mode });
+    this.inputEl.value = "";
+    this.refreshFollowUpUi();
+    try {
+      await session.sendFollowUp(id, text, mode);
+    } catch (e) {
+      const idx = this.pendingFollowUps.findIndex((f) => f.id === id);
+      if (idx >= 0) this.pendingFollowUps.splice(idx, 1);
+      this.restoreComposerText(text);
+      this.refreshFollowUpUi();
+      const msg = e instanceof Error ? e.message : String(e);
+      new Notice(`Could not send message: ${msg}`, 6000);
+    }
+  }
+
+  /**
+   * Take back an unread follow-up and put its text back into the
+   * composer. Fails (with a Notice) if the agent already read it.
+   */
+  private async withdrawFollowUp(id: string): Promise<void> {
+    const session = this.currentStreamSession;
+    const entry = this.pendingFollowUps.find((f) => f.id === id);
+    if (!entry || !session?.withdrawFollowUp) return;
+    let removed = false;
+    try {
+      removed = await session.withdrawFollowUp(id);
+    } catch (e) {
+      console.warn("[ChatView] withdrawFollowUp threw", e);
+    }
+    if (!removed) {
+      if (this.pendingFollowUps.some((f) => f.id === id)) {
+        new Notice("Too late to take that back — the agent already has it.", 4000);
+      }
+      return;
+    }
+    this.pendingFollowUps = this.pendingFollowUps.filter((f) => f.id !== id);
+    this.restoreComposerText(entry.text);
+    this.refreshFollowUpUi();
+  }
+
+  private restoreComposerText(text: string): void {
+    const current = this.inputEl.value.trim();
+    this.inputEl.value = current ? `${text}\n\n${current}` : text;
+    this.inputEl.focus();
+    const end = this.inputEl.value.length;
+    this.inputEl.setSelectionRange(end, end);
+  }
+
+  /** Forget unread follow-ups when the turn is being cut short. */
+  private dropPendingFollowUps(reason: string): void {
+    const dropped = this.pendingFollowUps.length;
+    this.pendingFollowUps = [];
+    this.refreshFollowUpUi();
+    if (dropped > 0) {
+      new Notice(
+        `${reason} — ${dropped} unsent message${dropped === 1 ? "" : "s"} discarded.`,
+        4000,
+      );
+    }
+  }
+
+  /** Stop the running turn, wait for it to settle, then send the
+   *  composer text as a fresh turn. */
+  private async stopAndSend(): Promise<void> {
+    if (!this.streaming || !this.inputEl.value.trim()) return;
+    const convId = this.boundConversationId;
+    const done = this.streamDone;
+    await this.handleStop();
+    await done;
+    if (this.boundConversationId !== convId || this.streaming) return;
+    await this.submitMessage();
+  }
+
+  private openSendMenu(): void {
+    if (!this.sendMenuBtnEl || !this.canFollowUp()) return;
+    const hasText = this.inputEl.value.trim().length > 0;
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle("Steer with message (Enter)")
+        .setIcon("corner-down-left")
+        .setDisabled(!hasText)
+        .onClick(() => void this.sendFollowUp("steer")),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(`Add to queue (${MOD_KEY_LABEL}+Enter)`)
+        .setIcon("list-plus")
+        .setDisabled(!hasText)
+        .onClick(() => void this.sendFollowUp("queue")),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Stop and send")
+        .setIcon("square")
+        .setDisabled(!hasText)
+        .onClick(() => void this.stopAndSend()),
+    );
+    const rect = this.sendMenuBtnEl.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom });
+  }
+
+  /** Sync the pending-message strip, the send-options button and the
+   *  composer placeholder with the current follow-up state. */
+  private refreshFollowUpUi(): void {
+    const live = this.canFollowUp();
+    if (this.inputEl) {
+      this.inputEl.placeholder = live ? STREAMING_PLACEHOLDER : IDLE_PLACEHOLDER;
+    }
+    if (this.sendMenuBtnEl) {
+      this.sendMenuBtnEl.style.display = live ? "" : "none";
+    }
+    const strip = this.followUpStripEl;
+    if (!strip) return;
+    strip.empty();
+    const visible =
+      this.pendingFollowUps.length > 0 &&
+      this.boundConversationId === this.currentStreamConversationId;
+    strip.style.display = visible ? "" : "none";
+    if (!visible) return;
+    for (const f of this.pendingFollowUps) {
+      const row = strip.createDiv({
+        cls: `copilot-agent-followup copilot-agent-followup-${f.mode}`,
+      });
+      row.createSpan({
+        cls: "copilot-agent-followup-label",
+        text: f.mode === "steer" ? "Steering" : "Queued",
+      });
+      row.createSpan({ cls: "copilot-agent-followup-text", text: f.text });
+      const remove = row.createEl("button", {
+        cls: "copilot-agent-followup-remove clickable-icon",
+        attr: { "aria-label": "Take back (↑)" },
+      });
+      setIcon(remove, "x");
+      remove.addEventListener("click", () => void this.withdrawFollowUp(f.id));
     }
   }
 
