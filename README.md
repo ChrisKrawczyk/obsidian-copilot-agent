@@ -16,6 +16,12 @@ This plugin ships via [BRAT (Beta Reviewers Auto-update Tool)](https://github.co
 
 Detailed platform matrix, first-launch behavior, and known limitations are documented in the [full install section below](#install-via-brat).
 
+## Conversations across restarts
+
+Each conversation keeps its own Copilot agent session, stored under the plugin folder's `session-state/` directory. When you reopen Obsidian and send a message, the conversation picks up that session with the agent's full memory. Deleting a conversation deletes its session.
+
+Sometimes a session can't be resumed: the conversation was saved before session resume was added, or the session data is missing or unreadable. In that case a divider shows where the agent's memory starts. Click **Include earlier context** to send a short, editable excerpt of the earlier messages with your next message, or **Dismiss** to continue without it. The excerpt includes message text and tool names only. It's sent once and isn't added to your message in the transcript.
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).

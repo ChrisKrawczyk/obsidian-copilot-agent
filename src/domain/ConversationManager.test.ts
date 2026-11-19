@@ -546,6 +546,122 @@ describe("ConversationManager — rename / archive / remove", () => {
     expect(built).toHaveLength(0);
     expect(m.hasRuntime("conv-2")).toBe(false);
   });
+
+  test("removeConversation calls onConversationRemoved once with metadata", async () => {
+    const { factory } = makeFakeFactory();
+    const { store, state } = makeFakeStore();
+    const onConversationRemoved = vi.fn();
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      onConversationRemoved,
+    });
+    m.hydrate({
+      conversations: [
+        persistedConv("conv-1"),
+        persistedConv("conv-2", { sdkSessionId: "sess-2" }),
+      ],
+      activeConversationId: "conv-1",
+    });
+
+    await m.removeConversation("conv-2");
+
+    expect(onConversationRemoved).toHaveBeenCalledTimes(1);
+    expect(onConversationRemoved.mock.calls[0][0]).toMatchObject({
+      id: "conv-2",
+      sdkSessionId: "sess-2",
+    });
+    expect(state.byId.has("conv-2")).toBe(false);
+  });
+
+  test("a throwing onConversationRemoved does not break removal", async () => {
+    const { factory } = makeFakeFactory();
+    const { store } = makeFakeStore();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const m = new ConversationManager({
+      runtimeFactory: factory,
+      store,
+      onConversationRemoved: async () => {
+        throw new Error("boom");
+      },
+    });
+    m.hydrate({
+      conversations: [persistedConv("conv-1"), persistedConv("conv-2")],
+      activeConversationId: "conv-1",
+    });
+
+    await expect(m.removeConversation("conv-1")).resolves.toBeUndefined();
+    expect(m.get("conv-1")).toBeUndefined();
+    expect(m.getActiveId()).toBe("conv-2");
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+describe("ConversationManager — setSdkSessionId / setContextBoundary", () => {
+  function setup() {
+    const { factory } = makeFakeFactory();
+    const fake = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store: fake.store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    fake.upsertSpy.mockClear();
+    const events: ConversationChangeEvent[] = [];
+    m.subscribe((e) => events.push(e));
+    return { m, events, ...fake };
+  }
+
+  test("setSdkSessionId persists, emits, and is a no-op when unchanged", () => {
+    const { m, events, upsertSpy, state } = setup();
+
+    m.setSdkSessionId("conv-1", "sess-1");
+    expect(m.get("conv-1")?.sdkSessionId).toBe("sess-1");
+    expect(state.byId.get("conv-1")?.sdkSessionId).toBe("sess-1");
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    expect(events.filter((e) => e.kind === "metadata-changed")).toHaveLength(1);
+
+    m.setSdkSessionId("conv-1", "sess-1");
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    expect(events.filter((e) => e.kind === "metadata-changed")).toHaveLength(1);
+    expect(() => m.setSdkSessionId("nope", "x")).toThrow();
+  });
+
+  test("setContextBoundary persists, emits, and compares by value", () => {
+    const { m, events, upsertSpy, state } = setup();
+    const boundary = {
+      afterMessageId: "m1",
+      reason: "legacy" as const,
+      state: "offered" as const,
+    };
+
+    m.setContextBoundary("conv-1", boundary);
+    expect(state.byId.get("conv-1")?.contextBoundary).toEqual(boundary);
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+
+    m.setContextBoundary("conv-1", { ...boundary });
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+
+    m.setContextBoundary("conv-1", { ...boundary, state: "dismissed" });
+    expect(m.get("conv-1")?.contextBoundary?.state).toBe("dismissed");
+    expect(upsertSpy).toHaveBeenCalledTimes(2);
+    expect(events.filter((e) => e.kind === "metadata-changed")).toHaveLength(2);
+  });
+
+  test("metadata-only writes preserve both fields", () => {
+    const { m, state } = setup();
+    m.setSdkSessionId("conv-1", "sess-1");
+    m.setContextBoundary("conv-1", {
+      afterMessageId: "m1",
+      reason: "resume-failed",
+      state: "sent",
+    });
+    m.rename("conv-1", "Renamed");
+    const row = state.byId.get("conv-1");
+    expect(row?.sdkSessionId).toBe("sess-1");
+    expect(row?.contextBoundary?.reason).toBe("resume-failed");
+  });
 });
 
 // v0.4 (model-picker) Phase 1: per-conversation modelId binding lives

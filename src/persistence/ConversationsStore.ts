@@ -560,6 +560,12 @@ function cloneConversation(c: PersistedConversation): PersistedConversation {
   if (c.modelId !== undefined) {
     out.modelId = c.modelId;
   }
+  if (c.sdkSessionId !== undefined) {
+    out.sdkSessionId = c.sdkSessionId;
+  }
+  if (c.contextBoundary !== undefined) {
+    out.contextBoundary = c.contextBoundary ? { ...c.contextBoundary } : null;
+  }
   return out;
 }
 

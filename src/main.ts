@@ -53,6 +53,7 @@ import { assemblePreamble } from "./domain/PreambleAssembler";
 import { formatTodayInTimezone } from "./domain/formatToday";
 import { filterRawFsToolsIfGated } from "./domain/toolGating";
 import { ConversationManager } from "./domain/ConversationManager";
+import { boundaryAnchor } from "./domain/priorContextExcerpt";
 import { flushThenDispose, makeQuitFlushHandler } from "./lifecycle";
 import {
   hydrateChatState,
@@ -735,6 +736,31 @@ export default class CopilotAgentPlugin extends Plugin {
           typeof metadata.modelId === "string" && metadata.modelId.length > 0
             ? metadata.modelId
             : undefined,
+        // Resume the conversation's SDK session so the agent keeps its
+        // history across reloads; fall back to a fresh one if it can't.
+        resumeSessionId:
+          typeof metadata.sdkSessionId === "string" && metadata.sdkSessionId.length > 0
+            ? metadata.sdkSessionId
+            : undefined,
+        onSessionOpened: (info) => {
+          try {
+            conversationManager.setSdkSessionId(metadata.id, info.sessionId);
+            if (info.resumeFailedFor) {
+              const anchor = boundaryAnchor(state.getMessages());
+              if (anchor) {
+                conversationManager.setContextBoundary(metadata.id, {
+                  afterMessageId: anchor,
+                  reason: "resume-failed",
+                  state: "offered",
+                });
+              }
+            } else if (info.cause === "reset") {
+              conversationManager.setContextBoundary(metadata.id, null);
+            }
+          } catch (err) {
+            console.warn("[copilot-agent] persisting SDK session id failed", err);
+          }
+        },
         // v0.3 Phase 1: gated tool list captured at plugin onload and
         // frozen via `exposeRawFsToolsAtStartup`. Toggling the setting
         // mid-session does not reach this runtime, nor any future
@@ -817,6 +843,27 @@ export default class CopilotAgentPlugin extends Plugin {
       });
 
       const state = hydrateChatState(hydration?.messages);
+      if (!metadata.sdkSessionId && !metadata.contextBoundary) {
+        // Saved before session resume existed: the agent can't see these
+        // messages, so offer to include them. Deferred so we don't emit
+        // manager events while the manager is materializing this runtime.
+        const anchor = boundaryAnchor(state.getMessages());
+        if (anchor) {
+          queueMicrotask(() => {
+            try {
+              const current = conversationManager.get(metadata.id);
+              if (!current || current.sdkSessionId || current.contextBoundary) return;
+              conversationManager.setContextBoundary(metadata.id, {
+                afterMessageId: anchor,
+                reason: "legacy",
+                state: "offered",
+              });
+            } catch (err) {
+              console.warn("[copilot-agent] recording legacy context boundary failed", err);
+            }
+          });
+        }
+      }
       const liveEntry = { session, conversationId: metadata.id };
       liveRuntimes.add(liveEntry);
 
@@ -860,6 +907,15 @@ export default class CopilotAgentPlugin extends Plugin {
     const conversationManager = new ConversationManager({
       runtimeFactory,
       store: conversationsStore,
+      onConversationRemoved: async (conv) => {
+        const id = conv.sdkSessionId;
+        if (!id || !sharedSdkClient?.deleteSession) return;
+        try {
+          await sharedSdkClient.deleteSession(id);
+        } catch (err) {
+          console.warn("[copilot-agent] deleting SDK session failed", err);
+        }
+      },
       // v0.4 Phase 3 (FR-007): synchronous resolver that walks the
       // priority chain at creation time. Returns null when the catalog
       // is non-ready so AgentSession.pickModel falls back to v0.3

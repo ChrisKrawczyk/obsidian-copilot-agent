@@ -8,6 +8,7 @@ import { ChatState } from "../domain/ChatState";
 import type { AgentSession } from "../sdk/AgentSession";
 import type { AuthController, AuthState } from "../auth/AuthController";
 import { MessageRenderer } from "./MessageRenderer";
+import { boundaryLabel, buildPriorContextExcerpt } from "../domain/priorContextExcerpt";
 import type { UndoJournal } from "../domain/UndoJournal";
 import type { ConversationManager } from "../domain/ConversationManager";
 import type { PersistedMessage } from "../persistence/PersistedShape";
@@ -124,6 +125,11 @@ export class ChatView extends ItemView {
   private getExposeRawFsTools: () => boolean;
   private listEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
+  /** Editable excerpt of earlier messages the user chose to include with their next send. */
+  private priorContextDraft: { convId: string; afterMessageId: string } | null = null;
+  private priorContextPanelEl?: HTMLElement;
+  private priorContextMetaEl?: HTMLElement;
+  private priorContextTextEl?: HTMLTextAreaElement;
   private sendBtnEl!: HTMLButtonElement;
   private sendIconEl!: HTMLElement;
   private sendLabelEl!: HTMLElement;
@@ -472,6 +478,7 @@ export class ChatView extends ItemView {
         console.warn("[ChatView] catalog retry failed", err),
       );
     });
+    this.buildPriorContextPanel(composer);
     this.inputEl = composer.createEl("textarea", {
       cls: "copilot-agent-input",
       attr: { rows: "3", placeholder: "Ask Copilot…" },
@@ -548,6 +555,7 @@ export class ChatView extends ItemView {
     // call a freshly opened view shows the title but no messages
     // until the user does something that mutates state).
     this.syncList();
+    this.refreshContextBoundary();
     // v0.3 Phase 4: re-bind when the manager flips active conversations
     // (or when first hydrating from disk and the active runtime appears).
     this.unsubManager = this.manager.subscribe((ev) => {
@@ -555,6 +563,7 @@ export class ChatView extends ItemView {
         const prevId = this.boundConversationId;
         this.bindActiveRuntime();
         if (this.boundConversationId !== prevId) {
+          this.closePriorContextDraft();
           // New runtime → tear down the stale state subscription and
           // re-attach to the new runtime's ChatState. Then re-render
           // the list against the new state's current messages.
@@ -590,6 +599,7 @@ export class ChatView extends ItemView {
       // (active-changed re-binds modelId; metadata-changed reflects
       // setModelId writes from the picker itself).
       this.refreshModelPicker();
+      this.refreshContextBoundary();
     });
     // Initial render so the picker reflects whatever the manager
     // already hydrated by the time the view opens.
@@ -1041,6 +1051,12 @@ export class ChatView extends ItemView {
     this.inputEl.value = "";
     this.userRequestedStop = false;
     this.setBusy(true);
+    const draft = this.priorContextDraft;
+    const priorContext =
+      draft && draft.convId === this.boundConversationId
+        ? this.priorContextTextEl?.value.trim() || undefined
+        : undefined;
+    if (draft && this.priorContextPanelEl) this.priorContextPanelEl.style.display = "none";
 
     // v0.3 Phase 4: capture the originating runtime's state + id at
     // send time. A mid-stream `setActive(other)` switches `this.state`
@@ -1129,7 +1145,10 @@ export class ChatView extends ItemView {
 
     this.setStreaming(true);
     try {
-      for await (const ev of session.sendMessageStreaming(text)) {
+      for await (const ev of session.sendMessageStreaming(
+        text,
+        priorContext ? { priorContext } : undefined,
+      )) {
         if (this.userRequestedStop) {
           // Drain the iterator but don't apply any further updates.
           // The placeholder is already frozen as `interrupted`; we
@@ -1230,6 +1249,17 @@ export class ChatView extends ItemView {
     this.currentPlaceholderId = undefined;
     this.currentStreamState = undefined;
     this.currentStreamSession = undefined;
+
+    if (draft && this.priorContextDraft === draft) {
+      // Once the agent has seen any of the turn, treat the excerpt as
+      // delivered so it isn't sent twice; otherwise keep the draft.
+      if (!failure || receivedAnyDelta) {
+        this.closePriorContextDraft();
+        if (priorContext) this.updateBoundaryState(draft.convId, "sent");
+      } else if (this.priorContextPanelEl && draft.convId === this.boundConversationId) {
+        this.priorContextPanelEl.style.display = "";
+      }
+    }
 
     if (cancelled) {
       // User clicked Stop or intentionally switched model mid-stream.
@@ -1351,6 +1381,96 @@ export class ChatView extends ItemView {
   private syncList(): void {
     if (!this.renderer) return;
     this.renderer.sync(this.state.getMessages());
+  }
+
+  private boundConversation() {
+    const id = this.boundConversationId;
+    return id ? this.manager.get(id) ?? null : null;
+  }
+
+  /** Render the "earlier messages weren't restored" divider for the bound conversation. */
+  private refreshContextBoundary(): void {
+    if (!this.renderer) return;
+    const conv = this.boundConversation();
+    const boundary = conv?.contextBoundary;
+    if (!conv || !boundary) {
+      this.renderer.setBoundary(null);
+      return;
+    }
+    const actions =
+      boundary.state === "offered" && !this.priorContextDraft
+        ? [
+            { label: "Include earlier context", onClick: () => this.openPriorContextDraft() },
+            {
+              label: "Dismiss",
+              onClick: () =>
+                this.updateBoundaryState(conv.id, "dismissed"),
+            },
+          ]
+        : [];
+    this.renderer.setBoundary({
+      afterMessageId: boundary.afterMessageId,
+      label: boundaryLabel(boundary),
+      actions,
+    });
+  }
+
+  private updateBoundaryState(
+    convId: string,
+    next: "offered" | "sent" | "dismissed",
+  ): void {
+    const boundary = this.manager.get(convId)?.contextBoundary;
+    if (!boundary) return;
+    try {
+      this.manager.setContextBoundary(convId, { ...boundary, state: next });
+    } catch (e) {
+      console.warn("[ChatView] updating context boundary failed", e);
+    }
+  }
+
+  private buildPriorContextPanel(composer: HTMLElement): void {
+    const panel = composer.createDiv({ cls: "copilot-agent-prior-context" });
+    panel.style.display = "none";
+    const header = panel.createDiv({ cls: "copilot-agent-prior-context-header" });
+    this.priorContextMetaEl = header.createSpan({ cls: "copilot-agent-prior-context-meta" });
+    const removeBtn = header.createEl("button", {
+      cls: "copilot-agent-prior-context-remove clickable-icon",
+      attr: { "aria-label": "Don't include earlier context", title: "Don't include earlier context" },
+    });
+    setIcon(removeBtn, "x");
+    removeBtn.addEventListener("click", () => this.closePriorContextDraft());
+    this.priorContextTextEl = panel.createEl("textarea", {
+      cls: "copilot-agent-prior-context-text",
+      attr: { rows: "6", "aria-label": "Earlier context to include" },
+    });
+    this.priorContextPanelEl = panel;
+  }
+
+  private openPriorContextDraft(): void {
+    const conv = this.boundConversation();
+    const boundary = conv?.contextBoundary;
+    if (!conv || !boundary || !this.priorContextPanelEl || !this.priorContextTextEl) return;
+    const excerpt = buildPriorContextExcerpt(this.state.getMessages(), boundary.afterMessageId);
+    if (!excerpt) {
+      new Notice("No earlier messages to include.", 4000);
+      this.updateBoundaryState(conv.id, "dismissed");
+      return;
+    }
+    this.priorContextDraft = { convId: conv.id, afterMessageId: boundary.afterMessageId };
+    this.priorContextTextEl.value = excerpt.text;
+    this.priorContextMetaEl?.setText(
+      `Earlier context (${excerpt.included} of ${excerpt.total} messages) will be sent with your next message. You can edit it.`,
+    );
+    this.priorContextPanelEl.style.display = "";
+    this.refreshContextBoundary();
+    this.inputEl.focus();
+  }
+
+  private closePriorContextDraft(): void {
+    this.priorContextDraft = null;
+    if (this.priorContextPanelEl) this.priorContextPanelEl.style.display = "none";
+    if (this.priorContextTextEl) this.priorContextTextEl.value = "";
+    this.refreshContextBoundary();
   }
 
   /**

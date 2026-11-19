@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The agent remembers a conversation after Obsidian restarts or the plugin reloads.** Previously the transcript reappeared but every reload started a new agent session, so the agent lost earlier context. Each conversation now saves its Copilot session id and resumes that session, with its full history, the next time you send a message. (`src/sdk/AgentSession.ts`, `src/main.ts`.)
+- **Deleting a conversation deletes its agent session.** The session's folder under the plugin's `session-state/` directory is removed too. Folders left by earlier versions are not cleaned up.
+
+### Added
+
+- **"Include earlier context" when a session can't be resumed.** This covers conversations saved before this fix and sessions that are missing or unreadable. A divider marks where the agent's memory starts. **Include earlier context** opens an editable excerpt above the composer: up to 12 recent messages, about 8 KB, with tool names but no tool arguments or results. The excerpt is sent once with your next message and isn't added to your message in the transcript. The agent is told to treat it as untrusted history. **Dismiss** hides the offer. (`src/domain/priorContextExcerpt.ts`, `src/ui/ChatView.ts`.)
+
 ## [0.10.5] - 2026-11-17
 
 Settings fixes for Obsidian 1.15, which opens Settings in its own popout window. Importing a preset pack works again, and the Add server form is easier to reach.

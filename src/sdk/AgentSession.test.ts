@@ -145,6 +145,8 @@ function makeAgent(
   extraOpts: {
     preamble?: () => string | null;
     catalog?: import("./ModelCatalog").ModelCatalog;
+    resumeSessionId?: string | null;
+    onSessionOpened?: AgentSessionOptions["onSessionOpened"];
   } = {},
 ) {
   return new CopilotAgentSession(
@@ -155,6 +157,8 @@ function makeAgent(
       decider,
       preamble: extraOpts.preamble,
       catalog: extraOpts.catalog,
+      resumeSessionId: extraOpts.resumeSessionId,
+      onSessionOpened: extraOpts.onSessionOpened,
     },
     async () => handles.sdk,
   );
@@ -2314,6 +2318,122 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
 });
 
 // ---------- v0.4 Phase 5 (S1): deferred-init recovery ----------
+
+describe("CopilotAgentSession — SDK session resume", () => {
+  function withResume(
+    h: FakeHandles,
+    resume: (id: string) => Promise<SdkSession>,
+  ) {
+    const calls = { resume: [] as string[], create: 0, deleted: [] as string[] };
+    const create = h.client.createSession;
+    let createdCount = 0;
+    h.client.createSession = async (opts) => {
+      calls.create += 1;
+      const s = await create(opts);
+      return Object.assign(Object.create(s) as SdkSession, {
+        sessionId: `new-${++createdCount}`,
+      });
+    };
+    h.client.resumeSession = async (id) => {
+      calls.resume.push(id);
+      return resume(id);
+    };
+    h.client.deleteSession = async (id) => {
+      calls.deleted.push(id);
+    };
+    return calls;
+  }
+
+  test("resumes the persisted session and skips the preamble", async () => {
+    const h = makeFakeSdk();
+    const calls = withResume(h, async (id) =>
+      Object.assign(Object.create(h.session) as SdkSession, { sessionId: id }),
+    );
+    const opened = vi.fn();
+    const agent = makeAgent(h, denyAll, {
+      resumeSessionId: "sess-1",
+      preamble: () => "PREAMBLE",
+      onSessionOpened: opened,
+    });
+    await agent.sendMessage("hello");
+    expect(calls.resume).toEqual(["sess-1"]);
+    expect(calls.create).toBe(0);
+    expect(h.sendCalls).toEqual(["hello"]);
+    expect(opened).toHaveBeenCalledWith({ sessionId: "sess-1", resumed: true, cause: "init" });
+    await agent.dispose();
+  });
+
+  test("falls back to a new session and reports the failed id", async () => {
+    const h = makeFakeSdk();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls = withResume(h, async () => {
+      throw new Error("Session not found");
+    });
+    const opened = vi.fn();
+    const agent = makeAgent(h, denyAll, {
+      resumeSessionId: "gone",
+      preamble: () => "PREAMBLE",
+      onSessionOpened: opened,
+    });
+    await agent.sendMessage("hello");
+    expect(calls.create).toBe(1);
+    expect(h.sendCalls[0]).toContain("PREAMBLE");
+    expect(opened).toHaveBeenCalledWith({
+      sessionId: "new-1",
+      resumed: false,
+      resumeFailedFor: "gone",
+      cause: "init",
+    });
+    warn.mockRestore();
+    await agent.dispose();
+  });
+
+  test("re-init after a runtime restart resumes the session it created", async () => {
+    const h = makeFakeSdk();
+    const calls = withResume(h, async (id) =>
+      Object.assign(Object.create(h.session) as SdkSession, { sessionId: id }),
+    );
+    const agent = makeAgent(h);
+    await agent.init();
+    expect(calls.create).toBe(1);
+    await agent.reconnect();
+    expect(calls.resume).toEqual(["new-1"]);
+    expect(calls.create).toBe(1);
+    await agent.dispose();
+  });
+
+  test("resetConversation deletes the old session and reports the new one", async () => {
+    const h = makeFakeSdk();
+    const calls = withResume(h, async (id) =>
+      Object.assign(Object.create(h.session) as SdkSession, { sessionId: id }),
+    );
+    const opened = vi.fn();
+    const agent = makeAgent(h, denyAll, { resumeSessionId: "sess-1", onSessionOpened: opened });
+    await agent.init();
+    await agent.resetConversation();
+    expect(calls.deleted).toEqual(["sess-1"]);
+    expect(opened).toHaveBeenLastCalledWith({ sessionId: "new-1", resumed: false, cause: "reset" });
+    await agent.reconnect();
+    expect(calls.resume).toEqual(["sess-1", "new-1"]);
+    await agent.dispose();
+  });
+
+  test("priorContext sits between the preamble and the user request", async () => {
+    const h = makeFakeSdk();
+    const agent = makeAgent(h, denyAll, { preamble: () => "PREAMBLE" });
+    for await (const _ of agent.sendMessageStreaming("now", { priorContext: "EXCERPT" })) {
+      // drain
+    }
+    for await (const _ of agent.sendMessageStreaming("later", { priorContext: "EXCERPT2" })) {
+      // drain
+    }
+    const first = h.sendCalls[0];
+    expect(first.indexOf("PREAMBLE")).toBeLessThan(first.indexOf("EXCERPT"));
+    expect(first.indexOf("EXCERPT")).toBeLessThan(first.indexOf("## User request\n\nnow"));
+    expect(h.sendCalls[1]).toBe("EXCERPT2\n\n---\n\n## User request\n\nlater");
+    await agent.dispose();
+  });
+});
 
 describe("CopilotAgentSession — deferred-init (v0.4 Phase 5 S1)", () => {
   test("catalog non-ready AND per-session listModels throws → init succeeds in deferred state", async () => {

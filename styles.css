@@ -682,3 +682,56 @@
 .copilot-agent-mcp-last-error {
   border-left: 3px solid var(--background-modifier-error);
 }
+
+/* Context boundary: agent session was replaced, earlier messages not restored. */
+.copilot-agent-context-boundary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 10px 0;
+  padding: 6px 0;
+  border-top: 1px dashed var(--background-modifier-border);
+  border-bottom: 1px dashed var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.copilot-agent-context-boundary-label {
+  flex: 1 1 auto;
+}
+
+.copilot-agent-context-boundary-action {
+  font-size: var(--font-ui-smaller);
+}
+
+.copilot-agent-prior-context {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--interactive-accent);
+  background: var(--background-secondary);
+}
+
+.copilot-agent-prior-context-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.copilot-agent-prior-context-meta {
+  flex: 1 1 auto;
+}
+
+.copilot-agent-prior-context-text {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}

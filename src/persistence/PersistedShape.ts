@@ -60,6 +60,17 @@ export interface PersistedUndoEntry {
   undone?: boolean;
 }
 
+/**
+ * UI-only marker: the agent session behind this conversation was replaced,
+ * so messages up to `afterMessageId` were not restored to the agent.
+ * Never sent to the agent.
+ */
+export interface PersistedContextBoundary {
+  afterMessageId: string;
+  reason: "legacy" | "resume-failed";
+  state: "offered" | "sent" | "dismissed";
+}
+
 export interface PersistedConversation {
   id: string;
   name: string;
@@ -81,6 +92,13 @@ export interface PersistedConversation {
    * `modelId`. (Spec.md Edge Cases — Undo journal interaction.)
    */
   modelId?: string | null;
+  /**
+   * Copilot SDK session id bound to this conversation, used to resume
+   * the agent session across restarts. Missing/null means "none yet".
+   */
+  sdkSessionId?: string | null;
+  /** UI-only context-boundary marker; see `PersistedContextBoundary`. */
+  contextBoundary?: PersistedContextBoundary | null;
   messages: PersistedMessage[];
   /** SF-2: capped at 50 entries on record (oldest evicted first). */
   undoEntries: PersistedUndoEntry[];

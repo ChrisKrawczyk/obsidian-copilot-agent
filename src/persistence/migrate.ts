@@ -28,6 +28,7 @@
 
 import {
   CURRENT_SCHEMA_VERSION,
+  type PersistedContextBoundary,
   type PersistedConversation,
   type PersistedConversationsState,
   type PersistedMessage,
@@ -160,6 +161,15 @@ function validateConversation(raw: unknown): PersistedConversation | null {
     modelId = null;
   }
 
+  let sdkSessionId: string | null | undefined;
+  if (c.sdkSessionId !== undefined) {
+    sdkSessionId =
+      typeof c.sdkSessionId === "string" && c.sdkSessionId.length > 0
+        ? c.sdkSessionId
+        : null;
+  }
+  const contextBoundary = validateContextBoundary(c.contextBoundary);
+
   const messages: PersistedMessage[] = [];
   for (const m of c.messages) {
     const validated = validateMessage(m);
@@ -185,7 +195,27 @@ function validateConversation(raw: unknown): PersistedConversation | null {
   if (modelId !== undefined) {
     out.modelId = modelId;
   }
+  if (sdkSessionId !== undefined) {
+    out.sdkSessionId = sdkSessionId;
+  }
+  if (contextBoundary !== undefined) {
+    out.contextBoundary = contextBoundary;
+  }
   return out;
+}
+
+/** Lenient: malformed markers are dropped (undefined), never fatal. */
+function validateContextBoundary(
+  raw: unknown,
+): PersistedContextBoundary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const b = raw as Record<string, unknown>;
+  if (typeof b.afterMessageId !== "string") return undefined;
+  if (b.reason !== "legacy" && b.reason !== "resume-failed") return undefined;
+  if (b.state !== "offered" && b.state !== "sent" && b.state !== "dismissed") {
+    return undefined;
+  }
+  return { afterMessageId: b.afterMessageId, reason: b.reason, state: b.state };
 }
 
 function validateMessage(raw: unknown): PersistedMessage | null {

@@ -9,6 +9,7 @@
  */
 
 import type {
+  PersistedContextBoundary,
   PersistedConversation,
   PersistedMessage,
   PersistedUndoEntry,
@@ -36,6 +37,10 @@ export interface Conversation {
    * transcript state and leaves the currently-bound `modelId` alone.
    */
   modelId?: string | null;
+  /** Copilot SDK session id bound to this conversation (resume key). */
+  sdkSessionId?: string | null;
+  /** UI-only marker: earlier messages weren't restored to the agent. */
+  contextBoundary?: PersistedContextBoundary | null;
 }
 
 /** Snapshot of the per-conversation persisted shape needed for runtime
@@ -57,6 +62,8 @@ export function conversationFromPersisted(
       lastActiveAt: p.lastActiveAt,
       archived: p.archived === true ? true : undefined,
       modelId: p.modelId === undefined ? undefined : p.modelId,
+      sdkSessionId: p.sdkSessionId === undefined ? undefined : p.sdkSessionId,
+      contextBoundary: cloneBoundary(p.contextBoundary),
     },
     messages: p.messages,
     undoEntries: p.undoEntries,
@@ -73,5 +80,13 @@ export function conversationToPersistedMetadata(
     lastActiveAt: c.lastActiveAt,
     archived: c.archived === true ? true : undefined,
     modelId: c.modelId === undefined ? undefined : c.modelId,
+    sdkSessionId: c.sdkSessionId === undefined ? undefined : c.sdkSessionId,
+    contextBoundary: cloneBoundary(c.contextBoundary),
   };
+}
+
+export function cloneBoundary(
+  b: PersistedContextBoundary | null | undefined,
+): PersistedContextBoundary | null | undefined {
+  return b ? { ...b } : b;
 }
