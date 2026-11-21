@@ -589,6 +589,7 @@ describe("createWriteNoteTools factory", () => {
       "update_task",
       "update_tasks",
       "move_note",
+      "bulk_edit",
     ]);
   });
 
@@ -612,7 +613,7 @@ describe("createWriteNoteTools factory", () => {
     const skipFlags = tools.map(
       (t) => (t as unknown as { skipPermission?: boolean }).skipPermission ?? false,
     );
-    expect(skipFlags).toEqual([false, false, true, false, false, false, false, false, false]);
+    expect(skipFlags).toEqual([false, false, true, false, false, false, false, false, false, false]);
   });
 
   test("edit_note SDK description warns against parallel replace calls (FR-007)", () => {

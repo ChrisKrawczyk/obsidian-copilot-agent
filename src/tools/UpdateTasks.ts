@@ -8,11 +8,10 @@ import {
   type UpdateTaskPatch,
   type UpdateTaskResult,
 } from "./UpdateTask";
-import { applyBatchModifications } from "./BatchWrite";
-import { hasUnsavedEditorChanges, ProcessAbort } from "./WriteTools";
+import { applyBatchModifications, loadNoteForBatch } from "./BatchWrite";
+import { ProcessAbort } from "./WriteTools";
 import type { WriteNoteToolsDeps } from "./WriteNoteTools";
-import { lookupTFile, resolveVaultPath, toVaultRelative, VaultPathError } from "./VaultPath";
-import type { TFileLike } from "./ReadTools";
+import { resolveVaultPath, toVaultRelative, VaultPathError } from "./VaultPath";
 import { MAX_BATCH_SNAPSHOT_BYTES } from "../domain/UndoJournal";
 
 export const MAX_UPDATE_TASKS_TARGETS = 200;
@@ -156,7 +155,7 @@ export async function analyzeUpdateTasks(
 
     let note = notes.get(vaultRel);
     if (!note) {
-      const loaded = await loadNote(vaultRel, deps);
+      const loaded = await loadNoteForBatch(vaultRel, deps);
       if (!loaded.ok) {
         unreadable.set(vaultRel, loaded);
         fail(loaded.reason, { path: vaultRel, details: loaded.details });
@@ -223,26 +222,6 @@ export async function analyzeUpdateTasks(
 
   const rows = [...rowsByIndex.entries()].sort((a, b) => a[0] - b[0]).map(([, r]) => r);
   return { rows, failures, notes: notePlans, snapshotBytes };
-}
-
-async function loadNote(
-  vaultRel: string,
-  deps: Pick<WriteNoteToolsDeps, "vault" | "workspace">,
-): Promise<{ ok: true; content: string } | { ok: false; reason: UpdateTasksFailureReason; details?: string }> {
-  const file = lookupTFile(vaultRel, deps.vault) as TFileLike | null;
-  if (!file) return { ok: false, reason: "not_found" };
-  let content: string;
-  try {
-    if (deps.vault.read) content = await deps.vault.read(file);
-    else if (deps.vault.cachedRead) content = await deps.vault.cachedRead(file);
-    else return { ok: false, reason: "read_failed", details: "Vault adapter does not support read()." };
-  } catch (e) {
-    return { ok: false, reason: "read_failed", details: (e as Error).message || String(e) };
-  }
-  if (await hasUnsavedEditorChanges(vaultRel, content, deps.workspace)) {
-    return { ok: false, reason: "unsaved_changes", details: "Save or discard the open editor's changes first." };
-  }
-  return { ok: true, content };
 }
 
 /**

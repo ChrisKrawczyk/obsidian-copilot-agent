@@ -101,6 +101,9 @@ describe("extractBatchVaultPaths", () => {
       }),
     ).toEqual(["a.md", "x/a.md", "F", "G"]);
   });
+  test("returns the distinct paths for bulk_edit", () => {
+    expect(extractBatchVaultPaths("bulk_edit", { paths: ["a.md", "a.md", 3, "b.md"] })).toEqual(["a.md", "b.md"]);
+  });
   test("is undefined for other tools or malformed args", () => {
     expect(extractBatchVaultPaths("edit_note", { path: "a.md" })).toBeUndefined();
     expect(extractBatchVaultPaths("update_tasks", { targets: "a.md" })).toBeUndefined();
@@ -155,6 +158,36 @@ describe("describeVaultBatchApproval", () => {
       "a.md → x/a.md — links in 2 notes",
       "F → G (folder) — links in 1 note",
     ]);
+  });
+  test("previews bulk_edit with per-note counts, samples and the total", async () => {
+    const d = await describeVaultBatchApproval(
+      "bulk_edit",
+      { paths: ["a.md", "b.md", "c.md"], find: "#old", replace: "#new" },
+      deps({ "a.md": "one #old\ntwo #old", "b.md": "#old", "c.md": "none" }),
+    );
+    expect(d?.summary).toBe("bulk_edit: 3 replacements in 2 notes");
+    expect(d?.detail.split("\n")).toEqual([
+      "a.md — 2 replacements",
+      "  - one #old",
+      "  + one #new",
+      "  - two #old",
+      "  + two #new",
+      "b.md — 1 replacement",
+      "  - #old",
+      "  + #new",
+      "c.md (no matches)",
+      "Total: 3 replacements in 2 notes",
+    ]);
+  });
+  test("bulk_edit preview lists failures and invalid patterns", async () => {
+    const d = await describeVaultBatchApproval(
+      "bulk_edit",
+      { paths: ["a.md", "x.png"], find: "a", replace: "b" },
+      deps({ "a.md": "a" }),
+    );
+    expect(d?.detail.split("\n")[0]).toBe("✗ x.png — not_a_note (Only .md and .txt notes can be bulk-edited.)");
+    const bad = await describeVaultBatchApproval("bulk_edit", { paths: ["a.md"], find: "(", replace: "", regex: true }, deps({}));
+    expect(bad?.summary).toBe("bulk_edit: invalid find");
   });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();

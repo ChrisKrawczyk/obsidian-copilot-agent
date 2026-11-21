@@ -39,6 +39,7 @@ const VAULT_WRITE_TOOLS: FakeTool[] = [
   { name: "update_task" },
   { name: "update_tasks" },
   { name: "move_note" },
+  { name: "bulk_edit" },
 ];
 
 const ALL_TOOLS: FakeTool[] = [

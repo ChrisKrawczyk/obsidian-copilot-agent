@@ -1,5 +1,5 @@
 import { lookupTFile } from "./VaultPath";
-import { ProcessAbort, type WriteToolsVault } from "./WriteTools";
+import { hasUnsavedEditorChanges, ProcessAbort, type WorkspaceForWrites, type WriteToolsVault } from "./WriteTools";
 import type { TFileLike } from "./ReadTools";
 import type { UndoBatchItem } from "../domain/UndoJournal";
 
@@ -100,4 +100,29 @@ async function rollback(
     if (!r.ok) failures.push(item.path);
   }
   return failures;
+}
+
+export type LoadNoteResult =
+  | { ok: true; content: string }
+  | { ok: false; reason: "not_found" | "read_failed" | "unsaved_changes"; details?: string };
+
+/** Read a note for a batch tool, refusing notes with unsaved editor changes. */
+export async function loadNoteForBatch(
+  vaultRel: string,
+  deps: { vault: WriteToolsVault; workspace?: WorkspaceForWrites },
+): Promise<LoadNoteResult> {
+  const file = lookupTFile(vaultRel, deps.vault) as TFileLike | null;
+  if (!file) return { ok: false, reason: "not_found" };
+  let content: string;
+  try {
+    if (deps.vault.read) content = await deps.vault.read(file);
+    else if (deps.vault.cachedRead) content = await deps.vault.cachedRead(file);
+    else return { ok: false, reason: "read_failed", details: "Vault adapter does not support read()." };
+  } catch (e) {
+    return { ok: false, reason: "read_failed", details: (e as Error).message || String(e) };
+  }
+  if (await hasUnsavedEditorChanges(vaultRel, content, deps.workspace)) {
+    return { ok: false, reason: "unsaved_changes", details: "Save or discard the open editor's changes first." };
+  }
+  return { ok: true, content };
 }

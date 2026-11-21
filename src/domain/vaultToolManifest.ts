@@ -151,6 +151,11 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     hint: "Move or rename notes, attachments or folders (list of {from, to}); updates links. One approval, one Undo entry.",
     readOnly: false,
   },
+  {
+    name: "bulk_edit",
+    hint: "One find/replace (literal or regex) across many notes, previewed with per-note counts. One approval, one Undo entry.",
+    readOnly: false,
+  },
 ];
 
 /**

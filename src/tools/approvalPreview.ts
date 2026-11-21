@@ -1,6 +1,7 @@
 import { parseTaskPatch } from "./UpdateTask";
 import { analyzeUpdateTasks, type UpdateTasksAnalysis } from "./UpdateTasks";
-import { parseMoveItems, parseTaskTargets, type WriteNoteToolsDeps } from "./WriteNoteTools";
+import { parseBulkEditArgs, parseMoveItems, parseTaskTargets, type WriteNoteToolsDeps } from "./WriteNoteTools";
+import { analyzeBulkEdit, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
 import { analyzeMoveNote, type MoveNoteAnalysis, type MoveNoteVault } from "./MoveNote";
 
 export const MAX_PREVIEW_CHARS = 4000;
@@ -82,6 +83,26 @@ export function formatMoveNotePreview(analysis: MoveNoteAnalysis, index?: LinkIn
   return boundPreview(lines);
 }
 
+export function formatBulkEditPreview(analysis: Extract<BulkEditAnalysis, { ok: true }>): string {
+  const lines: string[] = [];
+  for (const f of analysis.failures) {
+    lines.push(`✗ ${f.path} — ${f.reason}${f.details ? ` (${f.details})` : ""}`);
+  }
+  const unmatched: string[] = [];
+  for (const n of analysis.notes) {
+    if (n.replacements === 0) {
+      unmatched.push(n.path);
+      continue;
+    }
+    const samples = n.samples.map((s) => `\n  - ${s.before.trim()}\n  + ${s.after.trim()}`).join("");
+    lines.push(`${n.path} — ${plural(n.replacements, "replacement")}${samples}`);
+  }
+  for (const p of unmatched) lines.push(`${p} (no matches)`);
+  const matched = analysis.notes.length - unmatched.length;
+  const total = `Total: ${plural(analysis.totalReplacements, "replacement")} in ${plural(matched, "note")}`;
+  return lines.length > 0 ? `${boundPreview(lines, MAX_PREVIEW_CHARS - total.length - 1)}\n${total}` : total;
+}
+
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
@@ -92,6 +113,11 @@ export function extractBatchVaultPaths(toolName: string, args: unknown): string[
   if (toolName === "update_tasks") {
     if (!Array.isArray(a.targets)) return undefined;
     const paths = parseTaskTargets(a.targets).map((t) => t.path).filter((p) => p.length > 0);
+    return [...new Set(paths)];
+  }
+  if (toolName === "bulk_edit") {
+    if (!Array.isArray(a.paths)) return undefined;
+    const paths = a.paths.filter((p): p is string => typeof p === "string" && p.length > 0);
     return [...new Set(paths)];
   }
   if (toolName === "move_note") {
@@ -130,6 +156,21 @@ export async function describeVaultBatchApproval(
     return {
       summary: `move_note: ${plural(items.length, "item")}`,
       detail: formatMoveNotePreview(analysis, deps.metadataCache),
+    };
+  }
+  if (toolName === "bulk_edit") {
+    let input: BulkEditInput;
+    try {
+      input = parseBulkEditArgs(args);
+    } catch {
+      return undefined;
+    }
+    const analysis = await analyzeBulkEdit(input, deps);
+    if (!analysis.ok) return { summary: "bulk_edit: invalid find", detail: analysis.error };
+    const matched = analysis.notes.filter((n) => n.replacements > 0).length;
+    return {
+      summary: `bulk_edit: ${plural(analysis.totalReplacements, "replacement")} in ${plural(matched, "note")}`,
+      detail: formatBulkEditPreview(analysis),
     };
   }
   return undefined;

@@ -20,6 +20,7 @@ import {
 import type { VaultAwarenessSettings } from "../settings/VaultAwarenessSettings";
 import { parseTaskPatch, updateTaskImpl, type UpdateTaskInput } from "./UpdateTask";
 import { updateTasksImpl, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksTarget } from "./UpdateTasks";
+import { bulkEditImpl, MAX_BULK_EDIT_NOTES, MAX_BULK_EDIT_REPLACEMENTS, type BulkEditInput } from "./BulkEdit";
 import { MAX_MOVE_NOTE_ITEMS, moveNoteImpl, type MoveNoteFileManager, type MoveNoteItem } from "./MoveNote";
 
 /**
@@ -1024,7 +1025,54 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         return await moveNoteImpl(parseMoveItems(a.moves), deps);
       },
     }),
+    defineTool("bulk_edit", {
+      description:
+        "Apply ONE find/replace to MANY notes at once (rename a tag or " +
+        "term everywhere, fix a repeated typo). Use this instead of " +
+        "repeated edit_note calls or shell text replacement. paths: the " +
+        "notes to edit (find candidates with search tools first). Literal " +
+        "by default (replace is inserted verbatim); regex:true for a " +
+        "JavaScript regex (global, multiline ^/$, $1/$<name> in replace). " +
+        "ignoreCase:true for case-insensitive. The approval shows per-note " +
+        "counts and sample lines. Notes with no match are left untouched. " +
+        "If any path is invalid or unsaved nothing is written. At most " +
+        `${MAX_BULK_EDIT_NOTES} notes and ${MAX_BULK_EDIT_REPLACEMENTS} ` +
+        "replacements. One approval and one Undo entry for the whole call.",
+      parameters: {
+        type: "object",
+        required: ["paths", "find", "replace"],
+        properties: {
+          paths: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_BULK_EDIT_NOTES,
+            items: { type: "string" },
+            description: "Vault-relative paths of .md or .txt notes.",
+          },
+          find: { type: "string", description: "Text (or regex when regex:true) to find. Must not be empty." },
+          replace: { type: "string", description: "Replacement text. May be empty to delete matches." },
+          regex: { type: "boolean", description: "Treat find as a regular expression. Default false." },
+          ignoreCase: { type: "boolean", description: "Case-insensitive matching. Default false." },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => bulkEditImpl(parseBulkEditArgs(args), deps),
+    }),
   ];
+}
+
+export function parseBulkEditArgs(args: unknown): BulkEditInput {
+  const a = (args ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(a.paths)) throw new Error("`paths` must be an array");
+  if (typeof a.find !== "string") throw new Error("`find` is required");
+  if (typeof a.replace !== "string") throw new Error("`replace` is required");
+  return {
+    paths: a.paths.map((p) => (typeof p === "string" ? p : "")),
+    find: a.find,
+    replace: a.replace,
+    regex: a.regex === true,
+    ignoreCase: a.ignoreCase === true,
+  };
 }
 
 export function parseMoveItems(raw: readonly unknown[]): MoveNoteItem[] {
