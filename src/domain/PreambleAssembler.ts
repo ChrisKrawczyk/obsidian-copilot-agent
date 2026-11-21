@@ -14,7 +14,8 @@ import type { McpRegisteredTool } from "../mcp/McpToolRegistry";
  * read-only vault tools (`vault_tree`, `vault_metadata`, etc.) so the
  * model fetches structure on demand via auto-approved tool calls
  * (FR-017). This keeps the preamble constant per vault root, cheap to
- * recompute, and bounded under 4 KB regardless of vault size.
+ * recompute, and bounded by `MAX_DEFAULT_PREAMBLE_BYTES` regardless of
+ * vault size.
  */
 
 export type PreambleMode = "none" | "default" | "custom";
