@@ -31,6 +31,7 @@ import { createWriteTools } from "./tools/WriteTools";
 import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
+import { describeVaultBatchApproval, extractBatchVaultPaths } from "./tools/approvalPreview";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
@@ -826,6 +827,20 @@ export default class CopilotAgentPlugin extends Plugin {
             const args = r.args;
             return typeof args?.path === "string" ? args.path : undefined;
           },
+          extractVaultPaths: (req) =>
+            typeof req.toolName === "string"
+              ? extractBatchVaultPaths(req.toolName, req.args)
+              : undefined,
+          describeApproval: (req) =>
+            typeof req.toolName === "string"
+              ? describeVaultBatchApproval(req.toolName, req.args, {
+                  vault: this.app.vault as unknown as Parameters<typeof createWriteTools>[0]["vault"],
+                  workspace: this.app.workspace as unknown as Parameters<
+                    typeof createWriteTools
+                  >[0]["workspace"],
+                  now,
+                })
+              : Promise.resolve(undefined),
         },
         preamble: () => {
           const va = safetySettingsStore.snapshot().vaultAwareness;

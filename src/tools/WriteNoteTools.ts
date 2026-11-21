@@ -18,11 +18,8 @@ import {
   type TaskPriority,
 } from "./TaskFormat";
 import type { VaultAwarenessSettings } from "../settings/VaultAwarenessSettings";
-import {
-  updateTaskImpl,
-  type UpdateTaskInput,
-  type UpdateTaskPatch,
-} from "./UpdateTask";
+import { parseTaskPatch, updateTaskImpl, type UpdateTaskInput } from "./UpdateTask";
+import { updateTasksImpl, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksTarget } from "./UpdateTasks";
 
 /**
  * Per-call dependencies for the Phase-4/5 vault-write tools.
@@ -920,32 +917,7 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
               "Only used when expectedRawLine is absent. Fails loudly on " +
               "ambiguity (multiple matches → ambiguous_match).",
           },
-          patch: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              addTags: { type: "array", items: { type: "string" } },
-              removeTags: { type: "array", items: { type: "string" } },
-              setPriority: {
-                type: ["string", "null"],
-                enum: ["high", "medium", "low", null],
-                description: "high|medium|low to set, null to clear.",
-              },
-              setDueDate: {
-                type: ["string", "null"],
-                description: "Strict YYYY-MM-DD to set, null to clear.",
-              },
-              setScheduledDate: {
-                type: ["string", "null"],
-                description: "Strict YYYY-MM-DD to set, null to clear.",
-              },
-              setStatus: {
-                type: "string",
-                enum: ["todo", "in-progress", "done", "cancelled"],
-              },
-              setDescription: { type: "string" },
-            },
-          },
+          patch: taskPatchSchema(),
         },
         additionalProperties: false,
       },
@@ -953,41 +925,102 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         const a = (args ?? {}) as Record<string, unknown>;
         if (typeof a.path !== "string") throw new Error("`path` is required");
         if (typeof a.line !== "number") throw new Error("`line` is required");
-        const p = (a.patch ?? {}) as Record<string, unknown>;
-        const patch: UpdateTaskPatch = {};
-        if (Array.isArray(p.addTags)) {
-          patch.addTags = p.addTags.filter((t): t is string => typeof t === "string");
-        }
-        if (Array.isArray(p.removeTags)) {
-          patch.removeTags = p.removeTags.filter((t): t is string => typeof t === "string");
-        }
-        if (p.setPriority === null) patch.setPriority = null;
-        else if (p.setPriority === "high" || p.setPriority === "medium" || p.setPriority === "low") {
-          patch.setPriority = p.setPriority;
-        }
-        if (p.setDueDate === null) patch.setDueDate = null;
-        else if (typeof p.setDueDate === "string") patch.setDueDate = p.setDueDate;
-        if (p.setScheduledDate === null) patch.setScheduledDate = null;
-        else if (typeof p.setScheduledDate === "string") patch.setScheduledDate = p.setScheduledDate;
-        if (
-          p.setStatus === "todo" ||
-          p.setStatus === "in-progress" ||
-          p.setStatus === "done" ||
-          p.setStatus === "cancelled"
-        ) {
-          patch.setStatus = p.setStatus;
-        }
-        if (typeof p.setDescription === "string") patch.setDescription = p.setDescription;
-
         const input: UpdateTaskInput = {
           path: a.path,
           line: a.line,
-          patch,
+          patch: parseTaskPatch(a.patch),
         };
         if (typeof a.expectedRawLine === "string") input.expectedRawLine = a.expectedRawLine;
         if (typeof a.descriptionMatch === "string") input.descriptionMatch = a.descriptionMatch;
         return await updateTaskImpl(input, deps);
       },
     }),
+    defineTool("update_tasks", {
+      description:
+        "Apply ONE patch to MANY task lines at once (e.g. mark 20 tasks " +
+        "done, add a tag to every task from a find_tasks result). Use this " +
+        "instead of calling update_task repeatedly. Each target is " +
+        "{path, line, expectedRawLine} straight from find_tasks. Patch " +
+        "fields and status auto-stamping match update_task. Every target " +
+        "is validated first; if any fails (stale line, not a task, " +
+        "duplicate, unsaved editor) nothing is written and every failure " +
+        `is listed. At most ${MAX_UPDATE_TASKS_TARGETS} targets. One ` +
+        "approval and one Undo entry for the whole batch.",
+      parameters: {
+        type: "object",
+        required: ["targets", "patch"],
+        properties: {
+          targets: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_UPDATE_TASKS_TARGETS,
+            items: {
+              type: "object",
+              required: ["path", "line", "expectedRawLine"],
+              additionalProperties: false,
+              properties: {
+                path: { type: "string", description: "Vault-relative path of the note." },
+                line: { type: "number", description: "1-based line number (from find_tasks)." },
+                expectedRawLine: {
+                  type: "string",
+                  description: "EXACT raw line text from find_tasks.",
+                },
+              },
+            },
+          },
+          patch: taskPatchSchema(),
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as Record<string, unknown>;
+        if (!Array.isArray(a.targets)) throw new Error("`targets` must be an array");
+        return await updateTasksImpl(
+          { targets: parseTaskTargets(a.targets), patch: parseTaskPatch(a.patch) },
+          deps,
+        );
+      },
+    }),
   ];
+}
+
+export function parseTaskTargets(raw: readonly unknown[]): UpdateTasksTarget[] {
+  return raw.map((t) => {
+    const o = (t ?? {}) as Record<string, unknown>;
+    const target: UpdateTasksTarget = {
+      path: typeof o.path === "string" ? o.path : "",
+      line: typeof o.line === "number" ? o.line : Number.NaN,
+    };
+    if (typeof o.expectedRawLine === "string") target.expectedRawLine = o.expectedRawLine;
+    return target;
+  });
+}
+
+function taskPatchSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      addTags: { type: "array", items: { type: "string" } },
+      removeTags: { type: "array", items: { type: "string" } },
+      setPriority: {
+        type: ["string", "null"],
+        enum: ["high", "medium", "low", null],
+        description: "high|medium|low to set, null to clear.",
+      },
+      setDueDate: {
+        type: ["string", "null"],
+        description: "Strict YYYY-MM-DD to set, null to clear.",
+      },
+      setScheduledDate: {
+        type: ["string", "null"],
+        description: "Strict YYYY-MM-DD to set, null to clear.",
+      },
+      setStatus: {
+        type: "string",
+        enum: ["todo", "in-progress", "done", "cancelled"],
+      },
+      setDescription: { type: "string" },
+    },
+  };
 }

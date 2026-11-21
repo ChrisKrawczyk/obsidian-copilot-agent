@@ -141,6 +141,11 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     hint: "Edit a single task line (status, dates, priority, tags, description) by line + expectedRawLine. Single approval, journal-undoable. Status -> done/cancelled auto-stamps today.",
     readOnly: false,
   },
+  {
+    name: "update_tasks",
+    hint: "Apply one patch to many tasks (targets from find_tasks). Validates all first; one approval, one Undo entry.",
+    readOnly: false,
+  },
 ];
 
 /**

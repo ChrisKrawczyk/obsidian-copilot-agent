@@ -92,6 +92,19 @@ export interface AgentSessionOptions {
      */
     extractVaultPath?: (request: SdkPermissionRequest) => string | undefined;
     /**
+     * Every vault path a multi-path vault write touches (batch tools).
+     * A non-empty list feeds `SafetyPolicyInput.vaultRelativePaths`.
+     */
+    extractVaultPaths?: (request: SdkPermissionRequest) => readonly string[] | undefined;
+    /**
+     * Human-readable approval text for vault-write custom tools, computed
+     * from current vault state. Failures and slow answers fall back to
+     * the default summary and argument JSON.
+     */
+    describeApproval?: (
+      request: SdkPermissionRequest,
+    ) => Promise<{ summary?: string; detail?: string } | undefined>;
+    /**
      * v0.5 Phase 2: synchronous current MCP identity accessor. It must
      * consult live manager state at decision time; removed, disabled,
      * disconnected, or crashlooping servers return null.
@@ -2423,8 +2436,16 @@ export class CopilotAgentSession implements AgentSession {
     }
 
     // require-approval: surface a prompt in the chat and await user click.
-    const summary = buildApprovalSummary(request, input);
-    const detail = buildApprovalDetail(request);
+    let summary = buildApprovalSummary(request, input);
+    let detail = buildApprovalDetail(request);
+    if (input.source === "vault" && safety.describeApproval) {
+      const described = await describeWithin(
+        () => safety.describeApproval!(request),
+        DESCRIBE_APPROVAL_TIMEOUT_MS,
+      );
+      if (described?.summary) summary = described.summary;
+      if (described?.detail) detail = described.detail;
+    }
     const canOfferSession = request.canOfferSessionApproval !== false;
     const pendingCall: AssistantToolCall = {
       id: toolCallId,
@@ -2566,10 +2587,17 @@ export class CopilotAgentSession implements AgentSession {
         (typeof request.args?.path === "string"
           ? (request.args.path as string)
           : undefined);
+      let vaultPaths: readonly string[] | undefined;
+      try {
+        vaultPaths = safety.extractVaultPaths?.(request);
+      } catch {
+        vaultPaths = undefined;
+      }
       return {
         source: "vault",
         toolName,
         vaultRelativePath: vaultPath,
+        ...(vaultPaths && vaultPaths.length > 0 ? { vaultRelativePaths: vaultPaths } : {}),
       };
     }
 
@@ -2831,6 +2859,24 @@ function previewArgs(
         ? stringifyMcpArgsForPreview(raw)
         : stringifyArgsForPreview(raw);
     }
+  }
+}
+
+const DESCRIBE_APPROVAL_TIMEOUT_MS = 2000;
+
+async function describeWithin<T>(fn: () => Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

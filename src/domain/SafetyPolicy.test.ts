@@ -277,3 +277,60 @@ describe("SafetyState persistence", () => {
     expect(s.isVaultGranted()).toBe(true);
   });
 });
+
+describe("decideSafety — multi-path vault writes (FR-041)", () => {
+  const strict = cfg({ fsDefaultMode: "require-approval", vaultAllowlist: ["inbox", "projects"] });
+
+  test("auto-applies when every path is allowlisted", () => {
+    const r = decideSafety(
+      { source: "vault", toolName: "update_tasks", vaultRelativePaths: ["inbox/a.md", "projects/x/b.md"] },
+      strict,
+      new SafetyState(),
+    );
+    expect(r.decision).toBe("auto-apply");
+  });
+
+  test("falls through to the default mode when any path is outside the allowlist", () => {
+    const r = decideSafety(
+      { source: "vault", toolName: "move_note", vaultRelativePaths: ["inbox/a.md", "archive/a.md"] },
+      strict,
+      new SafetyState(),
+    );
+    expect(r.decision).toBe("require-approval");
+  });
+
+  test("the multi-path list supersedes a single covered path", () => {
+    const r = decideSafety(
+      {
+        source: "vault",
+        toolName: "move_note",
+        vaultRelativePath: "inbox/a.md",
+        vaultRelativePaths: ["inbox/a.md", "archive/a.md"],
+      },
+      strict,
+      new SafetyState(),
+    );
+    expect(r.decision).toBe("require-approval");
+  });
+
+  test("a session grant still applies to partially covered calls", () => {
+    const state = new SafetyState();
+    state.grantVault();
+    const r = decideSafety(
+      { source: "vault", toolName: "bulk_edit", vaultRelativePaths: ["archive/a.md"] },
+      strict,
+      state,
+    );
+    expect(r.decision).toBe("auto-apply");
+  });
+
+  test("auto-apply default mode applies regardless of coverage", () => {
+    const r = decideSafety(
+      { source: "vault", toolName: "update_tasks", vaultRelativePaths: ["archive/a.md"] },
+      cfg({ vaultAllowlist: ["inbox"] }),
+      new SafetyState(),
+    );
+    expect(r.decision).toBe("auto-apply");
+  });
+});
+

@@ -43,6 +43,12 @@ export interface SafetyPolicyInput {
   mcpTrustEpoch?: McpTrustEpoch;
   /** Vault-relative path for vault writes; absolute path for extra-vault; undefined otherwise. */
   vaultRelativePath?: string;
+  /**
+   * Every vault-relative path a multi-path vault write touches. When
+   * non-empty it supersedes `vaultRelativePath` for the allowlist check:
+   * the call auto-applies via the allowlist only if every path is covered.
+   */
+  vaultRelativePaths?: readonly string[];
   /** Extra-vault canonical root path; undefined otherwise (Phase 7+). */
   extraVaultRoot?: string;
 }
@@ -217,6 +223,7 @@ export function decideSafety(
     source,
     toolName,
     vaultRelativePath,
+    vaultRelativePaths,
     extraVaultRoot,
     mcpServerId,
     mcpToolName,
@@ -231,7 +238,14 @@ export function decideSafety(
           reason: "Vault writes approved for this session.",
         };
       }
-      if (
+      if (vaultRelativePaths !== undefined && vaultRelativePaths.length > 0) {
+        if (vaultRelativePaths.every((p) => isVaultPathAllowlisted(p, config.vaultAllowlist))) {
+          return {
+            decision: "auto-apply",
+            reason: `All ${vaultRelativePaths.length} paths are covered by the allowlist.`,
+          };
+        }
+      } else if (
         vaultRelativePath !== undefined &&
         isVaultPathAllowlisted(vaultRelativePath, config.vaultAllowlist)
       ) {
