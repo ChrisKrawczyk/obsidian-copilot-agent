@@ -31,6 +31,7 @@ export type MoveNoteFailureReason =
   | "same_path"
   | "target_exists"
   | "parent_is_file"
+  | "folder_case_mismatch"
   | "duplicate_source"
   | "duplicate_destination"
   | "overlapping_items"
@@ -199,9 +200,9 @@ export function analyzeMoveNote(
       fail("target_exists", from, to);
       continue;
     }
-    const blocker = firstFileAncestor(deps.vault, to);
-    if (blocker) {
-      fail("parent_is_file", from, to, `"${blocker}" is a file, not a folder.`);
+    const parent = checkParent(deps.vault, lowerIndex, to);
+    if (parent) {
+      fail(parent.reason, from, to, parent.details);
       continue;
     }
     resolved.push({ index: i, from, to, kind });
@@ -233,21 +234,32 @@ export function analyzeMoveNote(
   };
 }
 
-function buildLowerCaseIndex(vault: MoveNoteVault): Set<string> | null {
+function buildLowerCaseIndex(vault: MoveNoteVault): Map<string, string> | null {
   if (typeof vault.getAllLoadedFiles !== "function") return null;
-  const out = new Set<string>();
+  const out = new Map<string, string>();
   for (const f of vault.getAllLoadedFiles()) {
     const p = (f as { path?: unknown })?.path;
-    if (typeof p === "string" && p.length > 0) out.add(p.toLowerCase());
+    if (typeof p === "string" && p.length > 0) out.set(p.toLowerCase(), p);
   }
   return out;
 }
 
-function firstFileAncestor(vault: VaultLike, path: string): string | null {
+function checkParent(
+  vault: VaultLike,
+  lowerIndex: Map<string, string> | null,
+  path: string,
+): { reason: MoveNoteFailureReason; details: string } | null {
   let parent = parentOf(path);
   while (parent) {
     const f = lookup(vault, parent);
-    if (f) return isFolderLike(f) ? null : parent;
+    if (f) return isFolderLike(f) ? null : { reason: "parent_is_file", details: `"${parent}" is a file, not a folder.` };
+    const existing = lowerIndex?.get(parent.toLowerCase());
+    if (existing) {
+      return {
+        reason: "folder_case_mismatch",
+        details: `Folder "${existing}" already exists with different letter case; use that spelling.`,
+      };
+    }
     parent = parentOf(parent);
   }
   return null;

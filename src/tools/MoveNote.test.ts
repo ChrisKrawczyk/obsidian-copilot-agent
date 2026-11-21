@@ -262,6 +262,12 @@ describe("analyzeMoveNote validation", () => {
     ).toEqual(["0:config_dir", "1:config_dir", "2:config_dir"]);
   });
 
+  test("a destination folder that exists with different case is rejected up front", () => {
+    const world = makeWorld(["a.md", "Notes/b.md"], ["Notes"]);
+    expect(reasons(world, [{ from: "a.md", to: "notes/sub/a.md" }])).toEqual(["0:folder_case_mismatch"]);
+    expect(reasons(world, [{ from: "a.md", to: "Notes/sub/a.md" }])).toEqual([]);
+  });
+
   test("a destination under an existing file is rejected", () => {
     const world = makeWorld(["a.md", "file"]);
     expect(reasons(world, [{ from: "a.md", to: "file/a.md" }])).toEqual(["0:parent_is_file"]);
