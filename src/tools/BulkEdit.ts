@@ -264,7 +264,7 @@ export async function bulkEditImpl(input: BulkEditInput, deps: WriteNoteToolsDep
   const results = analysis.notes.map((n) => ({ path: n.path, replacements: n.replacements }));
   const changed = analysis.notes.filter((n) => n.newContent !== n.content);
   if (changed.length === 0) {
-    return { ok: true, changed: false, totalReplacements: 0, notesChanged: 0, results };
+    return { ok: true, changed: false, totalReplacements: analysis.totalReplacements, notesChanged: 0, results };
   }
   const write = await applyBatchModifications(
     changed.map((note) => ({

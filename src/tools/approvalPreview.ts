@@ -1,7 +1,7 @@
 import { parseTaskPatch } from "./UpdateTask";
-import { analyzeUpdateTasks, type UpdateTasksAnalysis } from "./UpdateTasks";
+import { analyzeUpdateTasks, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksAnalysis } from "./UpdateTasks";
 import { parseBulkEditArgs, parseMoveItems, parseTaskTargets, type WriteNoteToolsDeps } from "./WriteNoteTools";
-import { analyzeBulkEdit, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
+import { analyzeBulkEdit, MAX_BULK_EDIT_NOTES, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
 import { analyzeMoveNote, type MoveNoteAnalysis, type MoveNoteVault } from "./MoveNote";
 
 export const MAX_PREVIEW_CHARS = 4000;
@@ -142,6 +142,7 @@ export async function describeVaultBatchApproval(
   if (toolName === "update_tasks") {
     if (!Array.isArray(a.targets)) return undefined;
     const targets = parseTaskTargets(a.targets);
+    if (targets.length > MAX_UPDATE_TASKS_TARGETS) return undefined;
     const analysis = await analyzeUpdateTasks({ targets, patch: parseTaskPatch(a.patch) }, deps);
     const notes = new Set([...analysis.rows.map((r) => r.path), ...analysis.failures.map((f) => f.path)]);
     return {
@@ -165,6 +166,7 @@ export async function describeVaultBatchApproval(
     } catch {
       return undefined;
     }
+    if (input.paths.length > MAX_BULK_EDIT_NOTES) return undefined;
     const analysis = await analyzeBulkEdit(input, deps);
     if (!analysis.ok) return { summary: "bulk_edit: invalid find", detail: analysis.error };
     const matched = analysis.notes.filter((n) => n.replacements > 0).length;

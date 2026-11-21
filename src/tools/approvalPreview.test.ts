@@ -198,6 +198,14 @@ describe("describeVaultBatchApproval", () => {
     expect(lines.at(-2)).toMatch(/^… and \d+ more$/);
     expect(lines.at(-1)).toBe("Total: 150 replacements in 50 notes");
   });
+  test("skips reading when a call is over its cap", async () => {
+    const paths = Array.from({ length: 51 }, (_, i) => `n${i}.md`);
+    expect(await describeVaultBatchApproval("bulk_edit", { paths, find: "a", replace: "b" }, deps({}))).toBeUndefined();
+    const targets = Array.from({ length: 201 }, (_, i) => ({ path: "a.md", line: i + 1, expectedRawLine: "- [ ] x" }));
+    expect(
+      await describeVaultBatchApproval("update_tasks", { targets, patch: { setStatus: "done" } }, deps({})),
+    ).toBeUndefined();
+  });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();
   });
