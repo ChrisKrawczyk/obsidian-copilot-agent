@@ -143,7 +143,7 @@ Approval and safety
 
 Undo journal
 - FR-050: The Undo journal supports a batch entry composed of per-item operations (modify, create, delete, move) that is undone atomically: all items are checked for divergence first; without force, any divergence → no item reverted and the outcome lists the divergent paths; with force, all items are reverted (move items whose original path is occupied by a different item are skipped and reported). (Stories: P1-tasks, P1-move, P2-bulk)
-- FR-051: If a write fails during a batch undo, items already reverted are re-applied to their post-action state and the outcome is a failure; the entry stays undoable. (Stories: P1-tasks, P1-move, P2-bulk)
+- FR-051: If a write fails during a batch undo, items already reverted are restored to the state observed just before the undo began (so a forced undo never destroys an external edit) and the outcome is a failure; the entry stays undoable. (Stories: P1-tasks, P1-move, P2-bulk)
 - FR-052: Batch entries persist across plugin reloads like existing entries, count as one entry toward the journal cap, and are bounded by a combined snapshot cap of 2 MB per entry, counting all stored content (before plus after for modify items; content for create/delete items), enforced by the tools at validation time. Older persisted data loads unchanged. (Stories: P1-tasks, P1-move, P2-bulk)
 - FR-053: The chat Undo button works for the new tools exactly as for existing vault write tools; the divergence confirmation names the affected path(s) for batch entries. (Stories: P1-tasks, P1-move, P2-bulk)
 
