@@ -20,6 +20,7 @@ import {
 import type { VaultAwarenessSettings } from "../settings/VaultAwarenessSettings";
 import { parseTaskPatch, updateTaskImpl, type UpdateTaskInput } from "./UpdateTask";
 import { updateTasksImpl, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksTarget } from "./UpdateTasks";
+import { MAX_MOVE_NOTE_ITEMS, moveNoteImpl, type MoveNoteFileManager, type MoveNoteItem } from "./MoveNote";
 
 /**
  * Per-call dependencies for the Phase-4/5 vault-write tools.
@@ -35,6 +36,9 @@ export interface WriteNoteToolsDeps extends WriteToolsDeps {
   now: () => Date;
   /** Reads the latest settings so changes to taskTargetMode etc. apply live. */
   vaultAwareness: () => VaultAwarenessSettings;
+  /** Obsidian's link-aware rename; `move_note` is unavailable without it. */
+  fileManager?: MoveNoteFileManager;
+  configDir?: string;
 }
 
 interface SuccessShape {
@@ -981,7 +985,56 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         );
       },
     }),
+    defineTool("move_note", {
+      description:
+        "Move or rename vault items (notes, attachments or folders) with " +
+        "Obsidian's link-aware rename, so wikilinks and markdown links to " +
+        "them are updated. ALWAYS use this instead of shell commands " +
+        "(Move-Item, mv, git mv) for any move or rename inside the vault. " +
+        "Pass every item in ONE call: moves is a list of {from, to} " +
+        "vault-relative paths (a rename is a move within the same folder). " +
+        "Missing destination folders are created. Nothing is overwritten. " +
+        "Every item is validated first; if any fails nothing moves and " +
+        `every failure is listed. At most ${MAX_MOVE_NOTE_ITEMS} items. One ` +
+        "approval and one Undo entry for the whole call.",
+      parameters: {
+        type: "object",
+        required: ["moves"],
+        properties: {
+          moves: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_MOVE_NOTE_ITEMS,
+            items: {
+              type: "object",
+              required: ["from", "to"],
+              additionalProperties: false,
+              properties: {
+                from: { type: "string", description: "Current vault-relative path." },
+                to: { type: "string", description: "New vault-relative path, including the file name." },
+              },
+            },
+          },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as Record<string, unknown>;
+        if (!Array.isArray(a.moves)) throw new Error("`moves` must be an array");
+        return await moveNoteImpl(parseMoveItems(a.moves), deps);
+      },
+    }),
   ];
+}
+
+export function parseMoveItems(raw: readonly unknown[]): MoveNoteItem[] {
+  return raw.map((m) => {
+    const o = (m ?? {}) as Record<string, unknown>;
+    return {
+      from: typeof o.from === "string" ? o.from : "",
+      to: typeof o.to === "string" ? o.to : "",
+    };
+  });
 }
 
 export function parseTaskTargets(raw: readonly unknown[]): UpdateTasksTarget[] {

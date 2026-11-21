@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   boundPreview,
+  countLinkingNotes,
   describeVaultBatchApproval,
   extractBatchVaultPaths,
   formatUpdateTasksPreview,
@@ -89,6 +90,17 @@ describe("extractBatchVaultPaths", () => {
       }),
     ).toEqual(["a.md", "b.md"]);
   });
+  test("returns every source and destination for move_note", () => {
+    expect(
+      extractBatchVaultPaths("move_note", {
+        moves: [
+          { from: "a.md", to: "x/a.md" },
+          { from: "F", to: "G" },
+          { from: "a.md", to: "" },
+        ],
+      }),
+    ).toEqual(["a.md", "x/a.md", "F", "G"]);
+  });
   test("is undefined for other tools or malformed args", () => {
     expect(extractBatchVaultPaths("edit_note", { path: "a.md" })).toBeUndefined();
     expect(extractBatchVaultPaths("update_tasks", { targets: "a.md" })).toBeUndefined();
@@ -112,7 +124,59 @@ describe("describeVaultBatchApproval", () => {
     expect(d?.detail).toContain("✗ b.md:1 — task_not_found");
     expect(d?.detail).toContain("  + - [x] one (completed: 2026-06-09)");
   });
+  test("previews move_note items with link counts and failures", async () => {
+    const base = deps({ "a.md": "", "b.md": "", "F/n.md": "", "taken.md": "" });
+    const vault = base.vault as unknown as { getAbstractFileByPath: (p: string) => unknown };
+    const lookup = vault.getAbstractFileByPath;
+    vault.getAbstractFileByPath = (p) => (p === "F" ? { path: "F", children: [] } : lookup(p));
+    const d = await describeVaultBatchApproval(
+      "move_note",
+      {
+        moves: [
+          { from: "a.md", to: "x/a.md" },
+          { from: "F", to: "G" },
+          { from: "b.md", to: "taken.md" },
+        ],
+      },
+      {
+        ...base,
+        metadataCache: {
+          resolvedLinks: {
+            "b.md": { "a.md": 2, "F/n.md": 1 },
+            "taken.md": { "a.md": 1 },
+            "F/n.md": { "F/n.md": 1 },
+          },
+        },
+      },
+    );
+    expect(d?.summary).toBe("move_note: 3 items");
+    expect(d?.detail.split("\n")).toEqual([
+      "✗ b.md → taken.md — target_exists",
+      "a.md → x/a.md — links in 2 notes",
+      "F → G (folder) — links in 1 note",
+    ]);
+  });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();
+  });
+});
+
+describe("countLinkingNotes", () => {
+  const index = {
+    resolvedLinks: {
+      "a.md": { "F/x.md": 1, "b.md": 0 },
+      "F/y.md": { "F/x.md": 3 },
+      "c.md": { "b.md": 1 },
+    },
+  };
+  test("counts notes that link to a file", () => {
+    expect(countLinkingNotes(index, "b.md", "file")).toBe(1);
+    expect(countLinkingNotes(index, "F/x.md", "file")).toBe(2);
+  });
+  test("for a folder, ignores links from inside it", () => {
+    expect(countLinkingNotes(index, "F", "folder")).toBe(1);
+  });
+  test("is zero without a link index", () => {
+    expect(countLinkingNotes(undefined, "a.md", "file")).toBe(0);
   });
 });

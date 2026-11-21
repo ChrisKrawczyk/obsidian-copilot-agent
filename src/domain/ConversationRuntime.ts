@@ -122,7 +122,7 @@ export function hydrateChatState(messages?: PersistedMessage[]): ChatState {
   return new ChatState(seeded);
 }
 
-import type { UndoJournalVault } from "./UndoJournal";
+import type { UndoJournalOptions, UndoJournalVault } from "./UndoJournal";
 import { UNDO_TTL_MS } from "../persistence/ConversationsStore";
 
 /** Helper: build an `UndoJournal` for a runtime, with persistence
@@ -131,9 +131,11 @@ export function makeRuntimeJournal(
   vault: UndoJournalVault,
   hydration?: PersistedUndoEntry[],
   persistAdapter?: ConversationRuntimePersistAdapter,
+  options: Pick<UndoJournalOptions, "moveItem"> = {},
 ): UndoJournal {
   return new UndoJournal({
     vault,
+    moveItem: options.moveItem,
     initialEntries: hydration,
     persist: persistAdapter
       ? (op, entry) => persistAdapter.onJournalOp(op, entry)

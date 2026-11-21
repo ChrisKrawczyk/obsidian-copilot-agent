@@ -48,7 +48,7 @@ Facts from CodeResearch.md:
 ## Phase Status
 - [x] **Phase 1: Batch undo entries** - Journal batch kind (modify/create/delete/move items) with atomic divergence check, forced undo and rollback, plus persistence, migration and batch-aware undo-flow wording. Also adds proposal 0013.
 - [x] **Phase 2: `update_tasks` + multi-path safety + approval previews** - Batch write primitive, the batch task tool, registry lockstep, the multi-path allowlist and the preview hook.
-- [ ] **Phase 3: `move_note`** - Link-aware batched move/rename through `fileManager.renameFile`, with folder creation, validation, rollback, journal move undo and preview.
+- [x] **Phase 3: `move_note`** - Link-aware batched move/rename through `fileManager.renameFile`, with folder creation, validation, rollback, journal move undo and preview.
 - [ ] **Phase 4: `bulk_edit`** - Literal/regex find-replace across notes, with preview, rollback and a single undo entry.
 - [ ] **Phase 5: Out-of-band change warning** - Pure detector, plugin vault-event wiring, self-write exclusion, the tool-call warning UI and persistence.
 - [ ] **Phase 6: Preamble hard rule** - Rule block, placeholder, updated guidance, 10 KB bound and settings text.

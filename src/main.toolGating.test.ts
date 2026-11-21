@@ -38,6 +38,7 @@ const VAULT_WRITE_TOOLS: FakeTool[] = [
   { name: "create_task" },
   { name: "update_task" },
   { name: "update_tasks" },
+  { name: "move_note" },
 ];
 
 const ALL_TOOLS: FakeTool[] = [

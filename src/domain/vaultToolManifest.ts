@@ -146,6 +146,11 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     hint: "Apply one patch to many tasks (targets from find_tasks). Validates all first; one approval, one Undo entry.",
     readOnly: false,
   },
+  {
+    name: "move_note",
+    hint: "Move or rename notes, attachments or folders (list of {from, to}); updates links. One approval, one Undo entry.",
+    readOnly: false,
+  },
 ];
 
 /**

@@ -31,7 +31,8 @@ import { createWriteTools } from "./tools/WriteTools";
 import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
-import { describeVaultBatchApproval, extractBatchVaultPaths } from "./tools/approvalPreview";
+import { moveVaultItem, type MoveNoteFileManager, type MoveNoteVault } from "./tools/MoveNote";
+import { describeVaultBatchApproval, extractBatchVaultPaths, type LinkIndex } from "./tools/approvalPreview";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
 import { resolveDailyNotePath } from "./tools/DailyNotePath";
@@ -656,6 +657,15 @@ export default class CopilotAgentPlugin extends Plugin {
         this.app.vault as unknown as Parameters<typeof makeRuntimeJournal>[0],
         hydration?.undoEntries,
         persistAdapter,
+        {
+          moveItem: (from, to) =>
+            moveVaultItem(
+              this.app.vault as unknown as MoveNoteVault,
+              this.app.fileManager as unknown as MoveNoteFileManager,
+              from,
+              to,
+            ),
+        },
       );
 
       const readTools = createReadTools(
@@ -693,6 +703,8 @@ export default class CopilotAgentPlugin extends Plugin {
         api: obsidianApi,
         now,
         vaultAwareness: () => safetySettingsStore.snapshot().vaultAwareness,
+        fileManager: this.app.fileManager as unknown as MoveNoteFileManager,
+        configDir: this.app.vault.configDir,
       });
       const vaultTools = filterRawFsToolsIfGated(
         [
@@ -839,6 +851,8 @@ export default class CopilotAgentPlugin extends Plugin {
                     typeof createWriteTools
                   >[0]["workspace"],
                   now,
+                  configDir: this.app.vault.configDir,
+                  metadataCache: this.app.metadataCache as unknown as LinkIndex,
                 })
               : Promise.resolve(undefined),
         },
