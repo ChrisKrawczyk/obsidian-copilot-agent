@@ -52,7 +52,7 @@ Facts from CodeResearch.md:
 - [x] **Phase 4: `bulk_edit`** - Literal/regex find-replace across notes, with preview, rollback and a single undo entry.
 - [x] **Phase 5: Out-of-band change warning** - Pure detector, plugin vault-event wiring, self-write exclusion, the tool-call warning UI and persistence.
 - [x] **Phase 6: Preamble hard rule** - Rule block, placeholder, updated guidance, 10 KB bound and settings text.
-- [ ] **Phase 7: Documentation** - Docs.md, README, CHANGELOG `[Unreleased]` and the proposal 0013 index.
+- [x] **Phase 7: Documentation** - Docs.md, README, CHANGELOG `[Unreleased]` and the proposal 0013 index.
 
 ## Phase Candidates
 - (none yet)

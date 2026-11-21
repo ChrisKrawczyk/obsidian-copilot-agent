@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+The agent now has batch tools for bulk task changes, moves, renames, and find/replace, and is told never to change vault files with shell commands. If something outside the vault tools changes vault files while a shell or MCP tool runs, the transcript warns you.
+
+### Added
+
+- **`update_tasks`, `move_note`, and `bulk_edit`, each with one approval and one Undo per call.** `update_tasks` applies one patch to up to 200 tasks from `find_tasks`. `move_note` moves or renames up to 100 notes, attachments, or folders through Obsidian's link-aware rename, so links update and Undo moves them back. `bulk_edit` runs one literal or regex find/replace across up to 50 notes. Each tool validates every target before writing; if any fails, nothing changes. A failure partway through rolls back the writes already made. The approval prompt previews the change: each task's line before and after, each move with its number of linking notes, or match counts and sample lines per note. (`src/tools/UpdateTasks.ts`, `src/tools/MoveNote.ts`, `src/tools/BulkEdit.ts`, `src/tools/approvalPreview.ts`.)
+- **Warning when vault files change outside the vault tools.** While a shell or MCP tool runs (plus 2 seconds after), vault changes that the plugin's own tools didn't make appear as a ⚠ warning on that tool call, listing up to 20 paths. Changes in the config folder, your typing in the focused note, and everything outside those windows are ignored. Edits from other plugins in that window may be reported. The warning is saved with the conversation. Nothing is blocked. (`src/domain/VaultChangeDetector.ts`, `src/ui/vaultChangeWarning.ts`.)
+- **`{{VAULT_WRITE_RULES}}` placeholder** for Custom preamble mode.
+
+### Changed
+
+- **The default preamble includes a "Vault writes: hard rule" block.** Vault changes must go through the vault tools, never shell commands or built-in file tools, even when that is slower or needs more approvals. The shell may read the vault and may write only outside it or in the plugin's session-state folder. If no vault tool fits, or it would take more than about 10 calls, the agent stops and asks first. Bulk operations over 5 items need confirmation. The task-editing guidance now points to `update_tasks` for multiple tasks. Moves and renames now point to `move_note`, and repeated replacements to `bulk_edit`. The preamble size limit was raised from 8 KB to 10 KB. (`src/domain/PreambleAssembler.ts`.)
+- **Undo can revert a whole batch at once.** Undo journal entries can now cover many files: edits, creations, deletions, and moves. Undo checks every file before reverting any. If one changed since, Undo asks first and names the files. If an Undo write fails partway through, the files already reverted are restored. Batch entries are saved with the conversation like other Undo entries. Older plugin versions can't read them and drop those conversations, so avoid downgrading after using the batch tools. (`src/domain/UndoJournal.ts`.)
+
 ## [0.11.0] - 2026-11-19
 
 You can now steer or queue messages while the agent is working. Conversations, including tools you approved for the session, now carry over when Obsidian restarts or the plugin reloads.

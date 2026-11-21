@@ -45,9 +45,12 @@ unnecessary and less tempting.
   reloads like existing entries.
 - **Out-of-band change warning.** While a shell or MCP tool runs during
   an agent turn, vault changes that the plugin's own tools didn't make
-  are listed as a non-blocking warning on that tool call. Excluded:
+  are listed as a non-blocking warning on that tool call. The window
+  stays open for 2 seconds after the tool finishes, and the warning
+  lists up to 20 changes. Excluded:
   - the config folder;
-  - the note in the focused editor;
+  - edits to the note in the focused editor, or to a note the user
+    typed in during the last 5 seconds;
   - anything written while a vault tool or Undo runs.
 
 ## Open questions

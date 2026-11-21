@@ -221,3 +221,7 @@ For the vault write tools (`create_task`, `update_task`, `edit_note`,
 see the `CHANGELOG` v0.10.2 entry. In short: append/prepend and the
 task tools are now safe under parallel writes to the same note;
 `edit_note` in `replace` mode remains last-writer-wins by design.
+
+For many changes at once, the batch write tools `update_tasks`,
+`move_note`, and `bulk_edit` each take one approval and create one Undo
+entry. See [Vault changes go through vault tools](../README.md#vault-changes-go-through-vault-tools).
