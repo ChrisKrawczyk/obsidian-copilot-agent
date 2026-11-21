@@ -55,6 +55,9 @@ Facts from CodeResearch.md:
 - [ ] **Phase 7: Documentation** - Docs.md, README, CHANGELOG `[Unreleased]` and the proposal 0013 index.
 
 ## Phase Candidates
+- (none yet)
+
+Phase dependencies: Phase 2 depends on Phase 1. Phases 3 and 4 depend on Phases 1 and 2. Phase 5 has no dependencies. Phase 6 depends on Phases 2–4, because the guidance names the new tools. Phase 7 depends on all earlier phases.
 
 ---
 
@@ -63,28 +66,32 @@ Facts from CodeResearch.md:
 ### Changes Required
 - **`src/domain/UndoJournal.ts`**:
   - Add `UndoKind` `"batch"` and an `UndoBatchItem` union: `{op:"modify", path, before, after}`, `{op:"create", path, after}`, `{op:"delete", path, before}` and `{op:"move", from, to}`.
-  - `UndoEntry` gains an optional `items` and an optional `label`, a short human summary such as "8 tasks in 3 notes". For batch entries, `path` is the first item's path.
+  - `UndoEntry` gains an optional `items` and an optional `label`, a short human summary such as "8 tasks in 3 notes". For batch entries, `path` is the first item's path; for move items that is the destination (`to`).
+  - `hydrate()` and the TTL ghost entry in the constructor (`UndoJournal.ts:170-180`, `:396-422`) copy fields one by one, so they must also copy `items` and `label`. Otherwise batch entries lose their items on reload (SC-007).
   - Add an optional `moveItem(from, to)` capability to `UndoJournalVault`, or as a journal option. Production wires it to `fileManager.renameFile` in Phase 3. Without it, undoing a batch that contains move items fails cleanly.
   - `undo()` for batch entries:
-    1. Check divergence on every item without changing anything:
+    1. Check divergence on every item without changing anything, and record each item's observed current state (content, or present/absent):
        - modify: the file is missing, or its content ≠ `after`;
        - create: the file is missing or its content differs;
        - delete: a file now exists;
        - move: `to` is missing, or `from` is occupied.
     2. Without `force`, any divergence returns `divergence` and a new `divergentPaths: string[]`.
-    3. With `force`, revert items in reverse order using the existing per-kind force semantics. Move items whose `from` is occupied are skipped and listed in a new `skippedPaths`.
-    4. If any revert throws, re-apply the items already reverted, in reverse order of reverting, to their post-action state. Return `ok:false`. The entry stays undoable (FR-051).
+    3. With `force`, revert items in reverse order using the existing per-kind force semantics. Move items whose `from` is occupied, or whose `to` is missing, are skipped and listed in a new `skippedPaths`.
+    4. If any revert throws, restore the items already reverted, in reverse order of reverting, to the state observed in step 1. Do not restore them to `after`, because a forced undo may be overwriting a user edit. Return `ok:false`. The entry stays undoable (FR-051).
   - Export a pure helper `batchSnapshotBytes(items)` and the constant `MAX_BATCH_SNAPSHOT_BYTES = 2*1024*1024`. The tools use them to enforce the cap (FR-052).
 - **Persistence**:
   - `src/persistence/PersistedShape.ts`: `PersistedUndoEntry` gains an optional `items` and `label`.
   - `src/persistence/migrate.ts`: `validateUndoEntry` accepts `"batch"` only with a non-empty, well-formed `items` array, and validates each item's op and string fields. Old entries validate unchanged.
-  - Copy the new fields in `ConversationManager.makePersistAdapter`, `ConversationsStore.recordUndo` and the clone if needed, and `makeRuntimeJournal` hydration.
+  - Copy the new fields in `ConversationManager.makePersistAdapter` and `ConversationsStore.recordUndo`, and in the clone if needed.
+  - Downgrade caveat: an older plugin version rejects `kind:"batch"` and drops that conversation (`migrate.ts:180-184`). Record this in Docs.md and the CHANGELOG.
 - **`src/ui/undoFlow.ts`**:
   - `divergenceConfirmMessage` accepts either a single path or a list of paths. It lists up to 10, then "and N more".
   - `runUndoFlow` passes `divergentPaths` for batch entries and reports `skippedPaths` through `notify`.
 - **`proposals/0013-vault-tool-first-writes.md`** (Status: In Progress) and the `proposals/README.md` index row (FR-070).
 - **Tests**:
   - `src/domain/UndoJournal.batch.test.ts`: clean undo; divergence for each op type; force; move-skip on an occupied original; rollback when a write fails mid-undo; cap counting; and the persist "add" payload including `items`.
+  - Reload test: persist a batch entry, rebuild the journal from `initialEntries`, and check that `undo()` restores every item.
+  - Rollback test: a forced undo where one item's write throws while another item is divergent. The divergent item must return to the user's content, not `after`.
   - Extend `src/persistence/migrate.test.ts` with batch round-trip, malformed batch rejection and legacy entries unchanged.
   - Extend `src/ui/undoFlow.test.ts` with multi-path wording and skipped-path notification.
 
@@ -125,7 +132,7 @@ Facts from CodeResearch.md:
   - Add an `update_tasks` entry to `WRITE_NOTE_TOOL_ENTRIES`.
   - Add it to `VAULT_WRITE_TOOL_NAMES`.
   - Update the hardcoded lists in `src/main.toolGating.test.ts` and the `AgentSession.test.ts` classification list.
-  - Add a lockstep test in `src/tools/WriteNoteTools.test.ts`: the names from `createWriteNoteTools`, the non-readOnly `WRITE_NOTE_TOOL_NAMES`, and `VAULT_WRITE_TOOL_NAMES` must agree.
+  - Add a lockstep test in `src/tools/WriteNoteTools.test.ts` with exact set equality: (`createWriteNoteTools` names minus `open_note`) = `WRITE_NOTE_TOOL_NAMES` = (`VAULT_WRITE_TOOL_NAMES` minus `WRITE_TOOL_NAMES`).
 - **`src/domain/SafetyPolicy.ts`**:
   - `SafetyPolicyInput` gains an optional `vaultRelativePaths`.
   - In the vault case, a non-empty list auto-applies via the allowlist only if every path passes `isVaultPathAllowlisted`. Otherwise it falls through to session grant and default mode exactly as before (FR-041).
@@ -160,12 +167,12 @@ Facts from CodeResearch.md:
 
 ### Changes Required
 - **New `src/tools/MoveNote.ts`**: `moveNoteImpl({moves}, deps)`.
-  - Deps: `vault` (`getAbstractFileByPath`, `createFolder`), `fileManager.renameFile(file, newPath)`, `configDir`, `undoJournal`, and an `isFolder(file)` predicate. The predicate lets tests avoid an `instanceof TFolder` mock dependency; production uses `TFolder` via `instanceof` or `"children" in file`.
+  - Deps: `vault` (`getAbstractFileByPath`, `createFolder`), `fileManager.renameFile(file, newPath)`, `configDir` and `undoJournal`. Detect folders by duck typing (`"children" in file`), because `obsidianMock` has no `TFolder` and tests import modules that would otherwise need it.
   - Caps: 1–100 items.
   - Validation, all items before any move:
     - resolve both paths with `resolveVaultPath`;
     - the source exists;
-    - the destination is free, except for a case-only rename of the same item;
+    - the destination is free. Check it with a case-insensitive lookup as well, so `Foo.md` → `bar/foo.md` reports `target_exists` when `bar/Foo.md` exists. The only exception is a case-only rename of the same item;
     - from ≠ to;
     - no duplicate sources or destinations;
     - no destination equals another item's source;
@@ -180,7 +187,7 @@ Facts from CodeResearch.md:
   - Supply `moveItem` to the runtime journal (`makeRuntimeJournal` options) using `fileManager.renameFile`.
   - `extractVaultPaths` for `move_note` returns all sources and destinations.
 - **`src/tools/WriteNoteTools.ts`**: the `move_note` tool definition. The deps type gains optional `fileManager`, `configDir` and `isFolder`; if they are missing, the tool returns `{ok:false, error}`.
-- **`src/tools/approvalPreview.ts`**: a move preview (`from → to` plus the incoming link count from `metadataCache.resolvedLinks`). Summary: "move_note: N items".
+- **`src/tools/approvalPreview.ts`**: a move preview (`from → to` plus the incoming link count from `metadataCache.resolvedLinks`). For a folder, count links that target any file under it from outside the folder. Summary: "move_note: N items". Add `metadataCache` to the `describeVaultBatchApproval` deps.
 - **Registries**: manifest entry, `VAULT_WRITE_TOOL_NAMES`, and the test lists and lockstep.
 - **Tests**:
   - `src/tools/MoveNote.test.ts` with a fake vault and fileManager that move map keys, including folder children:
@@ -212,7 +219,7 @@ Facts from CodeResearch.md:
   - `bulkEditImpl({paths, find, replace, regex?, ignoreCase?}, deps)`:
     - Caps: ≤50 notes; `.md` / `.txt` only; total replacements ≤5000; snapshot cap.
     - Validate all paths (exists, extension, unsaved buffer) before writing.
-    - Apply through `applyBatchModifications`, recomputing inside the transform.
+    - Apply through `applyBatchModifications`. Inside the transform, compare the current content with the snapshot taken at validation time. If it differs, abort with `concurrent_change`, which triggers rollback, instead of quietly re-applying to new content.
     - One batch entry, labelled "N replacements in M notes".
     - Zero matches overall: ok, `changed:false`, no entry.
 - **`src/tools/WriteNoteTools.ts`** definition. Manifest, `VAULT_WRITE_TOOL_NAMES`, test lists and lockstep. `extractVaultPaths` returns the paths.
@@ -246,7 +253,7 @@ Facts from CodeResearch.md:
     - `observe({type, path, oldPath?}, focusedEditorPath?)`, which returns `{toolCallId, change}` or `null`.
   - Exclusion rules, in order:
     1. Paths under the config dir.
-    2. Any active self-write span. Paths observed during the span are remembered for `settleMs`.
+    2. Any active self-write span. Paths observed during the span are remembered for `settleMs`. So are paths the span reports when it ends: `endSelfWrite(paths)` takes the written paths from tool results and batch items, which covers vault events that arrive after the span closes.
     3. Remembered self-written paths within the settle period.
     4. No external tool active or in grace.
     5. A `modify` on the focused editor path.
@@ -260,10 +267,12 @@ Facts from CodeResearch.md:
   - Wrap every vault custom tool handler (all `vaultTools`) so execution runs inside `beginSelfWrite()`. Use a helper `wrapToolsWithSelfWriteSpan(tools, detector)` in a new pure-ish module `src/tools/selfWriteSpan.ts`.
   - Pass the detector to ChatView through `ChatViewDeps` / `ChatViewRegistration`.
 - **`src/ui/ChatView.ts`**:
-  - In the stream loop, for builtin and MCP calls, call `externalToolStarted` when a call becomes running. That is `tool_call_start` with a non-`pending_approval` outcome, or `approval_resolved` approve.
+  - In the stream loop, for builtin and MCP calls, call `externalToolStarted` only when a call becomes running. That means `tool_call_start` with outcome `approved` or `running`, or `approval_resolved` with an approve choice. Events with outcome `denied`, `cancelled` or `pending_approval` open no window.
   - Call `externalToolCompleted` on `tool_call_complete`, and complete every open window in `finally`.
-  - Subscribe to detector emissions and upsert `vaultChanges` on the matching tool call in the owning segment, persisting the tool calls. If the call isn't in the current stream, ignore the emission.
-  - `handleUndoClick` runs `runUndoFlow` inside `beginSelfWrite()`.
+  - Subscribe to detector emissions and upsert `vaultChanges` on the matching tool call in the owning segment, persisting the tool calls.
+    - Keep the toolCallId → owning-message map for the grace period after the stream ends, so changes from the turn's last shell call are not lost.
+    - Ignore emissions for calls the view does not know about.
+  - Undo self-write span: wrap only the `journal.undo` calls. Pass `runUndoFlow` a journal adapter whose `undo` runs inside a span, so the span stays closed while the divergence-confirm modal is open.
   - Unsubscribe in `onClose`.
   - Decide which window events to feed with a pure helper `externalWindowSignal(ev)` in `src/ui/vaultChangeWarning.ts`.
 - **New `src/ui/vaultChangeWarning.ts`**: pure `formatVaultChangeWarning(changes, overflow)`, returning `{headline, lines, footnote}`. It uses hedged copy and includes the link footnote only if a rename or delete is present (FR-063).
@@ -278,7 +287,8 @@ Facts from CodeResearch.md:
     - nested and concurrent attribution;
     - the cap and overflow.
   - `src/ui/vaultChangeWarning.test.ts`.
-  - `src/tools/selfWriteSpan.test.ts`: the span closes on throw.
+  - `src/tools/selfWriteSpan.test.ts`: the span closes on throw, and the wrapper keeps every `defineTool` field (`skipPermission`, `overridesBuiltInTool`, `parameters`, …).
+  - `externalWindowSignal` tests: denied, cancelled and pending outcomes open no window.
   - Extend `migrate.test.ts` (round-trip and malformed) and `ConversationRuntime.test.ts` (hydration).
 
 ### Success Criteria
