@@ -19,17 +19,14 @@ export function formatVaultChangeWarning(
   overflow = 0,
 ): VaultChangeWarningView | null {
   if (changes.length === 0 && overflow <= 0) return null;
-  const total = changes.length + Math.max(0, overflow);
-  const headline =
-    total === 1
-      ? "1 vault file may have been changed outside the vault tools while this ran."
-      : `${total} vault files may have been changed outside the vault tools while this ran.`;
+  const count = overflow > 0 ? `More than ${changes.length} vault files` : changes.length === 1 ? "1 vault file" : `${changes.length} vault files`;
+  const headline = `${count} may have been changed outside the vault tools while this ran.`;
   const lines = changes.map((c) =>
     c.type === "renamed" && c.oldPath
       ? `renamed: ${c.oldPath} → ${c.path}`
       : `${VERB[c.type]}: ${c.path}`,
   );
-  if (overflow > 0) lines.push(`…and ${overflow} more`);
+  if (overflow > 0) lines.push(`…plus ${overflow} more change${overflow === 1 ? "" : "s"} not listed`);
   let footnote =
     "Changes made this way skip the approval prompts and can't be undone from chat.";
   if (changes.some((c) => c.type === "renamed" || c.type === "deleted")) {

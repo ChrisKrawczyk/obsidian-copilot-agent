@@ -96,7 +96,10 @@ export class VaultChangeDetector {
     };
   }
 
-  observe(ev: VaultEventInput, focusedEditorPath?: string | null): AttributedVaultChange | null {
+  observe(
+    ev: VaultEventInput,
+    userEditingPaths?: string | readonly string[] | null,
+  ): AttributedVaultChange | null {
     const paths = ev.oldPath ? [ev.path, ev.oldPath] : [ev.path];
     if (paths.every((p) => this.isConfigPath(p))) return null;
     const t = this.now();
@@ -112,7 +115,7 @@ export class VaultChangeDetector {
     if (paths.some((p) => this.settled.has(p.toLowerCase()))) return null;
     const toolCallId = this.attribute(t);
     if (!toolCallId) return null;
-    if (ev.type === "modify" && focusedEditorPath && focusedEditorPath === ev.path) return null;
+    if (ev.type === "modify" && isUserEditing(userEditingPaths, ev.path)) return null;
     const change: VaultChange = { type: EVENT_TO_CHANGE[ev.type], path: ev.path };
     if (ev.type === "rename" && ev.oldPath) change.oldPath = ev.oldPath;
     const out = { toolCallId, change };
@@ -173,10 +176,15 @@ export class VaultChangeDetector {
   }
 }
 
+function isUserEditing(paths: string | readonly string[] | null | undefined, path: string): boolean {
+  if (!paths) return false;
+  return typeof paths === "string" ? paths === path : paths.includes(path);
+}
+
 /**
  * Fold one attributed change into a tool call's change list: one entry
- * per path, a creation stays a creation when later modified, and paths
- * beyond `max` only bump the overflow count.
+ * per path, a creation or rename stays as such when later modified, and
+ * further paths beyond `max` only bump the overflow count.
  */
 export function mergeVaultChanges(
   existing: readonly VaultChange[] | undefined,
@@ -188,7 +196,8 @@ export function mergeVaultChanges(
   const idx = changes.findIndex((c) => c.path === change.path);
   if (idx >= 0) {
     const prev = changes[idx];
-    if (!(prev.type === "created" && change.type === "modified")) changes[idx] = { ...change };
+    const keepPrev = change.type === "modified" && (prev.type === "created" || prev.type === "renamed");
+    if (!keepPrev) changes[idx] = { ...change };
     return { changes, overflow: overflow ?? 0 };
   }
   if (changes.length >= max) return { changes, overflow: (overflow ?? 0) + 1 };

@@ -66,6 +66,9 @@ import {
   type ConversationRuntimeFactory,
 } from "./domain/ConversationRuntime";
 
+/** Obsidian autosaves about 2s after typing stops; allow some slack. */
+const USER_EDIT_SAVE_WINDOW_MS = 5000;
+
 export interface McpLifecycleController {
   enableAllConfigured: () => Promise<void>;
   reconcileConfiguredServers: () => Promise<void>;
@@ -646,8 +649,22 @@ export default class CopilotAgentPlugin extends Plugin {
     const vaultChangeDetector = new VaultChangeDetector({
       configDir: this.app.vault.configDir,
     });
-    const focusedNotePath = (): string | undefined =>
-      this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path;
+    let lastUserEdit: { path: string; at: number } | null = null;
+    this.registerEvent(
+      this.app.workspace.on("editor-change", (_editor, info) => {
+        const path = info.file?.path;
+        if (path) lastUserEdit = { path, at: Date.now() };
+      }),
+    );
+    const focusedNotePath = (): string[] => {
+      const paths: string[] = [];
+      const active = this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path;
+      if (active) paths.push(active);
+      if (lastUserEdit && Date.now() - lastUserEdit.at < USER_EDIT_SAVE_WINDOW_MS) {
+        paths.push(lastUserEdit.path);
+      }
+      return paths;
+    };
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         vaultChangeDetector.observe({ type: "create", path: file.path }, focusedNotePath());

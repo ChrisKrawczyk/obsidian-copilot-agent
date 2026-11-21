@@ -109,6 +109,8 @@ describe("VaultChangeDetector", () => {
     expect(detector.observe({ type: "modify", path: "open.md" }, "open.md")).toBeNull();
     expect(detector.observe({ type: "delete", path: "open.md" }, "open.md")).not.toBeNull();
     expect(detector.observe({ type: "modify", path: "other.md" }, "open.md")).not.toBeNull();
+    expect(detector.observe({ type: "modify", path: "typed.md" }, ["open.md", "typed.md"])).toBeNull();
+    expect(detector.observe({ type: "modify", path: "x.md" }, [])).not.toBeNull();
   });
 
   it("attributes to the most recently started active or in-grace call", () => {
@@ -146,6 +148,12 @@ describe("mergeVaultChanges", () => {
     r = mergeVaultChanges(r.changes, r.overflow, { type: "deleted", path: "a.md" });
     expect(r.changes).toEqual([{ type: "deleted", path: "a.md" }]);
     expect(r.overflow).toBe(0);
+  });
+
+  it("keeps a rename when the renamed file is then modified", () => {
+    let r = mergeVaultChanges([], 0, { type: "renamed", path: "b.md", oldPath: "a.md" });
+    r = mergeVaultChanges(r.changes, r.overflow, { type: "modified", path: "b.md" });
+    expect(r.changes).toEqual([{ type: "renamed", path: "b.md", oldPath: "a.md" }]);
   });
 
   it("caps the list and counts overflow", () => {

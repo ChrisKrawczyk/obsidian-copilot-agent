@@ -20,8 +20,11 @@ describe("formatVaultChangeWarning", () => {
 
   it("mentions links when a rename or delete is present and lists overflow", () => {
     const v = formatVaultChangeWarning([{ type: "renamed", path: "b/x.md", oldPath: "x.md" }], 4)!;
-    expect(v.headline.startsWith("5 vault files")).toBe(true);
-    expect(v.lines).toEqual(["renamed: x.md → b/x.md", "…and 4 more"]);
+    expect(v.headline.startsWith("More than 1 vault files")).toBe(true);
+    expect(v.lines).toEqual(["renamed: x.md → b/x.md", "…plus 4 more changes not listed"]);
+    expect(formatVaultChangeWarning([{ type: "modified", path: "a.md" }], 1)!.lines[1]).toBe(
+      "…plus 1 more change not listed",
+    );
     expect(v.footnote).toContain("don't update links");
     expect(formatVaultChangeWarning([{ type: "deleted", path: "z.md" }])!.footnote).toContain("links");
   });

@@ -351,7 +351,9 @@ function toolCallsSig(calls: ToolCall[] | undefined): string {
         }|${c.detail?.length ?? 0}|${c.argsPreview?.length ?? 0}|${
           c.approval?.summary?.length ?? 0
         }|${c.undoId ?? ""}|${c.undone ? "u" : ""}|${
-          c.vaultChanges?.map((v) => v.type[0]).join("") ?? ""
+          c.vaultChanges
+            ?.map((v) => `${v.type[0]}${v.path.length}.${v.oldPath?.length ?? 0}`)
+            .join(",") ?? ""
         }:${c.vaultChangesOverflow ?? 0}`,
     )
     .join(";");
