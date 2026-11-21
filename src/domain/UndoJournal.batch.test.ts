@@ -200,12 +200,19 @@ describe("UndoJournal batch entries", () => {
     w.files.set("Meetings/A.md", "a");
     const j = new UndoJournal({ vault: w.vault });
     const e = recordBatch(j, [
-      { op: "modify", path: "b.md", before: "B1", after: "B2" },
       { op: "move", from: "Inbox/A.md", to: "Meetings/A.md" },
+      { op: "modify", path: "b.md", before: "B1", after: "B2" },
     ]);
+    const writes: string[] = [];
+    const modify = w.vault.modify!;
+    w.vault.modify = async (f, c) => {
+      writes.push((f as FakeFile).path);
+      return modify(f, c);
+    };
     const out = await j.undo(e.id);
     expect(out.ok).toBe(false);
     expect(out.reason).toMatch(/Moving files back is not available/);
+    expect(writes).toEqual([]);
     expect(w.files.get("b.md")).toBe("B2");
     expect(j.get(e.id)?.undone).toBeFalsy();
   });

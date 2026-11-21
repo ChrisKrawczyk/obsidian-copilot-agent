@@ -471,6 +471,9 @@ export class UndoJournal {
   private async undoBatch(e: UndoEntry, options: UndoOptions): Promise<UndoOutcome> {
     const items = e.items ?? [];
     if (items.length === 0) return { ok: false, reason: "Batch undo entry has no items." };
+    if (!this.moveItem && items.some((it) => it.op === "move")) {
+      return { ok: false, reason: "Undo failed: Moving files back is not available." };
+    }
 
     const observed: Observed[] = [];
     const divergentPaths: string[] = [];
