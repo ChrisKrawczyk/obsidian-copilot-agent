@@ -183,7 +183,7 @@ Documentation
 - One move tool rather than separate move/rename tools: a rename is a move within the same folder, and one batched tool is cheaper for the model to choose. The tool is named `move_note` (matching the brief) even though it accepts a list and non-markdown files/folders.
 - `update_tasks` applies ONE patch to all targets (per the brief: "apply one change to a list of tasks"); per-target patches are out of scope. `expectedRawLine` is required per target (no description-substring fallback) to keep bulk re-anchoring safe.
 - Partial-failure policy is validate-all-then-apply with rollback on write-time failure, for all three tools (brief preference).
-- The preamble size bound is raised from 8 KB to 10 KB if needed (current default preamble is ~6.9 KB; the rule block plus three tool entries add ~2 KB). Justification: safety-critical rule; still constant per vault.
+- The preamble size bound is raised from 8 KB to 10 KB (current default preamble is ~6.9 KB; the rule block plus three tool entries add ~2 KB). Justification: safety-critical rule; still constant per vault.
 - The rule also names "built-in file tools" alongside shell commands because the SDK's built-in file-edit tools bypass vault tools the same way.
 - Detection window = while a built-in or MCP tool is executing in an agent turn, plus a 2-second grace after completion to absorb file-watcher latency. Changes outside that window are presumed to be the user's.
 - "Actively editing" = the note open in the focused markdown editor; its modify events are excluded during windows. This trades a possible missed detection on that one note for no false positive on the user's own typing.
