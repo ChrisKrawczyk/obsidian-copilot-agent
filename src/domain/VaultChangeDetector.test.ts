@@ -41,7 +41,6 @@ describe("VaultChangeDetector", () => {
     });
     advance(2);
     expect(detector.observe({ type: "delete", path: "y.md" })).toBeNull();
-    expect(detector.hasOpenWindow()).toBe(false);
     expect(seen.map((s) => s.change.type)).toEqual(["created", "renamed"]);
   });
 
@@ -128,7 +127,7 @@ describe("VaultChangeDetector", () => {
   it("ignores completion of unknown calls and supports unsubscribe", () => {
     const { detector } = setup();
     detector.externalToolCompleted("ghost");
-    expect(detector.hasOpenWindow()).toBe(false);
+    expect(detector.observe({ type: "modify", path: "ghost.md" })).toBeNull();
     const got: string[] = [];
     const off = detector.subscribe((c) => got.push(c.change.path));
     detector.externalToolStarted("sh1");

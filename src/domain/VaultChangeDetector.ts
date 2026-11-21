@@ -78,11 +78,6 @@ export class VaultChangeDetector {
     this.grace.set(toolCallId, { seq, until: this.now() + this.graceMs });
   }
 
-  hasOpenWindow(): boolean {
-    this.pruneGrace(this.now());
-    return this.active.size > 0 || this.grace.size > 0;
-  }
-
   beginSelfWrite(): SelfWriteSpan {
     this.openSpans++;
     let ended = false;

@@ -36,6 +36,7 @@ import {
   type PersistedUndoEntry,
 } from "./PersistedShape";
 import type { UndoBatchItem } from "../domain/UndoJournal";
+import { MAX_LISTED_VAULT_CHANGES } from "../domain/VaultChangeDetector";
 
 export interface MigrateResult {
   state: PersistedConversationsState;
@@ -313,7 +314,6 @@ function validateMessage(raw: unknown): PersistedMessage | null {
 }
 
 const VAULT_CHANGE_TYPES = new Set(["created", "modified", "deleted", "renamed"]);
-const MAX_PERSISTED_VAULT_CHANGES = 20;
 
 function validateVaultChanges(
   raw: unknown,
@@ -327,7 +327,7 @@ function validateVaultChanges(
     const r = c as Record<string, unknown>;
     if (typeof r.type !== "string" || !VAULT_CHANGE_TYPES.has(r.type)) continue;
     if (typeof r.path !== "string" || r.path.length === 0) continue;
-    if (changes.length >= MAX_PERSISTED_VAULT_CHANGES) {
+    if (changes.length >= MAX_LISTED_VAULT_CHANGES) {
       dropped++;
       continue;
     }
