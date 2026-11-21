@@ -30,6 +30,14 @@ import type { ModelCatalog } from "../sdk/ModelCatalog";
 import { CONVERSATION_SOFT_CAP } from "../domain/ConversationManager";
 import { V01_RAW_FS_TOOL_NAMES } from "../domain/vaultToolManifest";
 import { runUndoFlow } from "./undoFlow";
+import { externalWindowSignal } from "./vaultChangeWarning";
+import {
+  DEFAULT_GRACE_MS,
+  mergeVaultChanges,
+  type AttributedVaultChange,
+  type VaultChangeDetector,
+} from "../domain/VaultChangeDetector";
+import { undoEntryPaths } from "../tools/selfWriteSpan";
 import { redactSensitive } from "../mcp/redactSensitive";
 import { truncateMcpText, escapeMcpPlainText } from "../sdk/approvalText";
 
@@ -114,6 +122,21 @@ export interface ChatViewDeps {
    * between snapshot and render should still show something usable).
    */
   mcpServerName?: (id: string) => string | undefined;
+  /**
+   * Plugin-wide out-of-band change detector. The view opens detection
+   * windows for running built-in/MCP calls and attaches attributed
+   * changes to those calls. Optional so tests can omit it.
+   */
+  vaultChangeDetector?: Pick<
+    VaultChangeDetector,
+    "externalToolStarted" | "externalToolCompleted" | "beginSelfWrite" | "subscribe"
+  >;
+}
+
+interface VaultChangeTarget {
+  state: ChatState;
+  convId: string | null;
+  messageId: string;
 }
 
 export class ChatView extends ItemView {
@@ -258,6 +281,10 @@ export class ChatView extends ItemView {
   private readinessGateBus?: ChatViewDeps["readinessGateBus"];
   private snapshotPendingMcp?: ChatViewDeps["snapshotPendingMcp"];
   private mcpServerName?: ChatViewDeps["mcpServerName"];
+  private vaultChangeDetector?: ChatViewDeps["vaultChangeDetector"];
+  private unsubVaultChanges?: () => void;
+  private readonly vaultChangeTargets = new Map<string, VaultChangeTarget>();
+  private readonly vaultChangeTargetTimers = new Set<ReturnType<typeof setTimeout>>();
   /**
    * FR-013 / SC-008: budget from composer render to input-usable when
    * no gate wait is required. Matched by the fast-path guard: if the
@@ -283,6 +310,7 @@ export class ChatView extends ItemView {
     this.readinessGateBus = deps.readinessGateBus;
     this.snapshotPendingMcp = deps.snapshotPendingMcp;
     this.mcpServerName = deps.mcpServerName;
+    this.vaultChangeDetector = deps.vaultChangeDetector;
     this.bindActiveRuntime();
   }
 
@@ -674,6 +702,12 @@ export class ChatView extends ItemView {
     // only their own gate. `bindActiveRuntime` already seeded state
     // from the synchronous getter for the currently-bound
     // conversation; the bus drives subsequent transitions.
+    if (this.vaultChangeDetector) {
+      this.unsubVaultChanges?.();
+      this.unsubVaultChanges = this.vaultChangeDetector.subscribe((c) =>
+        this.applyVaultChange(c),
+      );
+    }
     if (this.readinessGateBus) {
       this.unsubReadinessGate = this.readinessGateBus.subscribe((evt) => {
         if (evt.conversationId !== this.boundConversationId) return;
@@ -856,6 +890,11 @@ export class ChatView extends ItemView {
     this.unsubManager?.();
     this.unsubModelCatalog?.();
     this.unsubReadinessGate?.();
+    this.unsubVaultChanges?.();
+    this.unsubVaultChanges = undefined;
+    for (const t of this.vaultChangeTargetTimers) clearTimeout(t);
+    this.vaultChangeTargetTimers.clear();
+    this.vaultChangeTargets.clear();
     if (this.readinessFastPathTimer !== null) {
       clearTimeout(this.readinessFastPathTimer);
       this.readinessFastPathTimer = null;
@@ -1215,6 +1254,30 @@ export class ChatView extends ItemView {
       }
       return owner;
     };
+    const detector = this.vaultChangeDetector;
+    const toolSources = new Map<string, import("../domain/types").ToolCall["source"]>();
+    const openWindows = new Set<string>();
+    const trackWindow = (ev: Parameters<typeof externalWindowSignal>[0]): void => {
+      if (!detector) return;
+      if (ev.type === "tool_call_start" || ev.type === "approval_prompt") {
+        const tc = (ev as { toolCall: { id: string; source?: import("../domain/types").ToolCall["source"] } }).toolCall;
+        if (tc.source) toolSources.set(tc.id, tc.source);
+      }
+      const signal = externalWindowSignal(ev, (id) => toolSources.get(id));
+      if (!signal) return;
+      if (signal.kind === "start") {
+        this.vaultChangeTargets.set(signal.toolCallId, {
+          state,
+          convId,
+          messageId: toolTarget(signal.toolCallId),
+        });
+        openWindows.add(signal.toolCallId);
+        detector.externalToolStarted(signal.toolCallId);
+      } else {
+        openWindows.delete(signal.toolCallId);
+        detector.externalToolCompleted(signal.toolCallId);
+      }
+    };
     let resolveStreamDone!: () => void;
     this.streamDone = new Promise<void>((r) => (resolveStreamDone = r));
 
@@ -1228,6 +1291,7 @@ export class ChatView extends ItemView {
         priorContext ? { priorContext } : undefined,
       )) {
         if (ev.type !== "complete") receivedAnyEvent = true;
+        trackWindow(ev);
         if (this.userRequestedStop) {
           // Drain the iterator but don't apply any further updates.
           // The placeholder is already frozen as `interrupted`; we
@@ -1346,6 +1410,9 @@ export class ChatView extends ItemView {
       failure = err;
     } finally {
       this.setStreaming(false);
+      for (const id of openWindows) detector?.externalToolCompleted(id);
+      openWindows.clear();
+      this.releaseVaultChangeTargets(toolOwner.keys());
     }
 
     // Once the user has clicked Stop, the placeholder is already frozen
@@ -1838,6 +1905,34 @@ export class ChatView extends ItemView {
     this.refreshContextBoundary();
   }
 
+  private applyVaultChange(c: AttributedVaultChange): void {
+    const target = this.vaultChangeTargets.get(c.toolCallId);
+    if (!target) return;
+    const msg = target.state.getMessages().find((m) => m.id === target.messageId);
+    const call = msg?.toolCalls?.find((tc) => tc.id === c.toolCallId);
+    if (!call) return;
+    const merged = mergeVaultChanges(call.vaultChanges, call.vaultChangesOverflow, c.change);
+    target.state.upsertToolCall(target.messageId, {
+      id: call.id,
+      kind: call.kind,
+      outcome: call.outcome,
+      vaultChanges: merged.changes,
+      vaultChangesOverflow: merged.overflow > 0 ? merged.overflow : undefined,
+    });
+    if (target.convId) this.persistSegment(target.state, target.convId, target.messageId);
+  }
+
+  /** Keep stream tool-call targets just long enough to cover the grace period. */
+  private releaseVaultChangeTargets(ids: Iterable<string>): void {
+    const pending = [...ids].filter((id) => this.vaultChangeTargets.has(id));
+    if (pending.length === 0) return;
+    const timer = setTimeout(() => {
+      this.vaultChangeTargetTimers.delete(timer);
+      for (const id of pending) this.vaultChangeTargets.delete(id);
+    }, DEFAULT_GRACE_MS + 500);
+    this.vaultChangeTargetTimers.add(timer);
+  }
+
   /**
    * Handle an Undo button click. Finds the journal entry, runs the
    * revert, and updates the message's tool-call entry so the block
@@ -1845,8 +1940,23 @@ export class ChatView extends ItemView {
    * the user sees the reason (e.g. file has been modified since).
    */
   private async handleUndoClick(undoId: string): Promise<void> {
+    const journal = this.undoJournal;
+    const detector = this.vaultChangeDetector;
     const result = await runUndoFlow(undoId, {
-      journal: this.undoJournal,
+      journal:
+        journal && detector
+          ? {
+              get: (id) => journal.get(id),
+              undo: async (id, opts) => {
+                const span = detector.beginSelfWrite();
+                try {
+                  return await journal.undo(id, opts);
+                } finally {
+                  span.end(undoEntryPaths(journal.get(id)));
+                }
+              },
+            }
+          : journal,
       confirm: (title, body, ctaLabel) =>
         confirmDestructive(this.app, title, body, ctaLabel),
       notify: (m) => {
@@ -1947,6 +2057,12 @@ function toPersistedToolCalls(
       resultContent: sanitizePersistedMcpText(tc.source, tc.resultContent),
       undoId: tc.undoId,
       undone: tc.undone,
+      ...(tc.vaultChanges && tc.vaultChanges.length > 0
+        ? {
+            vaultChanges: tc.vaultChanges,
+            ...(tc.vaultChangesOverflow ? { vaultChangesOverflow: tc.vaultChangesOverflow } : {}),
+          }
+        : {}),
     }));
 }
 

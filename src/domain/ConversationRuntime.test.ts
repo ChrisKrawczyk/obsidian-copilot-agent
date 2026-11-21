@@ -83,6 +83,33 @@ describe("hydrateChatState", () => {
     // Counter starts past 7 → first new id is m8
     expect(newId).toBe("m8");
   });
+
+  test("restores out-of-band vault change warnings on tool calls", () => {
+    const seed: PersistedMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "",
+        status: "complete",
+        createdAt: 1,
+        toolCalls: [
+          {
+            id: "t1",
+            kind: "tool",
+            source: "builtin",
+            outcome: "completed",
+            vaultChanges: [{ type: "renamed", path: "b.md", oldPath: "a.md" }],
+            vaultChangesOverflow: 2,
+          },
+          { id: "t2", kind: "tool", outcome: "completed" },
+        ],
+      },
+    ];
+    const [t1, t2] = hydrateChatState(seed).getMessages()[0].toolCalls!;
+    expect(t1.vaultChanges).toEqual([{ type: "renamed", path: "b.md", oldPath: "a.md" }]);
+    expect(t1.vaultChangesOverflow).toBe(2);
+    expect("vaultChanges" in t2).toBe(false);
+  });
 });
 
 describe("makeRuntimeJournal", () => {

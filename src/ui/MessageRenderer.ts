@@ -1,6 +1,10 @@
 import { Component, MarkdownRenderer, type App } from "obsidian";
 import type { Message, ToolCall } from "../domain/types";
-import { renderToolCallBlock, type ToolCallBlockHandlers } from "./ToolCallBlock";
+import {
+  renderToolCallBlock,
+  renderVaultChangeWarning,
+  type ToolCallBlockHandlers,
+} from "./ToolCallBlock";
 
 /**
  * Internal render slot tracked per message id. Owned by MessageRenderer.
@@ -244,6 +248,8 @@ export class MessageRenderer {
       slot.toolCallsEl.appendChild(
         renderToolCallBlock(c, this.toolCallHandlers),
       );
+      const warning = renderVaultChangeWarning(c);
+      if (warning) slot.toolCallsEl.appendChild(warning);
     }
   }
 
@@ -344,7 +350,9 @@ function toolCallsSig(calls: ToolCall[] | undefined): string {
           c.resultContent?.length ?? 0
         }|${c.detail?.length ?? 0}|${c.argsPreview?.length ?? 0}|${
           c.approval?.summary?.length ?? 0
-        }|${c.undoId ?? ""}|${c.undone ? "u" : ""}`,
+        }|${c.undoId ?? ""}|${c.undone ? "u" : ""}|${
+          c.vaultChanges?.map((v) => v.type[0]).join("") ?? ""
+        }:${c.vaultChangesOverflow ?? 0}`,
     )
     .join(";");
 }

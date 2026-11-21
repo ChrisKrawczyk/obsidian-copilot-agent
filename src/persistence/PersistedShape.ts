@@ -37,6 +37,12 @@ export interface PersistedMessage {
     /** Cross-restart Undo: id of the matching `PersistedUndoEntry`. */
     undoId?: string;
     undone?: boolean;
+    vaultChanges?: Array<{
+      type: "created" | "modified" | "deleted" | "renamed";
+      path: string;
+      oldPath?: string;
+    }>;
+    vaultChangesOverflow?: number;
   }>;
 }
 

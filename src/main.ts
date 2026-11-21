@@ -32,6 +32,8 @@ import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
 import { moveVaultItem, type MoveNoteFileManager, type MoveNoteVault } from "./tools/MoveNote";
+import { wrapToolsWithSelfWriteSpan } from "./tools/selfWriteSpan";
+import { VaultChangeDetector } from "./domain/VaultChangeDetector";
 import { describeVaultBatchApproval, extractBatchVaultPaths, type LinkIndex } from "./tools/approvalPreview";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
@@ -641,6 +643,35 @@ export default class CopilotAgentPlugin extends Plugin {
     // The factory that ConversationManager uses to materialize a
     // runtime on first activation. Captures all shared deps via
     // closure; binds tools to the per-runtime journal.
+    const vaultChangeDetector = new VaultChangeDetector({
+      configDir: this.app.vault.configDir,
+    });
+    const focusedNotePath = (): string | undefined =>
+      this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path;
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        vaultChangeDetector.observe({ type: "create", path: file.path }, focusedNotePath());
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        vaultChangeDetector.observe({ type: "modify", path: file.path }, focusedNotePath());
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        vaultChangeDetector.observe({ type: "delete", path: file.path }, focusedNotePath());
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        vaultChangeDetector.observe(
+          { type: "rename", path: file.path, oldPath },
+          focusedNotePath(),
+        );
+      }),
+    );
+
     const runtimeFactory: ConversationRuntimeFactory = (
       metadata,
       hydration,
@@ -706,7 +737,7 @@ export default class CopilotAgentPlugin extends Plugin {
         fileManager: this.app.fileManager as unknown as MoveNoteFileManager,
         configDir: this.app.vault.configDir,
       });
-      const vaultTools = filterRawFsToolsIfGated(
+      const vaultTools = wrapToolsWithSelfWriteSpan(filterRawFsToolsIfGated(
         [
           ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
@@ -716,7 +747,7 @@ export default class CopilotAgentPlugin extends Plugin {
           ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ],
         exposeRawFsToolsAtStartup,
-      );
+      ), vaultChangeDetector);
       const mcpSnapshot = () =>
         buildMcpToolRegistrySnapshot({
           inventory: mcpManager.inventorySnapshot(),
@@ -1132,6 +1163,7 @@ export default class CopilotAgentPlugin extends Plugin {
 
     registerChatView(this, {
       manager: conversationManager,
+      vaultChangeDetector,
       auth: controller,
       // SINGLE-2 / FR-015: Undo suppression must match the runtime's
       // actual tool surface, which was frozen at plugin onload via
