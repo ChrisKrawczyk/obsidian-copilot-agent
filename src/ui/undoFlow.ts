@@ -29,7 +29,7 @@ export type UndoFlowResult =
   | { result: "no-journal" };
 
 export interface UndoFlowDeps {
-  journal: UndoJournal | undefined;
+  journal: Pick<UndoJournal, "get" | "undo"> | undefined;
   /** Returns true if the user accepts the divergence prompt. */
   confirm: (title: string, body: string, ctaLabel: string) => Promise<boolean>;
   /** Shows a user-facing error/info message. */
@@ -53,7 +53,9 @@ export async function runUndoFlow(
   if (!outcome.ok && outcome.divergence && outcome.divergence !== "ok") {
     const accepted = await deps.confirm(
       "Undo with divergence",
-      divergenceConfirmMessage(outcome.divergence, entry.path),
+      outcome.divergentPaths && outcome.divergentPaths.length > 0
+        ? batchDivergenceConfirmMessage(outcome.divergentPaths)
+        : divergenceConfirmMessage(outcome.divergence, entry.path),
       "Revert anyway",
     );
     if (!accepted) return { result: "cancelled" };
@@ -62,6 +64,9 @@ export async function runUndoFlow(
   if (!outcome.ok) {
     deps.notify(outcome.reason ?? "Undo failed.");
     return { result: "failed" };
+  }
+  if (outcome.skippedPaths && outcome.skippedPaths.length > 0) {
+    deps.notify(skippedPathsMessage(outcome.skippedPaths));
   }
   return { result: "success", entry } as UndoFlowResult;
 }
@@ -82,4 +87,24 @@ export function divergenceConfirmMessage(
     case "existed":
       return `A file already exists at "${path}". Overwrite it with the recorded snapshot?`;
   }
+}
+
+const MAX_LISTED_PATHS = 10;
+
+function listPaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, MAX_LISTED_PATHS).map((p) => `- "${p}"`);
+  if (paths.length > MAX_LISTED_PATHS) shown.push(`- and ${paths.length - MAX_LISTED_PATHS} more`);
+  return shown.join("\n");
+}
+
+/** Batch entries: one prompt naming every diverged path. */
+export function batchDivergenceConfirmMessage(paths: readonly string[]): string {
+  if (paths.length === 1) {
+    return `"${paths[0]}" has changed outside the agent since this action ran. Revert every item in this action to the recorded snapshot anyway?`;
+  }
+  return `${paths.length} paths have changed outside the agent since this action ran:\n${listPaths(paths)}\nRevert every item in this action to the recorded snapshot anyway?`;
+}
+
+export function skippedPathsMessage(paths: readonly string[]): string {
+  return `Undo finished, but ${paths.length === 1 ? "1 item was" : `${paths.length} items were`} left in place because moving back would overwrite another file or the item is gone:\n${listPaths(paths)}`;
 }

@@ -46,7 +46,7 @@ Facts from CodeResearch.md:
 - Cutting a release or editing versions.
 
 ## Phase Status
-- [ ] **Phase 1: Batch undo entries** - Journal batch kind (modify/create/delete/move items) with atomic divergence check, forced undo and rollback, plus persistence, migration and batch-aware undo-flow wording. Also adds proposal 0013.
+- [x] **Phase 1: Batch undo entries** - Journal batch kind (modify/create/delete/move items) with atomic divergence check, forced undo and rollback, plus persistence, migration and batch-aware undo-flow wording. Also adds proposal 0013.
 - [ ] **Phase 2: `update_tasks` + multi-path safety + approval previews** - Batch write primitive, the batch task tool, registry lockstep, the multi-path allowlist and the preview hook.
 - [ ] **Phase 3: `move_note`** - Link-aware batched move/rename through `fileManager.renameFile`, with folder creation, validation, rollback, journal move undo and preview.
 - [ ] **Phase 4: `bulk_edit`** - Literal/regex find-replace across notes, with preview, rollback and a single undo entry.

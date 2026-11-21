@@ -2,6 +2,8 @@ import { describe, expect, test, vi } from "vitest";
 import {
   runUndoFlow,
   divergenceConfirmMessage,
+  batchDivergenceConfirmMessage,
+  skippedPathsMessage,
 } from "./undoFlow";
 import type { UndoJournal, UndoEntry, UndoOutcome } from "../domain/UndoJournal";
 
@@ -148,5 +150,57 @@ describe("divergenceConfirmMessage", () => {
     expect(divergenceConfirmMessage("existed", "a.md")).toMatch(
       /already exists/,
     );
+  });
+});
+
+describe("runUndoFlow — batch entries", () => {
+  test("prompts with every divergent path and forces on confirm", async () => {
+    const journal = makeJournal({
+      entry: makeEntry({ kind: "batch", items: [] }),
+      outcomes: [
+        { ok: false, divergence: "modified", divergentPaths: ["a.md", "b.md"] },
+        { ok: true, divergence: "ok" },
+      ],
+    });
+    const confirm = vi.fn(async () => true);
+    const notify = vi.fn();
+    const r = await runUndoFlow("u1", { journal, confirm, notify });
+    expect(r.result).toBe("success");
+    expect(confirm.mock.calls[0][1]).toContain('"a.md"');
+    expect(confirm.mock.calls[0][1]).toContain('"b.md"');
+    expect(journal.undo).toHaveBeenLastCalledWith("u1", { force: true });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test("reports skipped move items after a successful forced undo", async () => {
+    const journal = makeJournal({
+      entry: makeEntry({ kind: "batch" }),
+      outcomes: [{ ok: true, divergence: "ok", skippedPaths: ["Inbox/A.md"] }],
+    });
+    const notify = vi.fn();
+    const r = await runUndoFlow("u1", { journal, confirm: vi.fn(), notify });
+    expect(r.result).toBe("success");
+    expect(notify.mock.calls[0][0]).toContain('"Inbox/A.md"');
+  });
+});
+
+describe("batchDivergenceConfirmMessage", () => {
+  test("single path reads naturally", () => {
+    expect(batchDivergenceConfirmMessage(["a.md"])).toMatch(/^"a\.md" has changed/);
+  });
+  test("caps the list at 10 paths", () => {
+    const paths = Array.from({ length: 13 }, (_, i) => `n${i}.md`);
+    const msg = batchDivergenceConfirmMessage(paths);
+    expect(msg).toMatch(/^13 paths have changed/);
+    expect(msg).toContain('"n9.md"');
+    expect(msg).not.toContain('"n10.md"');
+    expect(msg).toContain("and 3 more");
+  });
+});
+
+describe("skippedPathsMessage", () => {
+  test("pluralises", () => {
+    expect(skippedPathsMessage(["a"])).toMatch(/1 item was/);
+    expect(skippedPathsMessage(["a", "b"])).toMatch(/2 items were/);
   });
 });
