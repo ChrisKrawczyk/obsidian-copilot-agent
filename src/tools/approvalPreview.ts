@@ -11,7 +11,8 @@ export interface ApprovalDescription {
 
 /**
  * Join `lines` until the next one would push past `maxChars`, then add
- * an "… and N more" line for whatever was left out.
+ * an "… and N more" line for whatever was left out. An entry may span
+ * several lines; it is kept or dropped as a whole.
  */
 export function boundPreview(lines: readonly string[], maxChars = MAX_PREVIEW_CHARS): string {
   const out: string[] = [];
@@ -42,7 +43,7 @@ export function formatUpdateTasksPreview(analysis: Pick<UpdateTasksAnalysis, "ro
       lines.push(`${r.path}:${r.line} (no change)  ${r.before.trim()}`);
       continue;
     }
-    lines.push(`${r.path}:${r.line}`, `  - ${r.before.trim()}`, `  + ${r.after.trim()}`);
+    lines.push(`${r.path}:${r.line}\n  - ${r.before.trim()}\n  + ${r.after.trim()}`);
   }
   return boundPreview(lines);
 }

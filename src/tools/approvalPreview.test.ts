@@ -65,6 +65,20 @@ describe("formatUpdateTasksPreview", () => {
       "b.md:1 (no change)  - [x] b",
     ]);
   });
+  test("truncation keeps each task's before/after together and counts tasks", () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({
+      path: "a.md",
+      line: i + 1,
+      before: `- [ ] task ${i} ${"x".repeat(40)}`,
+      after: `- [x] task ${i} ${"x".repeat(40)}`,
+      changedFields: ["status"],
+      changed: true,
+    }));
+    const lines = formatUpdateTasksPreview({ failures: [], rows }).split("\n");
+    const shown = lines.filter((l) => /^a\.md:\d+$/.test(l)).length;
+    expect(lines[lines.length - 1]).toBe(`… and ${200 - shown} more`);
+    expect(lines[lines.length - 2]).toMatch(/^ {2}\+ /);
+  });
 });
 
 describe("extractBatchVaultPaths", () => {
