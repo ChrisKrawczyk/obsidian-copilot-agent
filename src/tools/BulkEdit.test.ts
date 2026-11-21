@@ -141,16 +141,23 @@ describe("replaceAllCounted", () => {
     if (!out.ok) throw new Error();
     expect(out.count).toBe(5);
     expect(out.samples).toEqual([
-      { before: "x1 x2", after: "y1 x2" },
+      { before: "x1 x2", after: "y1 y2" },
       { before: "x3", after: "y3" },
       { before: "x4", after: "y4" },
     ]);
   });
+  test("samples on long lines start near the match", () => {
+    const r = compileFind({ find: "old" });
+    if (!r.ok) throw new Error();
+    const out = replaceAllCounted(`${"w".repeat(300)} old tail`, r, "new");
+    if (!out.ok) throw new Error();
+    expect(out.samples[0]).toEqual({ before: `…${"w".repeat(39)} old tail`, after: `…${"w".repeat(39)} new tail` });
+  });
   test("regex samples use the match's own expansion", () => {
     const r = compileFind({ find: "(?<=#)old", regex: true });
     if (!r.ok) throw new Error();
-    const out = replaceAllCounted("old #old", r, "new");
-    expect(out).toMatchObject({ content: "old #new", samples: [{ before: "old #old", after: "old #new" }] });
+    const out = replaceAllCounted("old #old #old", r, "new");
+    expect(out).toMatchObject({ content: "old #new #new", samples: [{ before: "old #old #old", after: "old #new #new" }] });
   });
   test("zero-length matches are refused", () => {
     const r = compileFind({ find: "(?=a)", regex: true });

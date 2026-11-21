@@ -8,6 +8,7 @@ export const MAX_BULK_EDIT_NOTES = 50;
 export const MAX_BULK_EDIT_REPLACEMENTS = 5000;
 export const MAX_BULK_EDIT_SAMPLES = 3;
 const MAX_SAMPLE_CHARS = 160;
+const SAMPLE_LEAD_CHARS = 40;
 const NOTE_EXTENSIONS = [".md", ".txt"];
 
 export interface BulkEditInput {
@@ -69,22 +70,33 @@ export function replaceAllCounted(
   if (matches.length === 0) return { ok: true, content, count: 0, samples: [] };
   const next = compiled.literal ? content.replace(re, () => replacement) : content.replace(re, replacement);
 
+  const lineEndAt = (i: number) => {
+    const nl = content.indexOf("\n", i);
+    return nl < 0 ? content.length : nl;
+  };
   const samples: BulkEditSample[] = [];
-  const sampledLines = new Set<number>();
-  for (const m of matches) {
-    if (samples.length >= MAX_BULK_EDIT_SAMPLES) break;
-    const start = m.index ?? 0;
-    const end = start + m[0].length;
-    const lineStart = content.lastIndexOf("\n", start - 1) + 1;
-    if (sampledLines.has(lineStart)) continue;
-    sampledLines.add(lineStart);
-    const nl = content.indexOf("\n", end);
-    const lineEnd = nl < 0 ? content.length : nl;
-    const replaced = compiled.literal ? replacement : replaceOneAt(content, compiled.re, start, replacement, end);
-    samples.push({
-      before: clip(content.slice(lineStart, lineEnd)),
-      after: clip(content.slice(lineStart, start) + replaced + content.slice(end, lineEnd)),
-    });
+  let k = 0;
+  while (k < matches.length && samples.length < MAX_BULK_EDIT_SAMPLES) {
+    const first = matches[k].index ?? 0;
+    const lineStart = content.lastIndexOf("\n", first - 1) + 1;
+    const from = Math.max(lineStart, first - SAMPLE_LEAD_CHARS);
+    const lead = from > lineStart ? "…" : "";
+    let lineEnd = lineEndAt(first + matches[k][0].length);
+    let after = "";
+    let cursor = from;
+    // Every match that starts on the sampled line(s) is replaced, so the
+    // sample shows what the line will actually become.
+    while (k < matches.length && (matches[k].index ?? 0) <= lineEnd) {
+      const start = matches[k].index ?? 0;
+      const end = start + matches[k][0].length;
+      const replaced = compiled.literal ? replacement : replaceOneAt(content, compiled.re, start, replacement, end);
+      after += content.slice(cursor, start) + replaced;
+      cursor = end;
+      lineEnd = Math.max(lineEnd, lineEndAt(end));
+      k++;
+    }
+    after += content.slice(cursor, lineEnd);
+    samples.push({ before: clip(lead + content.slice(from, lineEnd)), after: clip(lead + after) });
   }
   return { ok: true, content: next, count: matches.length, samples };
 }

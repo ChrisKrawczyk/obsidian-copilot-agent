@@ -189,6 +189,15 @@ describe("describeVaultBatchApproval", () => {
     const bad = await describeVaultBatchApproval("bulk_edit", { paths: ["a.md"], find: "(", replace: "", regex: true }, deps({}));
     expect(bad?.summary).toBe("bulk_edit: invalid find");
   });
+  test("bulk_edit preview keeps the total line when truncated", async () => {
+    const seed: Record<string, string> = {};
+    for (let i = 0; i < 50; i++) seed[`note-${i}.md`] = `${"long line ".repeat(10)}#old\nmore #old\nagain #old`;
+    const d = await describeVaultBatchApproval("bulk_edit", { paths: Object.keys(seed), find: "#old", replace: "#new" }, deps(seed));
+    const lines = d!.detail.split("\n");
+    expect(d!.detail.length).toBeLessThanOrEqual(MAX_PREVIEW_CHARS);
+    expect(lines.at(-2)).toMatch(/^… and \d+ more$/);
+    expect(lines.at(-1)).toBe("Total: 150 replacements in 50 notes");
+  });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();
   });
