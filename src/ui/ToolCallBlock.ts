@@ -5,6 +5,7 @@ import {
   type TagCountView,
 } from "./searchResultRenderer";
 import { truncateMcpText } from "../sdk/approvalText";
+import { formatVaultChangeWarning } from "./vaultChangeWarning";
 
 /**
  * Callback surface from the chat view into the block. The block emits
@@ -118,6 +119,14 @@ export function renderToolCallBlock(
   statusPill.textContent = statusText(call.outcome);
   summary.appendChild(statusPill);
 
+  if (call.vaultChanges && call.vaultChanges.length > 0) {
+    const marker = document.createElement("span");
+    marker.classList.add("copilot-agent-toolcall-vault-marker");
+    marker.textContent = "⚠";
+    marker.title = "Vault files may have changed outside the vault tools";
+    summary.appendChild(marker);
+  }
+
   // Undo button (rendered for completed write calls with an undoId).
   // v0.3 Phase 6 (FR-016): the suppression predicate gates this so
   // raw-FS tool calls disappear from the action affordance when the
@@ -180,6 +189,36 @@ export function renderToolCallBlock(
 
   wrapper.appendChild(body);
   return wrapper;
+}
+
+/**
+ * Out-of-band vault change warning for a tool call, rendered as a
+ * sibling of the collapsible block so it stays visible when collapsed.
+ */
+export function renderVaultChangeWarning(call: ToolCall): HTMLElement | null {
+  if (!call.vaultChanges || call.vaultChanges.length === 0) return null;
+  const view = formatVaultChangeWarning(call.vaultChanges, call.vaultChangesOverflow ?? 0);
+  if (!view) return null;
+  const wrap = document.createElement("div");
+  wrap.classList.add("copilot-agent-vault-warning");
+  wrap.setAttribute("role", "note");
+  const headline = document.createElement("div");
+  headline.classList.add("copilot-agent-vault-warning-headline");
+  headline.textContent = `⚠ ${view.headline}`;
+  wrap.appendChild(headline);
+  const list = document.createElement("ul");
+  list.classList.add("copilot-agent-vault-warning-list");
+  for (const line of view.lines) {
+    const li = document.createElement("li");
+    li.textContent = line;
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+  const foot = document.createElement("div");
+  foot.classList.add("copilot-agent-vault-warning-footnote");
+  foot.textContent = view.footnote;
+  wrap.appendChild(foot);
+  return wrap;
 }
 
 function renderApprovalPrompt(

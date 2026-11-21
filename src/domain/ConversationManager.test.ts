@@ -884,6 +884,28 @@ describe("ConversationManager — runtime persistence wiring", () => {
     expect(markUndoneSpy).toHaveBeenCalledWith("conv-1", "u1");
   });
 
+  test("runtime persist adapter keeps batch items and label on 'add'", () => {
+    const { factory, built } = makeFakeFactory();
+    const { store, recordUndoSpy } = makeFakeStore();
+    const m = new ConversationManager({ runtimeFactory: factory, store });
+    m.hydrate({
+      conversations: [persistedConv("conv-1")],
+      activeConversationId: "conv-1",
+    });
+    m.getActiveRuntime();
+    const items = [{ op: "move" as const, from: "a.md", to: "b/a.md" }];
+    built[0].persistAdapter!.onJournalOp("add", {
+      id: "u2",
+      kind: "batch",
+      scope: "vault",
+      path: "b/a.md",
+      recordedAt: 100,
+      items,
+      label: "1 move",
+    });
+    expect(recordUndoSpy.mock.calls[0][1]).toMatchObject({ items, label: "1 move" });
+  });
+
   test("runtime persist adapter mirrors 'evict' to store.removeUndoEntry (Phase 6 TTL backstop)", () => {
     const { factory, built } = makeFakeFactory();
     const { store, removeUndoEntrySpy } = makeFakeStore();

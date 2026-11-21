@@ -357,4 +357,133 @@ describe("migrate — v0.4 modelId round-trip", () => {
     const empty = migrate(v2Blob({ safetyGrants: { vault: false } }));
     expect("safetyGrants" in empty.state.conversations[0]).toBe(false);
   });
+
+  describe("batch undo entries", () => {
+    function withUndo(entry: Record<string, unknown>) {
+      return {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversations: [
+          { id: "c1", name: "x", createdAt: 1, lastActiveAt: 1, messages: [], undoEntries: [entry] },
+        ],
+        activeConversationId: null,
+      };
+    }
+    const batch = {
+      id: "u9",
+      kind: "batch",
+      scope: "vault",
+      path: "a.md",
+      recordedAt: 5,
+      label: "2 items",
+      items: [
+        { op: "modify", path: "a.md", before: "1", after: "2" },
+        { op: "create", path: "b.md", after: "x" },
+        { op: "delete", path: "c.md", before: "y" },
+        { op: "move", from: "d.md", to: "e/d.md" },
+      ],
+    };
+
+    it("round-trips a well-formed batch entry", () => {
+      const r = migrate(withUndo(batch));
+      expect(r.recovered).toBe(false);
+      expect(r.state.conversations[0].undoEntries[0]).toEqual({
+        id: "u9",
+        kind: "batch",
+        scope: "vault",
+        path: "a.md",
+        recordedAt: 5,
+        before: undefined,
+        after: undefined,
+        undone: undefined,
+        label: "2 items",
+        items: batch.items,
+      });
+    });
+
+    it.each([
+      ["missing items", { ...batch, items: undefined }],
+      ["empty items", { ...batch, items: [] }],
+      ["unknown op", { ...batch, items: [{ op: "copy", path: "a" }] }],
+      ["modify without after", { ...batch, items: [{ op: "modify", path: "a", before: "1" }] }],
+      ["move without to", { ...batch, items: [{ op: "move", from: "a" }] }],
+    ])("rejects a malformed batch entry (%s)", (_name, entry) => {
+      expect(migrate(withUndo(entry as Record<string, unknown>)).recovered).toBe(true);
+    });
+
+    it("leaves single-path entries without batch fields", () => {
+      const r = migrate(withUndo({ id: "u1", kind: "modify", scope: "vault", path: "n.md", recordedAt: 4, items: [1] }));
+      expect(r.recovered).toBe(false);
+      expect("items" in r.state.conversations[0].undoEntries[0]).toBe(false);
+    });
+  });
+
+  describe("tool-call vault changes", () => {
+    function withCall(call: Record<string, unknown>) {
+      return {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversations: [
+          {
+            id: "c1",
+            name: "x",
+            createdAt: 1,
+            lastActiveAt: 1,
+            undoEntries: [],
+            messages: [
+              {
+                id: "m1",
+                role: "assistant",
+                content: "",
+                status: "complete",
+                createdAt: 1,
+                toolCalls: [{ id: "t1", kind: "tool", source: "builtin", outcome: "completed", ...call }],
+              },
+            ],
+          },
+        ],
+        activeConversationId: null,
+      };
+    }
+    const callOf = (r: ReturnType<typeof migrate>) => r.state.conversations[0].messages[0].toolCalls![0];
+
+    it("round-trips well-formed changes and overflow", () => {
+      const changes = [
+        { type: "modified", path: "a.md" },
+        { type: "renamed", path: "b/c.md", oldPath: "c.md" },
+      ];
+      const r = migrate(withCall({ vaultChanges: changes, vaultChangesOverflow: 3 }));
+      expect(r.recovered).toBe(false);
+      expect(callOf(r).vaultChanges).toEqual(changes);
+      expect(callOf(r).vaultChangesOverflow).toBe(3);
+    });
+
+    it("drops malformed entries and keeps the call", () => {
+      const r = migrate(
+        withCall({
+          vaultChanges: [
+            { type: "exploded", path: "a.md" },
+            { type: "modified" },
+            null,
+            { type: "deleted", path: "z.md", oldPath: "ignored.md" },
+          ],
+          vaultChangesOverflow: -4,
+        }),
+      );
+      expect(r.recovered).toBe(false);
+      expect(callOf(r).vaultChanges).toEqual([{ type: "deleted", path: "z.md" }]);
+      expect(callOf(r).vaultChangesOverflow).toBeUndefined();
+    });
+
+    it("omits the fields when nothing valid remains", () => {
+      const r = migrate(withCall({ vaultChanges: "nope", vaultChangesOverflow: 2 }));
+      expect("vaultChanges" in callOf(r)).toBe(false);
+      expect("vaultChangesOverflow" in callOf(r)).toBe(false);
+    });
+
+    it("caps the list and counts the rest as overflow", () => {
+      const many = Array.from({ length: 25 }, (_, i) => ({ type: "created", path: `n${i}.md` }));
+      const r = migrate(withCall({ vaultChanges: many, vaultChangesOverflow: 1 }));
+      expect(callOf(r).vaultChanges).toHaveLength(20);
+      expect(callOf(r).vaultChangesOverflow).toBe(6);
+    });
+  });
 });

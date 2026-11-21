@@ -596,6 +596,31 @@
   font-style: italic;
   flex: 0 0 auto;
 }
+.copilot-agent-toolcall-vault-marker {
+  color: var(--text-warning);
+  margin-left: 6px;
+  flex: 0 0 auto;
+}
+.copilot-agent-vault-warning {
+  margin: 2px 0 6px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--text-warning);
+  background: var(--background-secondary);
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.copilot-agent-vault-warning-headline {
+  font-weight: 600;
+}
+.copilot-agent-vault-warning-list {
+  margin: 4px 0;
+  padding-left: 18px;
+  font-family: var(--font-monospace);
+  word-break: break-all;
+}
+.copilot-agent-vault-warning-footnote {
+  color: var(--text-muted);
+}
 .copilot-agent-toolcall-pending_approval .copilot-agent-toolcall-status {
   background: var(--background-modifier-error-rgb, rgba(255,165,0,0.15));
   color: var(--text-warning, #c97e00);

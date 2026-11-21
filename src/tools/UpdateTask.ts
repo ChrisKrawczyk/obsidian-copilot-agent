@@ -198,7 +198,32 @@ export async function updateTaskImpl(
   };
 }
 
-function validatePatch(p: UpdateTaskPatch): UpdateTaskResult | null {
+/** Lenient parse of a model-supplied patch object; unknown or mistyped fields are dropped. */
+export function parseTaskPatch(raw: unknown): UpdateTaskPatch {
+  const p = (raw ?? {}) as Record<string, unknown>;
+  const patch: UpdateTaskPatch = {};
+  if (Array.isArray(p.addTags)) {
+    patch.addTags = p.addTags.filter((t): t is string => typeof t === "string");
+  }
+  if (Array.isArray(p.removeTags)) {
+    patch.removeTags = p.removeTags.filter((t): t is string => typeof t === "string");
+  }
+  if (p.setPriority === null) patch.setPriority = null;
+  else if (p.setPriority === "high" || p.setPriority === "medium" || p.setPriority === "low") {
+    patch.setPriority = p.setPriority;
+  }
+  if (p.setDueDate === null) patch.setDueDate = null;
+  else if (typeof p.setDueDate === "string") patch.setDueDate = p.setDueDate;
+  if (p.setScheduledDate === null) patch.setScheduledDate = null;
+  else if (typeof p.setScheduledDate === "string") patch.setScheduledDate = p.setScheduledDate;
+  if (typeof p.setStatus === "string" && (STATUS_VALUES as string[]).includes(p.setStatus)) {
+    patch.setStatus = p.setStatus as TaskStatus;
+  }
+  if (typeof p.setDescription === "string") patch.setDescription = p.setDescription;
+  return patch;
+}
+
+export function validatePatch(p: UpdateTaskPatch): UpdateTaskResult | null {
   if (p.setDueDate !== undefined && p.setDueDate !== null && !STRICT_DATE_REGEX.test(p.setDueDate)) {
     return { ok: false, reason: "invalid_date_format", field: "setDueDate" };
   }
@@ -224,6 +249,39 @@ function validatePatch(p: UpdateTaskPatch): UpdateTaskResult | null {
   return null;
 }
 
+export type FindExpectedLineResult =
+  | { ok: true; index: number }
+  | { ok: false; reason: "task_not_found" }
+  | { ok: false; reason: "ambiguous_match"; candidates: UpdateTaskCandidate[] };
+
+/**
+ * Locate `expectedRawLine` in `lines` (trailing whitespace ignored). The
+ * 1-based `line` hint wins when it matches; otherwise the whole file is
+ * scanned and the match must be unique. Returns a 0-based index.
+ */
+export function findExpectedLine(
+  lines: readonly string[],
+  line: number,
+  expectedRawLine: string,
+): FindExpectedLineResult {
+  const lineIdx = (line | 0) - 1;
+  const want = expectedRawLine.replace(/[ \t]+$/, "");
+  if (lineIdx >= 0 && lineIdx < lines.length && lines[lineIdx].replace(/[ \t]+$/, "") === want) {
+    return { ok: true, index: lineIdx };
+  }
+  const matches: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].replace(/[ \t]+$/, "") === want) matches.push(i);
+  }
+  if (matches.length === 0) return { ok: false, reason: "task_not_found" };
+  if (matches.length === 1) return { ok: true, index: matches[0] };
+  return {
+    ok: false,
+    reason: "ambiguous_match",
+    candidates: matches.map((i) => ({ line: i + 1, raw: lines[i] })),
+  };
+}
+
 function identifyTargetLine(
   input: UpdateTaskInput,
   lines: string[],
@@ -237,26 +295,11 @@ function identifyTargetLine(
   const lineIdx = (input.line | 0) - 1;
   const tryLine = lineIdx >= 0 && lineIdx < lines.length ? lines[lineIdx] : undefined;
 
-  // Tier 1: expectedRawLine
   if (typeof input.expectedRawLine === "string") {
-    const want = input.expectedRawLine.replace(/[ \t]+$/, "");
-    if (tryLine !== undefined && tryLine.replace(/[ \t]+$/, "") === want) {
-      return { ok: true, line: lineIdx };
-    }
-    const matches: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].replace(/[ \t]+$/, "") === want) matches.push(i);
-    }
-    if (matches.length === 0) return { ok: false, err: { ok: false, reason: "task_not_found" } };
-    if (matches.length === 1) return { ok: true, line: matches[0] };
-    return {
-      ok: false,
-      err: {
-        ok: false,
-        reason: "ambiguous_match",
-        candidates: matches.map((i) => ({ line: i + 1, raw: lines[i] })),
-      },
-    };
+    const r = findExpectedLine(lines, input.line, input.expectedRawLine);
+    if (r.ok) return { ok: true, line: r.index };
+    if (r.reason === "task_not_found") return { ok: false, err: { ok: false, reason: "task_not_found" } };
+    return { ok: false, err: { ok: false, reason: "ambiguous_match", candidates: r.candidates } };
   }
 
   // Tier 2: descriptionMatch
@@ -292,7 +335,7 @@ function identifyTargetLine(
   return { ok: true, line: lineIdx };
 }
 
-function applyPatch(
+export function applyPatch(
   parsed: ParsedTask,
   patch: UpdateTaskPatch,
   today: string,
@@ -412,7 +455,7 @@ function setsEqual(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-function formatYmd(d: Date): string {
+export function formatYmd(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");

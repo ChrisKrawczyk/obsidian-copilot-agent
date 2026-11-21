@@ -6,6 +6,7 @@ import {
   PREAMBLE_PLACEHOLDERS,
   VAULT_TOOL_INVENTORY_BLOCK,
   VAULT_TOOL_INVENTORY_BLOCK_GATED,
+  VAULT_WRITE_RULES_BLOCK,
   type PreambleInput,
 } from "./PreambleAssembler";
 import {
@@ -23,6 +24,47 @@ const baseInput: PreambleInput = {
 };
 
 describe("assemblePreamble", () => {
+  describe("vault-writes hard rule", () => {
+    it.each([false, true])("appears in the default preamble before the tool inventory (excludeRawFs=%s)", (excludeRawFs) => {
+      const out = assemblePreamble({ ...baseInput, excludeRawFs });
+      const rule = out.indexOf(VAULT_WRITE_RULES_BLOCK);
+      expect(rule).toBeGreaterThan(out.indexOf("## Vault context"));
+      expect(rule).toBeLessThan(out.indexOf("## Vault tools"));
+    });
+
+    it("states every part of the rule", () => {
+      const r = VAULT_WRITE_RULES_BLOCK;
+      expect(r).toContain("## Vault writes: hard rule");
+      expect(r).toMatch(/create, edit, move, rename, delete, or changing a task's status\) MUST go through the vault tools/);
+      expect(r).toContain("Never change vault files with shell commands");
+      for (const term of ["PowerShell/bash", "Python", "`Move-Item`", "`Set-Content`", "`WriteAllText`", "built-in file-editing tools"]) {
+        expect(r).toContain(term);
+      }
+      expect(r).toContain("even when a vault tool would be slower, need many approvals, or seem less convenient");
+      expect(r).toContain("Shell commands may READ the vault");
+      expect(r).toContain("WRITE only outside the vault, or inside the agent's session-state folder");
+      expect(r).toContain("more than about 10 tool calls, STOP and ask the user first");
+      expect(r).toContain("bypasses approvals and can't be undone");
+      expect(r).toContain("Act only after the user explicitly agrees");
+      expect(r).toContain("Bulk operations (more than 5 items): list the targets and the matching rule, and get confirmation");
+    });
+
+    it("points multi-task edits, moves, and repeated replacements at the batch tools", () => {
+      const c = AUTHORING_CONVENTIONS_BLOCK;
+      expect(c).not.toContain("once per result");
+      expect(c).toContain("Use `update_task` for a single task");
+      expect(c).toContain("make ONE `update_tasks` call");
+      expect(c).toContain("use `move_note`");
+      expect(c).toContain("one `bulk_edit` call");
+    });
+
+    it("names the batch tools in both inventories", () => {
+      for (const block of [VAULT_TOOL_INVENTORY_BLOCK, VAULT_TOOL_INVENTORY_BLOCK_GATED]) {
+        for (const name of ["update_tasks", "move_note", "bulk_edit"]) expect(block).toContain(`\`${name}\``);
+      }
+    });
+  });
+
   it("returns empty string when mode = none", () => {
     expect(assemblePreamble({ ...baseInput, mode: "none" })).toBe("");
   });
@@ -77,7 +119,7 @@ describe("assemblePreamble", () => {
     expect(a.length).toBe(b.length);
   });
 
-  it("default preamble stays under the 4 KB size bound regardless of vault contents (SC-005)", () => {
+  it("default preamble stays under the 10 KB size bound regardless of vault contents (SC-005)", () => {
     // The preamble is constant per vault root — no per-file content — so
     // "regardless of vault size" means it doesn't grow with file count.
     // Vault root path is filesystem-bounded (Windows MAX_PATH ~260).
@@ -226,7 +268,7 @@ describe("assemblePreamble", () => {
     expect(out).not.toContain("Vault tools");
   });
 
-  it("custom mode supports the timezone, tool-inventory, and authoring-conventions placeholders", () => {
+  it("custom mode supports the timezone, tool-inventory, authoring-conventions, and vault-write-rules placeholders", () => {
     const out = assemblePreamble({
       ...baseInput,
       mode: "custom",
@@ -234,11 +276,19 @@ describe("assemblePreamble", () => {
         `TZ: ${PREAMBLE_PLACEHOLDERS.VAULT_TIMEZONE}`,
         PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY,
         PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS,
+        PREAMBLE_PLACEHOLDERS.VAULT_WRITE_RULES,
       ].join("\n---\n"),
     });
     expect(out).toContain("TZ: America/Los_Angeles");
     expect(out).toContain(VAULT_TOOL_INVENTORY_BLOCK);
     expect(out).toContain(AUTHORING_CONVENTIONS_BLOCK);
+    expect(out).toContain(VAULT_WRITE_RULES_BLOCK);
+    expect(out).not.toContain("{{");
+  });
+
+  it("custom mode leaves the vault-write rules out unless the placeholder is used", () => {
+    const out = assemblePreamble({ ...baseInput, mode: "custom", customBody: PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS });
+    expect(out).not.toContain("Vault writes: hard rule");
   });
 
   it("custom mode with empty body returns empty string", () => {
@@ -349,7 +399,7 @@ describe("assemblePreamble", () => {
     );
   });
 
-  it("default-mode preamble with excludeRawFs=true stays within the 8 KB size budget (SC-005 unchanged)", () => {
+  it("default-mode preamble with excludeRawFs=true stays within the 10 KB size budget (SC-005)", () => {
     const out = assemblePreamble({ ...baseInput, excludeRawFs: true });
     expect(Buffer.byteLength(out, "utf8")).toBeLessThan(
       MAX_DEFAULT_PREAMBLE_BYTES,

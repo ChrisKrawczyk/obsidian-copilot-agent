@@ -35,6 +35,20 @@ Each conversation keeps its own Copilot agent session, stored under the plugin f
 
 Sometimes a session can't be resumed: the conversation was saved before session resume was added, or the session data is missing or unreadable. In that case a divider shows where the agent's memory starts. Click **Include earlier context** to send a short, editable excerpt of the earlier messages with your next message, or **Dismiss** to continue without it. The excerpt includes message text and tool names only. It's sent once and isn't added to your message in the transcript.
 
+## Vault changes go through vault tools
+
+The agent is told, as a hard rule in the default preamble, to make every vault change with the vault tools and never with shell commands (`Move-Item`, `Set-Content`, Python, and so on). Shell writes skip the vault-write approvals and Undo, and shell moves don't update links. If no vault tool fits, the agent stops and asks you first. Before a bulk change of more than 5 items it lists the targets and asks you to confirm. In **Custom** preamble mode, add `{{VAULT_WRITE_RULES}}` to keep the rule.
+
+Three batch tools make the vault-tool path the easy one. Each asks for approval **once** for the whole call (when approval is required) and creates **one Undo** if anything changed:
+
+- **`update_tasks`** applies one change (status, dates, priority, tags) to many tasks from `find_tasks`. The approval shows each line before and after.
+- **`move_note`** moves or renames notes, attachments, and folders with Obsidian's own rename, so links update according to your Obsidian link settings. The approval shows each move and how many notes link to it. Undo moves everything back.
+- **`bulk_edit`** runs one find/replace (literal or regex) across up to 50 notes. The approval shows match counts and sample lines for each note.
+
+Each tool checks every target first. If any target fails, nothing is written. If a write fails partway, the earlier writes are rolled back.
+
+If vault files change while a shell or MCP tool is running, and a vault tool didn't make the change, the tool call shows a ⚠ warning listing what changed. Your own edits in Obsidian outside those moments aren't reported. Edits from other plugins during that time may be. The warning is only a notice: nothing is blocked, and it's saved with the conversation.
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
@@ -256,7 +270,7 @@ Platform detection logic is unit-tested for every tuple, but manual end-to-end s
 
 The plugin enforces a single deny-by-default permission gate that every mutating tool call flows through:
 
-- **Custom write tools** (`create_file`, `edit_file`, `delete_file`) → SafetyPolicy.
+- **Custom write tools** (`create_file`, `edit_file`, `delete_file`, `edit_note`, `update_task`, `update_tasks`, `move_note`, `bulk_edit`, …) → SafetyPolicy. A batch call skips the prompt via the path allowlist only when every path it touches is allowlisted. An allowlisted `move_note` can still rewrite links in notes outside the allowlist.
 - **SDK built-ins** (`shell`, `write`, `view`, `web_fetch`, `memory`, etc.) → SafetyPolicy.
 - **MCP tool calls** → SafetyPolicy.
 
@@ -266,7 +280,7 @@ SafetyPolicy decides among `auto-apply` (no prompt), `require-approval` (chat-in
 2. Per-conversation session grants ("Approve for session" on a prompt). They're saved with the conversation, so they last across reloads, and they apply only to that conversation. MCP grants stop applying when the server's configuration changes.
 3. Persistent settings — path allowlist (vault-relative directories that skip the prompt) and per-built-in auto-approve toggles.
 
-After any approved built-in vault write, an **Undo** affordance appears on the tool-call block and reverses the change. MCP calls intentionally have no Undo because they may affect external systems outside the vault.
+After any approved built-in vault write, an **Undo** affordance appears on the tool-call block and reverses the change. For batch tools, one Undo reverts every file in the call, or, if any file changed since, asks before reverting anything. If a file changes while Undo runs, Undo stops and restores what it already reverted. MCP calls intentionally have no Undo because they may affect external systems outside the vault.
 
 ### Read-tool exemption
 

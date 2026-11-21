@@ -35,6 +35,8 @@ import {
   type PersistedMessage,
   type PersistedUndoEntry,
 } from "./PersistedShape";
+import type { UndoBatchItem } from "../domain/UndoJournal";
+import { MAX_LISTED_VAULT_CHANGES } from "../domain/VaultChangeDetector";
 
 export interface MigrateResult {
   state: PersistedConversationsState;
@@ -302,6 +304,7 @@ function validateMessage(raw: unknown): PersistedMessage | null {
           typeof t.resultContent === "string" ? t.resultContent : undefined,
         undoId: typeof t.undoId === "string" ? t.undoId : undefined,
         undone: t.undone === true ? true : undefined,
+        ...validateVaultChanges(t.vaultChanges, t.vaultChangesOverflow),
       });
     }
     out.toolCalls = calls;
@@ -310,14 +313,64 @@ function validateMessage(raw: unknown): PersistedMessage | null {
   return out;
 }
 
+const VAULT_CHANGE_TYPES = new Set(["created", "modified", "deleted", "renamed"]);
+
+function validateVaultChanges(
+  raw: unknown,
+  rawOverflow: unknown,
+): Pick<NonNullable<PersistedMessage["toolCalls"]>[number], "vaultChanges" | "vaultChangesOverflow"> {
+  if (!Array.isArray(raw)) return {};
+  const changes: NonNullable<NonNullable<PersistedMessage["toolCalls"]>[number]["vaultChanges"]> = [];
+  let dropped = 0;
+  for (const c of raw) {
+    if (!c || typeof c !== "object") continue;
+    const r = c as Record<string, unknown>;
+    if (typeof r.type !== "string" || !VAULT_CHANGE_TYPES.has(r.type)) continue;
+    if (typeof r.path !== "string" || r.path.length === 0) continue;
+    if (changes.length >= MAX_LISTED_VAULT_CHANGES) {
+      dropped++;
+      continue;
+    }
+    changes.push({
+      type: r.type as "created" | "modified" | "deleted" | "renamed",
+      path: r.path,
+      ...(r.type === "renamed" && typeof r.oldPath === "string" ? { oldPath: r.oldPath } : {}),
+    });
+  }
+  if (changes.length === 0) return {};
+  const base =
+    typeof rawOverflow === "number" && Number.isFinite(rawOverflow) && rawOverflow > 0
+      ? Math.floor(rawOverflow)
+      : 0;
+  const overflow = base + dropped;
+  return overflow > 0 ? { vaultChanges: changes, vaultChangesOverflow: overflow } : { vaultChanges: changes };
+}
+
 function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const e = raw as Record<string, unknown>;
   if (typeof e.id !== "string") return null;
-  if (e.kind !== "create" && e.kind !== "modify" && e.kind !== "delete") return null;
+  if (
+    e.kind !== "create" &&
+    e.kind !== "modify" &&
+    e.kind !== "delete" &&
+    e.kind !== "batch"
+  ) {
+    return null;
+  }
   if (e.scope !== "vault" && e.scope !== "extra-vault") return null;
   if (typeof e.path !== "string") return null;
   if (typeof e.recordedAt !== "number") return null;
+  let items: UndoBatchItem[] | undefined;
+  if (e.kind === "batch") {
+    if (!Array.isArray(e.items) || e.items.length === 0) return null;
+    items = [];
+    for (const raw of e.items) {
+      const item = validateBatchItem(raw);
+      if (!item) return null;
+      items.push(item);
+    }
+  }
   return {
     id: e.id,
     kind: e.kind,
@@ -327,5 +380,27 @@ function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {
     after: typeof e.after === "string" ? e.after : undefined,
     recordedAt: e.recordedAt,
     undone: e.undone === true ? true : undefined,
+    ...(items ? { items } : {}),
+    ...(items && typeof e.label === "string" ? { label: e.label } : {}),
   };
+}
+
+function validateBatchItem(raw: unknown): UndoBatchItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const it = raw as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === "string";
+  switch (it.op) {
+    case "modify":
+      return str(it.path) && str(it.before) && str(it.after)
+        ? { op: "modify", path: it.path, before: it.before, after: it.after }
+        : null;
+    case "create":
+      return str(it.path) && str(it.after) ? { op: "create", path: it.path, after: it.after } : null;
+    case "delete":
+      return str(it.path) && str(it.before) ? { op: "delete", path: it.path, before: it.before } : null;
+    case "move":
+      return str(it.from) && str(it.to) ? { op: "move", from: it.from, to: it.to } : null;
+    default:
+      return null;
+  }
 }

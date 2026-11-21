@@ -610,6 +610,9 @@ export const VAULT_WRITE_TOOL_NAMES = [
   "create_daily_note",
   "create_task",
   "update_task",
+  "update_tasks",
+  "move_note",
+  "bulk_edit",
 ] as const;
 export type VaultWriteToolName = (typeof VAULT_WRITE_TOOL_NAMES)[number];
 export function isVaultWriteToolName(name: string): name is VaultWriteToolName {

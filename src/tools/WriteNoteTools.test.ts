@@ -19,6 +19,8 @@ import {
 import { ObsidianApi, type AppLike } from "./ObsidianApi";
 import type { TFileLike } from "./ReadTools";
 import { UndoJournal } from "../domain/UndoJournal";
+import { WRITE_NOTE_TOOL_NAMES } from "../domain/vaultToolManifest";
+import { VAULT_WRITE_TOOL_NAMES, WRITE_TOOL_NAMES } from "./WriteTools";
 
 let tmpRoot: string;
 
@@ -572,7 +574,7 @@ describe("insert_into_active_note path equivalence (gate ↔ handler)", () => {
 });
 
 describe("createWriteNoteTools factory", () => {
-  test("registers exactly create_note, edit_note, open_note, insert_into_active_note, create_daily_note, create_task, update_task", () => {
+  test("registers the note-write tools in order", () => {
     const world = makeWorld();
     const deps = makeDeps(world);
     const tools = createWriteNoteTools(deps);
@@ -585,7 +587,23 @@ describe("createWriteNoteTools factory", () => {
       "create_daily_note",
       "create_task",
       "update_task",
+      "update_tasks",
+      "move_note",
+      "bulk_edit",
     ]);
+  });
+
+  test("tool names stay in lockstep with the manifest and the vault-write classification", () => {
+    const tools = createWriteNoteTools(makeDeps(makeWorld()));
+    const factory = tools
+      .map((t) => (t as unknown as { name: string }).name)
+      .filter((n) => n !== "open_note");
+    const classified = VAULT_WRITE_TOOL_NAMES.filter(
+      (n) => !(WRITE_TOOL_NAMES as readonly string[]).includes(n),
+    );
+    expect(new Set(factory)).toEqual(new Set(WRITE_NOTE_TOOL_NAMES));
+    expect(new Set(classified)).toEqual(new Set(WRITE_NOTE_TOOL_NAMES));
+    expect(factory).toHaveLength(WRITE_NOTE_TOOL_NAMES.length);
   });
 
   test("only open_note has skipPermission: true", () => {
@@ -595,7 +613,7 @@ describe("createWriteNoteTools factory", () => {
     const skipFlags = tools.map(
       (t) => (t as unknown as { skipPermission?: boolean }).skipPermission ?? false,
     );
-    expect(skipFlags).toEqual([false, false, true, false, false, false, false]);
+    expect(skipFlags).toEqual([false, false, true, false, false, false, false, false, false, false]);
   });
 
   test("edit_note SDK description warns against parallel replace calls (FR-007)", () => {
