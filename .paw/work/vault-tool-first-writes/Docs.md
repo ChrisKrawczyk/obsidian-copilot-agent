@@ -7,7 +7,7 @@ When a vault tool was slow, approval-heavy, or missing, the in-Obsidian agent us
 This work makes the shell path unnecessary and less tempting, without blocking it:
 
 1. **A hard rule in the default preamble** says every vault change goes through the vault tools. The rule is also available in custom mode as `{{VAULT_WRITE_RULES}}`.
-2. **Three batch tools** remove the main reasons the agent reached for the shell. Each takes one approval and creates one Undo entry:
+2. **Three batch tools** remove the main reasons the agent reached for the shell. Each asks for approval at most once per call (when SafetyPolicy requires approval) and creates one Undo entry when something changed:
    - `update_tasks` applies one patch to many tasks.
    - `move_note` does link-aware moves and renames.
    - `bulk_edit` does a previewed find/replace across notes.
@@ -66,10 +66,12 @@ vault.on(create|modify|delete|rename) ──► VaultChangeDetector ──► Ch
   - With force:
     - every item is reverted, except moves whose moved item is gone or whose original path is now taken by a different file; those are skipped and reported;
     - a note deleted since the action is recreated from its snapshot.
+  - Each revert is guarded: it writes only if the file still holds what the preflight saw (inside `vault.process` when available), so an edit that lands during the Undo aborts it instead of being overwritten.
   - If a write fails partway through an Undo, the items already reverted are put back to the state seen just before the Undo began, and the entry stays undoable.
 - **Size caps keep persisted data bounded:**
   - 200 tasks per call, 100 moves per call, and 50 notes or 5,000 replacements per `bulk_edit` call;
-  - 2 MB of combined snapshot content per batch entry, checked when the tool validates its input;
+  - 2 MB of combined snapshot content per batch entry, checked when the tool validates its input and again against what was actually written (a note that grew in between makes the call roll back);
+  - `bulk_edit` stops counting matches once the 5,000 cap is exceeded, so an oversized edit is rejected without a full dry run;
   - a batch entry counts as one entry toward the journal cap.
 - **Preamble size bound raised from 8 KB to 10 KB.** The rule is safety-critical, and the preamble is still constant per vault. The assembled preamble is about 9.1 KB with the full inventory and about 7.9 KB with the gated one, measured with a 260-character vault path.
 - **The thresholds come from the brief.** "More than 5 items needs confirmation" and "more than about 10 tool calls, stop and ask" are kept as written, even though large batches then need one chat round-trip before the single approval.
@@ -80,14 +82,14 @@ vault.on(create|modify|delete|rename) ──► VaultChangeDetector ──► Ch
 - **False-positive exclusions.** These events are ignored:
   - anything under the Obsidian config folder;
   - every event while a vault tool or Undo is running, which covers link rewrites Obsidian makes in other notes during `move_note`;
-  - paths the plugin wrote, for 1.5 s after its span ends;
+  - paths the plugin wrote, and files under folders it moved, for 1.5 s after its span ends (read-only vault tools don't add paths to this list);
   - modify events on the note in the focused editor, or on a note the user typed in during the last 5 s.
 - **The warning is for the user only.** It is not sent to the model.
 
 ### Integration Points
 
 - **`src/domain/vaultToolManifest.ts`**: the three tools are registered as mutating vault tools. This keeps the preamble inventory, safety classification and raw-FS tool gating in lockstep, and `src/main.toolGating.test.ts` checks it.
-- **`src/domain/SafetyPolicy.ts`**: the new tools fall under the `vault` source. A multi-path call is auto-approved through the allowlist only when every path it touches is covered. For moves that means every source and every destination.
+- **`src/domain/SafetyPolicy.ts`**: the new tools fall under the `vault` source. A multi-path call is auto-approved through the allowlist only when every path it touches is covered. For moves that means every source and every destination. Paths are normalised (`\\`, doubled and edge slashes); empty, `.` or `..` segments never match, so such calls always prompt. An allowlisted `move_note` can still rewrite links in notes outside the allowlist.
 - **`src/sdk/AgentSession.ts`**: calls the `describeApproval` hook (wired in `main.ts` to `describeVaultBatchApproval`) to build the preview, with a 2 s timeout. If the preview fails or times out, the default prompt is shown instead, and the approval is never blocked.
 - **`src/ui/undoFlow.ts` and `ToolCallBlock.ts`**: the Undo button works for the new tools. For a batch entry, the divergence confirmation lists the affected paths.
 - **Persistence (`PersistedShape.ts`, `migrate.ts`)**:
@@ -109,7 +111,7 @@ None. The tools and the rule are on by default. Under the **Custom** preamble mo
 ### Basic Usage
 
 - **"Mark every task tagged #sprint-12 as done."** The agent calls `find_tasks`, lists the matches, and confirms with you if there are more than 5. It then makes one `update_tasks` call. You approve once and see each task's line before and after. One Undo reverts all of them.
-- **"Rename Projects/Old.md to Projects/New.md"** or **"move these 12 notes into Archive/2026/".** The agent makes one `move_note` call. The approval shows each from → to and how many notes link to each item. Links are updated according to your Obsidian link settings. Undo moves everything back and updates the links again.
+- **"Rename Projects/Old.md to Projects/New.md"** or **"move these 12 notes into Archive/2026/".** The agent makes one `move_note` call. The approval shows each from → to and how many notes link to each item. Links are updated according to your Obsidian link settings ("Automatically update internal links"). Undo moves everything back and updates the links again.
 - **"Replace 'ACME Corp' with 'Acme' in these notes."** The agent makes one `bulk_edit` call. The approval shows the match count for each note, a few before/after lines, and the total.
 
 ### Advanced Usage
@@ -168,7 +170,8 @@ The automated checks are `npm test` (122 files, about 1,840 tests) and `npx tsc 
 
 - **Stale input:** a stale `expectedRawLine`, or a note with unsaved editor changes, means the whole batch is rejected and nothing is written.
 - **Note changed between validation and write:** everything already written is rolled back, and the result reports a concurrent change.
-- **Move conflicts:** a destination that already exists, a folder moved into its own subtree, or a destination that is another item's source are all rejected.
+- **Move conflicts:** a destination that already exists, a folder moved into its own subtree, a destination that is another item's source, and a file moved to a path another item uses as a folder (`parent_is_file`) are all rejected.
+- **Approved MCP call rejected before dispatch** (for example, server metadata changed): its detection window is dropped without the 2 s grace.
 - **Undo after a note was deleted:** the divergence prompt appears. A forced Undo recreates the note from the snapshot.
 - **Forced Undo of a move whose moved item is gone, or whose original path is now taken by a different file:** that item is skipped and reported.
 - **Overlapping tools:** if two external tools run at the same time, a change is attributed to the most recently started one.
@@ -178,7 +181,7 @@ The automated checks are `npm test` (122 files, about 1,840 tests) and `npx tsc 
 
 - **Writes by other plugins** (Linter, Templater, sync) during a detection window are reported. This is an accepted false positive, and the warning wording is hedged.
 - **Changes landing after the 2 s grace period** are missed, for example from detached background processes. So is a shell write to a path a vault tool wrote less than 1.5 s earlier.
-- **Read-only vault tools also run inside self-write spans.** A long vault read that overlaps a shell call can hide that call's changes. This was chosen in favour of fewer false positives.
+- **Read-only vault tools still open self-write spans.** Events that land while a vault read is running are ignored, so a read that overlaps a shell call can hide that call's changes during the read. They no longer extend the 1.5 s settle period.
 - **The overflow count is approximate.** It can count the same path more than once.
 - **`move_note` leaves empty folders behind.** Folders created for a destination aren't removed on rollback or Undo.
 - **No automated test covers the 2 s `describeApproval` preview timeout.**

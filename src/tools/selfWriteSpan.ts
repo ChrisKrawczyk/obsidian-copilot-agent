@@ -59,16 +59,20 @@ export function undoEntryPaths(entry: Pick<UndoEntry, "path" | "items" | "scope"
 /**
  * Run every tool handler inside a self-write span so vault events the
  * tool causes (including link rewrites Obsidian makes in other notes)
- * are never reported as out-of-band changes. All other tool fields are
- * passed through untouched.
+ * are never reported as out-of-band changes. Only mutating tools seed
+ * the post-span settle list with the paths they name; a read-only tool
+ * must not hide an external write that lands just after it. All other
+ * tool fields are passed through untouched.
  */
-export function wrapToolsWithSelfWriteSpan<T extends { handler?: unknown }>(
+export function wrapToolsWithSelfWriteSpan<T extends { name?: string; handler?: unknown }>(
   tools: readonly T[],
   source: SelfWriteSpanSource,
+  isReadOnly: (name: string) => boolean = () => false,
 ): T[] {
   return tools.map((tool) => {
     const handler = tool.handler;
     if (typeof handler !== "function") return tool;
+    const readOnly = typeof tool.name === "string" && isReadOnly(tool.name);
     const wrapped = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
       const span = source.beginSelfWrite();
       let result: unknown;
@@ -76,7 +80,7 @@ export function wrapToolsWithSelfWriteSpan<T extends { handler?: unknown }>(
         result = await (handler as (...a: unknown[]) => unknown).apply(this, args);
         return result;
       } finally {
-        span.end(collectWrittenPaths(args[0], result));
+        span.end(readOnly ? [] : collectWrittenPaths(args[0], result));
       }
     };
     return { ...tool, handler: wrapped };

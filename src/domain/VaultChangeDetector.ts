@@ -61,8 +61,8 @@ export class VaultChangeDetector {
     this.now = options.now ?? Date.now;
     this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
     this.settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
-    const dir = options.configDir?.replace(/\/+$/, "");
-    this.configDir = dir ? dir.toLowerCase() : undefined;
+    const dir = options.configDir ? pathKey(options.configDir) : "";
+    this.configDir = dir || undefined;
   }
 
   externalToolStarted(toolCallId: string): void {
@@ -76,6 +76,12 @@ export class VaultChangeDetector {
     if (seq === undefined) return;
     this.active.delete(toolCallId);
     this.grace.set(toolCallId, { seq, until: this.now() + this.graceMs });
+  }
+
+  /** Drop a window for a call that never ran, without leaving a grace period. */
+  externalToolCancelled(toolCallId: string): void {
+    this.active.delete(toolCallId);
+    this.grace.delete(toolCallId);
   }
 
   beginSelfWrite(): SelfWriteSpan {
@@ -105,14 +111,14 @@ export class VaultChangeDetector {
     const t = this.now();
     if (this.openSpans > 0) {
       for (const p of paths) {
-        const key = p.toLowerCase();
+        const key = pathKey(p);
         this.spanPaths.add(key);
         this.settled.set(key, Number.POSITIVE_INFINITY);
       }
       return null;
     }
     this.pruneSettled(t);
-    if (paths.some((p) => this.settled.has(p.toLowerCase()))) return null;
+    if (paths.some((p) => this.isSettled(pathKey(p)))) return null;
     const toolCallId = this.attribute(t);
     if (!toolCallId) return null;
     if (ev.type === "modify" && isUserEditing(userEditingPaths, ev.path)) return null;
@@ -136,15 +142,24 @@ export class VaultChangeDetector {
     };
   }
 
+  private isSettled(key: string): boolean {
+    if (this.settled.has(key)) return true;
+    for (const settledKey of this.settled.keys()) {
+      if (settledKey && key.startsWith(`${settledKey}/`)) return true;
+    }
+    return false;
+  }
+
   private remember(path: string, until: number): void {
-    const key = path.toLowerCase();
+    const key = pathKey(path);
+    if (!key) return;
     const prev = this.settled.get(key);
     if (prev === undefined || prev < until) this.settled.set(key, until);
   }
 
   private isConfigPath(path: string): boolean {
     if (!this.configDir) return false;
-    const p = path.toLowerCase();
+    const p = pathKey(path);
     return p === this.configDir || p.startsWith(`${this.configDir}/`);
   }
 
@@ -178,7 +193,19 @@ export class VaultChangeDetector {
 
 function isUserEditing(paths: string | readonly string[] | null | undefined, path: string): boolean {
   if (!paths) return false;
-  return typeof paths === "string" ? paths === path : paths.includes(path);
+  const key = pathKey(path);
+  const list = typeof paths === "string" ? [paths] : paths;
+  return list.some((p) => pathKey(p) === key);
+}
+
+function pathKey(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^(\.\/)+/, "")
+    .replace(/^\/+|\/+$/g, "")
+    .toLowerCase();
 }
 
 /**

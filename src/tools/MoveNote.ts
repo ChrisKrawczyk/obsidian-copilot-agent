@@ -220,6 +220,8 @@ export function analyzeMoveNote(
         conflicts.set(a.index, { reason: "duplicate_destination", details: `Same destination as item ${b.index + 1}.` });
       } else if (b.kind === "folder" && [a.from, a.to].some((p) => isWithin(p, b.from) || isWithin(p, b.to))) {
         conflicts.set(a.index, { reason: "overlapping_items", details: `Overlaps folder move ${b.index + 1}; move the folder or its contents, not both.` });
+      } else if (b.kind === "file" && isWithin(a.to, b.to)) {
+        conflicts.set(a.index, { reason: "parent_is_file", details: `Item ${b.index + 1} moves a file to "${b.to}", which this destination needs as a folder.` });
       }
     }
   }

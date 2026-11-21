@@ -49,23 +49,29 @@ export interface BulkEditSample {
 }
 
 export type ReplaceOutcome =
-  | { ok: true; content: string; count: number; samples: BulkEditSample[] }
+  | { ok: true; content: string; count: number; samples: BulkEditSample[]; overLimit?: true }
   | { ok: false; error: string };
 
 /**
  * Replace every match of `compiled` in `content`. Literal mode inserts
  * `replacement` verbatim; regex mode uses native `$1` / `$<name>` / `$$`
- * expansion. Samples show up to three changed lines.
+ * expansion. Samples show up to three changed lines. Once more than
+ * `limit` matches are found, counting stops and nothing is replaced.
  */
 export function replaceAllCounted(
   content: string,
   compiled: Extract<CompiledFind, { ok: true }>,
   replacement: string,
+  limit = Number.POSITIVE_INFINITY,
 ): ReplaceOutcome {
   const re = new RegExp(compiled.re.source, compiled.re.flags);
-  const matches = [...content.matchAll(re)];
-  if (matches.some((m) => m[0].length === 0)) {
-    return { ok: false, error: "The pattern matched an empty string; make it match at least one character." };
+  const matches: RegExpMatchArray[] = [];
+  for (const m of content.matchAll(re)) {
+    if (m[0].length === 0) {
+      return { ok: false, error: "The pattern matched an empty string; make it match at least one character." };
+    }
+    matches.push(m);
+    if (matches.length > limit) return { ok: true, content, count: matches.length, samples: [], overLimit: true };
   }
   if (matches.length === 0) return { ok: true, content, count: 0, samples: [] };
   const next = compiled.literal ? content.replace(re, () => replacement) : content.replace(re, replacement);
@@ -108,7 +114,8 @@ function replaceOneAt(content: string, re: RegExp, start: number, replacement: s
   return out.slice(start, out.length - (content.length - end));
 }
 
-function clip(s: string): string {
+function clip(raw: string): string {
+  const s = raw.replace(/\r?\n/g, "⏎");
   return s.length > MAX_SAMPLE_CHARS ? `${s.slice(0, MAX_SAMPLE_CHARS - 1)}…` : s;
 }
 
@@ -145,6 +152,8 @@ export type BulkEditAnalysis =
       notes: BulkEditNotePlan[];
       totalReplacements: number;
       snapshotBytes: number;
+      /** Analysis stopped early because the replacement cap was exceeded. */
+      overLimit?: true;
     };
 
 const encoder = new TextEncoder();
@@ -190,12 +199,13 @@ export async function analyzeBulkEdit(
       fail(loaded.reason, vaultRel, loaded.details);
       continue;
     }
-    const r = replaceAllCounted(loaded.content, compiled, input.replace);
+    const r = replaceAllCounted(loaded.content, compiled, input.replace, MAX_BULK_EDIT_REPLACEMENTS - totalReplacements);
     if (!r.ok) {
       fail("match_error", vaultRel, r.error);
       continue;
     }
     totalReplacements += r.count;
+    if (r.overLimit) return { ok: true, failures, notes, totalReplacements, snapshotBytes, overLimit: true };
     if (r.content !== loaded.content) {
       snapshotBytes += encoder.encode(loaded.content).length + encoder.encode(r.content).length;
     }
@@ -248,8 +258,10 @@ export async function bulkEditImpl(input: BulkEditInput, deps: WriteNoteToolsDep
   }
   const analysis = await analyzeBulkEdit(input, deps);
   if (!analysis.ok) return analysis;
-  if (analysis.failures.length > 0) return { ok: false, reason: "validation_failed", failures: analysis.failures };
-  if (analysis.totalReplacements > MAX_BULK_EDIT_REPLACEMENTS) {
+  if (analysis.failures.length > 0 && !analysis.overLimit) {
+    return { ok: false, reason: "validation_failed", failures: analysis.failures };
+  }
+  if (analysis.overLimit || analysis.totalReplacements > MAX_BULK_EDIT_REPLACEMENTS) {
     return {
       ok: false,
       reason: "too_many_replacements",

@@ -129,7 +129,7 @@ export interface ChatViewDeps {
    */
   vaultChangeDetector?: Pick<
     VaultChangeDetector,
-    "externalToolStarted" | "externalToolCompleted" | "beginSelfWrite" | "subscribe"
+    "externalToolStarted" | "externalToolCompleted" | "externalToolCancelled" | "beginSelfWrite" | "subscribe"
   >;
 }
 
@@ -1273,6 +1273,9 @@ export class ChatView extends ItemView {
         });
         openWindows.add(signal.toolCallId);
         detector.externalToolStarted(signal.toolCallId);
+      } else if (signal.kind === "cancel") {
+        openWindows.delete(signal.toolCallId);
+        detector.externalToolCancelled(signal.toolCallId);
       } else {
         openWindows.delete(signal.toolCallId);
         detector.externalToolCompleted(signal.toolCallId);
@@ -1949,10 +1952,14 @@ export class ChatView extends ItemView {
               get: (id) => journal.get(id),
               undo: async (id, opts) => {
                 const span = detector.beginSelfWrite();
+                const entry = journal.get(id);
+                let reverted = false;
                 try {
-                  return await journal.undo(id, opts);
+                  const outcome = await journal.undo(id, opts);
+                  reverted = outcome.ok;
+                  return outcome;
                 } finally {
-                  span.end(undoEntryPaths(journal.get(id)));
+                  span.end(reverted ? undoEntryPaths(entry) : []);
                 }
               },
             }

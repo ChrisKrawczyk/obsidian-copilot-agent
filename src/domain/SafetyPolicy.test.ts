@@ -43,6 +43,12 @@ describe("normaliseAllowlistEntry", () => {
 });
 
 describe("isVaultPathAllowlisted", () => {
+  test("never covers empty or traversal paths and tolerates doubled slashes", () => {
+    expect(isVaultPathAllowlisted("", ["inbox"])).toBe(false);
+    expect(isVaultPathAllowlisted("inbox/../secret.md", ["inbox"])).toBe(false);
+    expect(isVaultPathAllowlisted("inbox/./a.md", ["inbox"])).toBe(false);
+    expect(isVaultPathAllowlisted(" inbox//a.md ", ["inbox"])).toBe(true);
+  });
   test("exact match", () => {
     expect(isVaultPathAllowlisted("inbox", ["inbox"])).toBe(true);
   });
@@ -333,4 +339,3 @@ describe("decideSafety — multi-path vault writes (FR-041)", () => {
     expect(r.decision).toBe("auto-apply");
   });
 });
-

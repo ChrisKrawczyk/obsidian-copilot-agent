@@ -9,8 +9,8 @@ bash, or Python to change vault files directly.
 
 ## Problem
 
-Shell writes into the vault bypass the safety policy, so no approval is
-asked, and they bypass the Undo journal, so Undo can't revert them.
+Shell writes into the vault bypass the safety policy's vault-write
+approvals, and they bypass the Undo journal, so Undo can't revert them.
 Moves done through the shell also leave every wikilink pointing at the
 old path. Two gaps push the agent toward the shell:
 
@@ -26,13 +26,15 @@ unnecessary and less tempting.
 - **Preamble hard rule.** A short "Vault writes" block in the default
   preamble, also available in custom mode as `{{VAULT_WRITE_RULES}}`.
   It says every vault change goes through the vault tools, and the
-  shell may only read the vault or write outside it. Before falling
+  shell may only read the vault or write outside it (or in the agent's
+  session-state folder). Before falling
   back to the shell, the agent must stop and ask the user. Bulk
   operations (more than 5 items) need confirmation first.
-- **Batch tools with one approval and one Undo entry:**
+- **Batch tools with at most one approval prompt and one Undo entry
+  per call:**
   - `update_tasks` applies one patch to many `find_tasks` results.
   - `move_note` does link-aware moves and renames through
-    `fileManager.renameFile`.
+    `fileManager.renameFile`, so links follow Obsidian's link settings.
   - `bulk_edit` does a find/replace across notes. The approval shows a
     per-note preview.
 

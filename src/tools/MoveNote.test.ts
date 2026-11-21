@@ -246,6 +246,22 @@ describe("analyzeMoveNote validation", () => {
     ).toEqual(["1:overlapping_items"]);
   });
 
+  test("a file destination that another item needs as a parent folder is rejected in either order", () => {
+    const world = makeWorld(["a.md", "b.md"], []);
+    expect(
+      reasons(world, [
+        { from: "a.md", to: "Out" },
+        { from: "b.md", to: "Out/b.md" },
+      ]),
+    ).toEqual(["1:parent_is_file"]);
+    expect(
+      reasons(world, [
+        { from: "b.md", to: "Out/b.md" },
+        { from: "a.md", to: "Out" },
+      ]),
+    ).toEqual(["0:parent_is_file"]);
+  });
+
   test("a folder can't move into its own subtree", () => {
     const world = makeWorld(["F/n.md"], ["F"]);
     expect(reasons(world, [{ from: "F", to: "F/inner/F" }])).toEqual(["0:into_own_subtree"]);

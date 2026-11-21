@@ -352,7 +352,7 @@ function toolCallsSig(calls: ToolCall[] | undefined): string {
           c.approval?.summary?.length ?? 0
         }|${c.undoId ?? ""}|${c.undone ? "u" : ""}|${
           c.vaultChanges
-            ?.map((v) => `${v.type[0]}${v.path.length}.${v.oldPath?.length ?? 0}`)
+            ?.map((v) => `${v.type[0]}${v.path}<${v.oldPath ?? ""}`)
             .join(",") ?? ""
         }:${c.vaultChangesOverflow ?? 0}`,
     )

@@ -36,6 +36,15 @@ describe("applyBatchModifications", () => {
     expect(files.get("a.md")!.content).toBe("A");
   });
 
+  test("rolls back when the written snapshots exceed the budget", async () => {
+    const { vault, files } = makeVault({ "a.md": "aaaa", "b.md": "bbbb" });
+    const r = await applyBatchModifications([upper("a.md"), upper("b.md")], { vault }, 12);
+    expect(r).toMatchObject({ ok: false, path: "b.md", aborted: true, rollbackFailures: [] });
+    expect(r.ok ? "" : r.error).toMatch(/Undo snapshot limit/);
+    expect(files.get("a.md")!.content).toBe("aaaa");
+    expect(files.get("b.md")!.content).toBe("bbbb");
+  });
+
   test("an abort rolls back files already written", async () => {
     const { vault, files } = makeVault({ "a.md": "a", "b.md": "b" });
     const r = await applyBatchModifications(

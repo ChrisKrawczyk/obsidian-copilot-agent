@@ -76,6 +76,63 @@ function recordBatch(j: UndoJournal, items: UndoBatchItem[], label = "batch") {
 }
 
 describe("UndoJournal batch entries", () => {
+  test("an edit that lands while Undo runs aborts the batch instead of being overwritten", async () => {
+    const w = makeWorld();
+    w.files.set("a.md", "A2");
+    w.files.set("b.md", "B2");
+    const read = w.vault.cachedRead!;
+    let reads = 0;
+    w.vault.cachedRead = async (f) => {
+      const out = await read(f);
+      if (++reads === 2) w.files.set("a.md", "user edit");
+      return out;
+    };
+    const j = journal(w);
+    const e = recordBatch(j, [
+      { op: "modify", path: "a.md", before: "A1", after: "A2" },
+      { op: "modify", path: "b.md", before: "B1", after: "B2" },
+    ]);
+    const out = await j.undo(e.id);
+    expect(out.ok).toBe(false);
+    expect(out.reason).toMatch(/a\.md" changed while undoing/);
+    expect(w.files.get("a.md")).toBe("user edit");
+    expect(w.files.get("b.md")).toBe("B2");
+    expect(j.get(e.id)?.undone).toBeFalsy();
+  });
+
+  test("uses vault.process for guarded reverts when available", async () => {
+    const w = makeWorld();
+    w.files.set("a.md", "A2");
+    const processed: string[] = [];
+    w.vault.process = async (f, fn) => {
+      const p = (f as FakeFile).path;
+      processed.push(p);
+      const next = fn(w.files.get(p) ?? "");
+      w.files.set(p, next);
+      return next;
+    };
+    const j = journal(w);
+    const e = recordBatch(j, [{ op: "modify", path: "a.md", before: "A1", after: "A2" }]);
+    expect((await j.undo(e.id)).ok).toBe(true);
+    expect(processed).toEqual(["a.md"]);
+    expect(w.files.get("a.md")).toBe("A1");
+  });
+
+  test("case-only move undo treats a distinct file at the original spelling as occupied", async () => {
+    const w = makeWorld();
+    w.files.set("A.md", "moved");
+    w.files.set("a.md", "someone else");
+    const j = journal(w);
+    const e = recordBatch(j, [{ op: "move", from: "a.md", to: "A.md" }]);
+    const out = await j.undo(e.id);
+    expect(out.ok).toBe(false);
+    expect(out.divergentPaths).toEqual(["a.md"]);
+    const forced = await j.undo(e.id, { force: true });
+    expect(forced).toMatchObject({ ok: true, skippedPaths: ["a.md"] });
+    expect(w.files.get("a.md")).toBe("someone else");
+    expect(w.moves).toEqual([]);
+  });
+
   test("reverts every modify item atomically", async () => {
     const w = makeWorld();
     w.files.set("a.md", "A2");

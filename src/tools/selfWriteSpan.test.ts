@@ -63,6 +63,17 @@ describe("wrapToolsWithSelfWriteSpan", () => {
     expect(r.events).toEqual(["begin", "end:x.md"]);
   });
 
+  it("opens a span for read-only tools but settles no paths", async () => {
+    const r = recorder();
+    const [tool] = wrapToolsWithSelfWriteSpan(
+      [{ name: "read_note", handler: async () => ({ path: "x.md", content: "hi" }) }],
+      r.source,
+      (name) => name === "read_note",
+    );
+    await (tool.handler as (a: unknown) => Promise<unknown>)({ path: "x.md" });
+    expect(r.events).toEqual(["begin", "end:"]);
+  });
+
   it("preserves every other tool field", () => {
     const r = recorder();
     const parameters = { type: "object" };

@@ -196,7 +196,12 @@ export function isVaultPathAllowlisted(
   vaultPath: string,
   allowlist: string[],
 ): boolean {
-  const target = vaultPath.replace(/\\/g, "/").replace(/^\/+/, "");
+  const target = vaultPath
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  if (!target || target.split("/").some((seg) => seg === "." || seg === "..")) return false;
   for (const raw of allowlist) {
     const entry = normaliseAllowlistEntry(raw);
     if (!entry) continue;

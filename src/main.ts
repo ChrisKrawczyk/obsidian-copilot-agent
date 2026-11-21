@@ -34,6 +34,7 @@ import { createWriteNoteTools } from "./tools/WriteNoteTools";
 import { moveVaultItem, type MoveNoteFileManager, type MoveNoteVault } from "./tools/MoveNote";
 import { wrapToolsWithSelfWriteSpan } from "./tools/selfWriteSpan";
 import { VaultChangeDetector } from "./domain/VaultChangeDetector";
+import { ALL_VAULT_TOOL_ENTRIES } from "./domain/vaultToolManifest";
 import { describeVaultBatchApproval, extractBatchVaultPaths, type LinkIndex } from "./tools/approvalPreview";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
@@ -68,6 +69,9 @@ import {
 
 /** Obsidian autosaves about 2s after typing stops; allow some slack. */
 const USER_EDIT_SAVE_WINDOW_MS = 5000;
+const READ_ONLY_VAULT_TOOL_NAMES = new Set(
+  ALL_VAULT_TOOL_ENTRIES.filter((e) => e.readOnly).map((e) => e.name),
+);
 
 export interface McpLifecycleController {
   enableAllConfigured: () => Promise<void>;
@@ -643,9 +647,6 @@ export default class CopilotAgentPlugin extends Plugin {
     // that has actually been built. Lazily-uninstantiated runtimes
     // start with `currentToken` at construction time, so they don't
     // need broadcasts.
-    // The factory that ConversationManager uses to materialize a
-    // runtime on first activation. Captures all shared deps via
-    // closure; binds tools to the per-runtime journal.
     const vaultChangeDetector = new VaultChangeDetector({
       configDir: this.app.vault.configDir,
     });
@@ -689,6 +690,9 @@ export default class CopilotAgentPlugin extends Plugin {
       }),
     );
 
+    // The factory that ConversationManager uses to materialize a
+    // runtime on first activation. Captures all shared deps via
+    // closure; binds tools to the per-runtime journal.
     const runtimeFactory: ConversationRuntimeFactory = (
       metadata,
       hydration,
@@ -764,7 +768,7 @@ export default class CopilotAgentPlugin extends Plugin {
           ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ],
         exposeRawFsToolsAtStartup,
-      ), vaultChangeDetector);
+      ), vaultChangeDetector, (name) => READ_ONLY_VAULT_TOOL_NAMES.has(name));
       const mcpSnapshot = () =>
         buildMcpToolRegistrySnapshot({
           inventory: mcpManager.inventorySnapshot(),

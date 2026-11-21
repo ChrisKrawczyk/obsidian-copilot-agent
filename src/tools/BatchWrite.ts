@@ -1,7 +1,7 @@
 import { lookupTFile } from "./VaultPath";
 import { hasUnsavedEditorChanges, ProcessAbort, type WorkspaceForWrites, type WriteToolsVault } from "./WriteTools";
 import type { TFileLike } from "./ReadTools";
-import type { UndoBatchItem } from "../domain/UndoJournal";
+import { MAX_BATCH_SNAPSHOT_BYTES, batchSnapshotBytes, type UndoBatchItem } from "../domain/UndoJournal";
 
 /**
  * One file in a batch write. `path` must already be a resolved
@@ -29,14 +29,18 @@ export type BatchWriteResult =
  * Apply `plans` in order with no per-file undo entries. On the first
  * failure every file already written is restored to the content it had
  * before this call (only if it still holds what we wrote), and the
- * failure is returned. On success the caller records one batch entry
- * from `items`; unchanged files are omitted.
+ * failure is returned. The snapshot budget is re-checked against what
+ * was actually written, since notes can grow after validation. On
+ * success the caller records one batch entry from `items`; unchanged
+ * files are omitted.
  */
 export async function applyBatchModifications(
   plans: readonly BatchModifyPlan[],
   deps: { vault: WriteToolsVault },
+  maxSnapshotBytes: number = MAX_BATCH_SNAPSHOT_BYTES,
 ): Promise<BatchWriteResult> {
   const written: Extract<UndoBatchItem, { op: "modify" }>[] = [];
+  let bytes = 0;
   for (const plan of plans) {
     const r = await writeOne(plan, deps.vault);
     if (!r.ok) {
@@ -44,7 +48,19 @@ export async function applyBatchModifications(
       return { ok: false, path: plan.path, error: r.error, aborted: r.aborted, rollbackFailures };
     }
     if (r.before !== r.after) {
-      written.push({ op: "modify", path: plan.path, before: r.before, after: r.after });
+      const item = { op: "modify" as const, path: plan.path, before: r.before, after: r.after };
+      written.push(item);
+      bytes += batchSnapshotBytes([item]);
+      if (bytes > maxSnapshotBytes) {
+        const rollbackFailures = await rollback(written, deps.vault);
+        return {
+          ok: false,
+          path: plan.path,
+          error: `The notes grew past the ${maxSnapshotBytes}-byte Undo snapshot limit after validation.`,
+          aborted: true,
+          rollbackFailures,
+        };
+      }
     }
   }
   return { ok: true, items: written };

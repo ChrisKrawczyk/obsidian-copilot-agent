@@ -51,7 +51,17 @@ describe("externalWindowSignal", () => {
     ).toBeNull();
   });
 
-  it.each(["denied", "cancelled", "pending_approval", "completed", "errored"] as const)(
+  it.each(["denied", "cancelled"] as const)("cancels any window for %s calls", (outcome) => {
+    expect(
+      externalWindowSignal({ type: "tool_call_start", toolCall: { id: "t", source: "mcp", outcome } }, none),
+    ).toEqual({ kind: "cancel", toolCallId: "t" });
+    expect(externalWindowSignal({ type: "tool_call_complete", id: "t", outcome }, none)).toEqual({
+      kind: "cancel",
+      toolCallId: "t",
+    });
+  });
+
+  it.each(["pending_approval", "completed", "errored"] as const)(
     "does not open a window for %s calls",
     (outcome) => {
       expect(

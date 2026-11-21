@@ -128,6 +128,7 @@ export interface UndoJournalVault {
   cachedRead?: (file: unknown) => Promise<string>;
   create?: (path: string, content: string) => Promise<unknown>;
   modify?: (file: unknown, content: string) => Promise<unknown>;
+  process?: (file: unknown, fn: (data: string) => string) => Promise<string>;
   delete?: (file: unknown, system?: boolean) => Promise<void>;
   trash?: (file: unknown, system?: boolean) => Promise<void>;
 }
@@ -486,8 +487,11 @@ export class UndoJournal {
     try {
       for (const it of items) {
         if (it.op === "move") {
-          const toPresent = this.lookupAny(it.to) !== null;
-          const fromOccupied = !isCaseOnlyRename(it.from, it.to) && this.lookupAny(it.from) !== null;
+          const toObj = this.lookupAny(it.to);
+          const fromObj = this.lookupAny(it.from);
+          const toPresent = toObj !== null;
+          const fromOccupied =
+            fromObj !== null && !(isCaseOnlyRename(it.from, it.to) && fromObj === toObj);
           observed.push({ present: toPresent, fromOccupied });
           if (!toPresent) flag(it.to, "missing");
           else if (fromOccupied) flag(it.from, "existed");
@@ -533,7 +537,7 @@ export class UndoJournal {
           }
           await this.requireMove()(it.to, it.from);
         } else {
-          await this.revertItem(it);
+          await this.revertItem(it, obs);
         }
         reverted.push(i);
       }
@@ -553,13 +557,21 @@ export class UndoJournal {
       : { ok: true, divergence: "ok" };
   }
 
-  private async revertItem(it: Exclude<UndoBatchItem, { op: "move" }>): Promise<void> {
+  /**
+   * Revert one item, but only if it is still in the state observed by the
+   * preflight; an edit that lands while Undo runs aborts the batch (and
+   * triggers rollback) instead of being overwritten.
+   */
+  private async revertItem(it: Exclude<UndoBatchItem, { op: "move" }>, obs: Observed): Promise<void> {
     const file = this.lookup(it.path);
+    if (Boolean(file) !== obs.present) throw new Error(`"${it.path}" changed while undoing`);
     if (it.op === "create") {
-      if (file) await this.deleteVault(file);
+      if (!file) return;
+      await this.requireContent(it.path, file, obs.content ?? "");
+      await this.deleteVault(file);
       return;
     }
-    if (file) await this.modifyVault(file, it.before);
+    if (file) await this.writeIfUnchanged(it.path, file, obs.content ?? "", it.before);
     else await this.createVault(it.path, it.before);
   }
 
@@ -579,10 +591,13 @@ export class UndoJournal {
           continue;
         }
         const file = this.lookup(it.path);
-        if (obs.present && obs.content !== undefined) {
-          if (file) await this.modifyVault(file, obs.content);
+        if (it.op === "create") {
+          if (obs.present && obs.content !== undefined) await this.createVault(it.path, obs.content);
+        } else if (obs.present && obs.content !== undefined) {
+          if (file) await this.writeIfUnchanged(it.path, file, it.before, obs.content);
           else await this.createVault(it.path, obs.content);
         } else if (file) {
+          await this.requireContent(it.path, file, it.before);
           await this.deleteVault(file);
         }
       } catch (err) {
@@ -637,6 +652,22 @@ export class UndoJournal {
   private async modifyVault(file: unknown, content: string): Promise<unknown> {
     if (!this.vault.modify) throw new Error("Vault has no modify method");
     return this.vault.modify(file, content);
+  }
+
+  private async writeIfUnchanged(path: string, file: unknown, expected: string, content: string): Promise<void> {
+    if (this.vault.process) {
+      await this.vault.process(file, (current) => {
+        if (current !== expected) throw new Error(`"${path}" changed while undoing`);
+        return content;
+      });
+      return;
+    }
+    await this.requireContent(path, file, expected);
+    await this.modifyVault(file, content);
+  }
+
+  private async requireContent(path: string, file: unknown, expected: string): Promise<void> {
+    if ((await this.readVault(file)) !== expected) throw new Error(`"${path}" changed while undoing`);
   }
 
   private async deleteVault(file: unknown): Promise<void> {

@@ -146,6 +146,24 @@ describe("replaceAllCounted", () => {
       { before: "x4", after: "y4" },
     ]);
   });
+  test("stops counting past the limit and leaves the content untouched", () => {
+    const r = compileFind({ find: "x" });
+    if (!r.ok) throw new Error();
+    expect(replaceAllCounted("xxxxxx", r, "y", 3)).toEqual({
+      ok: true,
+      content: "xxxxxx",
+      count: 4,
+      samples: [],
+      overLimit: true,
+    });
+  });
+  test("samples of multi-line matches show line breaks as ⏎", () => {
+    const r = compileFind({ find: "a\nb" });
+    if (!r.ok) throw new Error();
+    const out = replaceAllCounted("a\nb", r, "c\nd");
+    if (!out.ok) throw new Error();
+    expect(out.samples).toEqual([{ before: "a⏎b", after: "c⏎d" }]);
+  });
   test("samples on long lines start near the match", () => {
     const r = compileFind({ find: "old" });
     if (!r.ok) throw new Error();
@@ -265,5 +283,14 @@ describe("bulkEditImpl", () => {
       count: 5001,
     });
     expect(content(world, "a.md")).toBe("x".repeat(5001));
+  });
+
+  test("counting stops once the replacement cap is exceeded across notes", async () => {
+    const world = makeWorld({ "a.md": "x".repeat(3000), "b.md": "x".repeat(30000), "c.md": "x" });
+    expect(await run({ paths: ["a.md", "b.md", "c.md"], find: "x", replace: "y" }, world).result).toMatchObject({
+      ok: false,
+      reason: "too_many_replacements",
+      count: 5001,
+    });
   });
 });

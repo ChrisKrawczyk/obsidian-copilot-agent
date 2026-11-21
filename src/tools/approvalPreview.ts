@@ -1,7 +1,7 @@
 import { parseTaskPatch } from "./UpdateTask";
 import { analyzeUpdateTasks, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksAnalysis } from "./UpdateTasks";
 import { parseBulkEditArgs, parseMoveItems, parseTaskTargets, type WriteNoteToolsDeps } from "./WriteNoteTools";
-import { analyzeBulkEdit, MAX_BULK_EDIT_NOTES, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
+import { analyzeBulkEdit, MAX_BULK_EDIT_NOTES, MAX_BULK_EDIT_REPLACEMENTS, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
 import { analyzeMoveNote, type MoveNoteAnalysis, type MoveNoteVault } from "./MoveNote";
 
 export const MAX_PREVIEW_CHARS = 4000;
@@ -14,15 +14,20 @@ export interface ApprovalDescription {
 /**
  * Join `lines` until the next one would push past `maxChars`, then add
  * an "… and N more" line for whatever was left out. An entry may span
- * several lines; it is kept or dropped as a whole.
+ * several lines; it is kept or dropped as a whole, and the result never
+ * exceeds `maxChars`.
  */
 export function boundPreview(lines: readonly string[], maxChars = MAX_PREVIEW_CHARS): string {
+  const whole = lines.join("\n");
+  if (whole.length <= maxChars) return whole;
+  const marker = (left: number) => `… and ${left} more`;
   const out: string[] = [];
   let used = 0;
   for (let i = 0; i < lines.length; i++) {
     const cost = lines[i].length + (out.length > 0 ? 1 : 0);
-    if (used + cost > maxChars) {
-      out.push(`… and ${lines.length - i} more`);
+    const reserve = marker(lines.length - i - 1).length + 1;
+    if (used + cost + reserve > maxChars) {
+      out.push(marker(lines.length - i));
       break;
     }
     out.push(lines[i]);
@@ -77,7 +82,7 @@ export function formatMoveNotePreview(analysis: MoveNoteAnalysis, index?: LinkIn
   for (const p of analysis.plans) {
     const linking = countLinkingNotes(index, p.from, p.kind);
     const kind = p.kind === "folder" ? " (folder)" : "";
-    const links = linking > 0 ? ` — links in ${plural(linking, "note")}` : "";
+    const links = index?.resolvedLinks ? ` — links in ${plural(linking, "note")}` : "";
     lines.push(`${p.from} → ${p.to}${kind}${links}`);
   }
   return boundPreview(lines);
@@ -107,23 +112,24 @@ function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
 
-/** Every vault path a batch tool call would touch, or undefined for other tools. */
+/**
+ * Every vault path a batch tool call would touch, or undefined for other
+ * tools. Empty or non-string entries are kept as "" so a malformed call
+ * can never be covered by the allowlist.
+ */
 export function extractBatchVaultPaths(toolName: string, args: unknown): string[] | undefined {
   const a = asRecord(args);
   if (toolName === "update_tasks") {
     if (!Array.isArray(a.targets)) return undefined;
-    const paths = parseTaskTargets(a.targets).map((t) => t.path).filter((p) => p.length > 0);
-    return [...new Set(paths)];
+    return [...new Set(parseTaskTargets(a.targets).map((t) => t.path))];
   }
   if (toolName === "bulk_edit") {
     if (!Array.isArray(a.paths)) return undefined;
-    const paths = a.paths.filter((p): p is string => typeof p === "string" && p.length > 0);
-    return [...new Set(paths)];
+    return [...new Set(a.paths.map((p) => (typeof p === "string" ? p : "")))];
   }
   if (toolName === "move_note") {
     if (!Array.isArray(a.moves)) return undefined;
-    const paths = parseMoveItems(a.moves).flatMap((m) => [m.from, m.to]).filter((p) => p.length > 0);
-    return [...new Set(paths)];
+    return [...new Set(parseMoveItems(a.moves).flatMap((m) => [m.from, m.to]))];
   }
   return undefined;
 }
@@ -169,6 +175,12 @@ export async function describeVaultBatchApproval(
     if (input.paths.length > MAX_BULK_EDIT_NOTES) return undefined;
     const analysis = await analyzeBulkEdit(input, deps);
     if (!analysis.ok) return { summary: "bulk_edit: invalid find", detail: analysis.error };
+    if (analysis.overLimit) {
+      return {
+        summary: `bulk_edit: more than ${MAX_BULK_EDIT_REPLACEMENTS} replacements`,
+        detail: `The edit matches more than ${MAX_BULK_EDIT_REPLACEMENTS} times and will be rejected without changes.`,
+      };
+    }
     const matched = analysis.notes.filter((n) => n.replacements > 0).length;
     return {
       summary: `bulk_edit: ${plural(analysis.totalReplacements, "replacement")} in ${plural(matched, "note")}`,

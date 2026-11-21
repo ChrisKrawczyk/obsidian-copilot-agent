@@ -126,6 +126,32 @@ describe("VaultChangeDetector", () => {
     expect(detector.observe({ type: "modify", path: "4.md" })?.toolCallId).toBe("a");
   });
 
+  it("drops a cancelled call's window without a grace period", () => {
+    const { detector } = setup();
+    detector.externalToolStarted("mcp1");
+    detector.externalToolCancelled("mcp1");
+    expect(detector.observe({ type: "modify", path: "a.md" })).toBeNull();
+    detector.externalToolStarted("mcp2");
+    detector.externalToolCompleted("mcp2");
+    detector.externalToolCancelled("mcp2");
+    expect(detector.observe({ type: "modify", path: "a.md" })).toBeNull();
+  });
+
+  it("matches settled paths after normalising and covers files under a settled folder", () => {
+    const { detector } = setup();
+    detector.beginSelfWrite().end(["Projects//Old/", "Inbox\\Note.md"]);
+    detector.externalToolStarted("sh1");
+    expect(detector.observe({ type: "modify", path: "projects/old/a.md" })).toBeNull();
+    expect(detector.observe({ type: "modify", path: "inbox/note.md" })).toBeNull();
+    expect(detector.observe({ type: "modify", path: "projects/older.md" })?.change.path).toBe("projects/older.md");
+  });
+
+  it("compares the focused note path after normalising", () => {
+    const { detector } = setup();
+    detector.externalToolStarted("sh1");
+    expect(detector.observe({ type: "modify", path: "Inbox/Note.md" }, "inbox\\note.md")).toBeNull();
+  });
+
   it("ignores completion of unknown calls and supports unsubscribe", () => {
     const { detector } = setup();
     detector.externalToolCompleted("ghost");

@@ -35,11 +35,11 @@ export function formatVaultChangeWarning(
   return { headline, lines, footnote };
 }
 
-export type ExternalWindowSignal = { kind: "start" | "end"; toolCallId: string } | null;
+export type ExternalWindowSignal = { kind: "start" | "end" | "cancel"; toolCallId: string } | null;
 
 export type ToolStreamEvent =
   | { type: "tool_call_start"; toolCall: Pick<ToolCall, "id" | "source" | "outcome"> }
-  | { type: "tool_call_complete"; id: string }
+  | { type: "tool_call_complete"; id: string; outcome?: string }
   | { type: "approval_resolved"; id: string; choice: { kind: string } }
   | { type: string };
 
@@ -47,10 +47,15 @@ function isExternal(source: ToolCall["source"]): boolean {
   return source === "builtin" || source === "mcp";
 }
 
+function didNotRun(outcome: string | undefined): boolean {
+  return outcome === "denied" || outcome === "cancelled";
+}
+
 /**
  * Which stream events open or close an out-of-band detection window.
  * Only built-in and MCP calls that actually run open one; denied,
- * cancelled and still-pending calls never do.
+ * cancelled and still-pending calls never do. A call rejected after its
+ * approval (e.g. MCP metadata changed) cancels its window without grace.
  */
 export function externalWindowSignal(
   ev: ToolStreamEvent,
@@ -58,6 +63,7 @@ export function externalWindowSignal(
 ): ExternalWindowSignal {
   if (ev.type === "tool_call_start" && "toolCall" in ev) {
     const tc = ev.toolCall;
+    if (didNotRun(tc.outcome)) return { kind: "cancel", toolCallId: tc.id };
     if (tc.outcome !== "approved") return null;
     return isExternal(tc.source ?? sourceOf(tc.id)) ? { kind: "start", toolCallId: tc.id } : null;
   }
@@ -67,7 +73,8 @@ export function externalWindowSignal(
     return isExternal(sourceOf(ev.id)) ? { kind: "start", toolCallId: ev.id } : null;
   }
   if (ev.type === "tool_call_complete" && "id" in ev) {
-    return { kind: "end", toolCallId: ev.id };
+    const outcome = "outcome" in ev ? ev.outcome : undefined;
+    return { kind: didNotRun(outcome) ? "cancel" : "end", toolCallId: ev.id };
   }
   return null;
 }

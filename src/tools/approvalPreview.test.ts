@@ -7,6 +7,7 @@ import {
   countLinkingNotes,
   describeVaultBatchApproval,
   extractBatchVaultPaths,
+  formatMoveNotePreview,
   formatUpdateTasksPreview,
   MAX_PREVIEW_CHARS,
 } from "./approvalPreview";
@@ -39,13 +40,25 @@ describe("boundPreview", () => {
     expect(boundPreview(["a", "b"], 10)).toBe("a\nb");
   });
   test("truncates with an 'and N more' line", () => {
-    expect(boundPreview(["aaaa", "bbbb", "cccc", "dddd"], 10)).toBe("aaaa\nbbbb\n… and 2 more");
+    const out = boundPreview(["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"], 25);
+    expect(out).toBe("aaaa\nbbbb\n… and 4 more");
+    expect(out.length).toBeLessThanOrEqual(25);
   });
   test("default limit keeps output near the approval detail cap", () => {
     const lines = Array.from({ length: 500 }, (_, i) => `line ${i} ${"x".repeat(40)}`);
     const out = boundPreview(lines);
-    expect(out.length).toBeLessThanOrEqual(MAX_PREVIEW_CHARS + 30);
+    expect(out.length).toBeLessThanOrEqual(MAX_PREVIEW_CHARS);
     expect(out).toMatch(/… and \d+ more$/);
+  });
+});
+
+describe("formatMoveNotePreview", () => {
+  const analysis = { failures: [], plans: [{ from: "a.md", to: "b.md", kind: "file" as const }] };
+  test("reports zero linking notes when the link index is available", () => {
+    expect(formatMoveNotePreview(analysis, { resolvedLinks: {} })).toBe("a.md → b.md — links in 0 notes");
+  });
+  test("omits the link count without an index", () => {
+    expect(formatMoveNotePreview(analysis)).toBe("a.md → b.md");
   });
 });
 
@@ -83,12 +96,12 @@ describe("formatUpdateTasksPreview", () => {
 });
 
 describe("extractBatchVaultPaths", () => {
-  test("returns the distinct target paths for update_tasks", () => {
+  test("returns the distinct target paths for update_tasks, keeping malformed entries as empty", () => {
     expect(
       extractBatchVaultPaths("update_tasks", {
         targets: [{ path: "a.md" }, { path: "b.md" }, { path: "a.md" }, { nope: 1 }],
       }),
-    ).toEqual(["a.md", "b.md"]);
+    ).toEqual(["a.md", "b.md", ""]);
   });
   test("returns every source and destination for move_note", () => {
     expect(
@@ -99,10 +112,10 @@ describe("extractBatchVaultPaths", () => {
           { from: "a.md", to: "" },
         ],
       }),
-    ).toEqual(["a.md", "x/a.md", "F", "G"]);
+    ).toEqual(["a.md", "x/a.md", "F", "G", ""]);
   });
   test("returns the distinct paths for bulk_edit", () => {
-    expect(extractBatchVaultPaths("bulk_edit", { paths: ["a.md", "a.md", 3, "b.md"] })).toEqual(["a.md", "b.md"]);
+    expect(extractBatchVaultPaths("bulk_edit", { paths: ["a.md", "a.md", 3, "b.md"] })).toEqual(["a.md", "", "b.md"]);
   });
   test("is undefined for other tools or malformed args", () => {
     expect(extractBatchVaultPaths("edit_note", { path: "a.md" })).toBeUndefined();
@@ -148,6 +161,7 @@ describe("describeVaultBatchApproval", () => {
             "b.md": { "a.md": 2, "F/n.md": 1 },
             "taken.md": { "a.md": 1 },
             "F/n.md": { "F/n.md": 1 },
+            "c.md": {},
           },
         },
       },
