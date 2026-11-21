@@ -371,7 +371,8 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           `${PREAMBLE_PLACEHOLDERS.VAULT_TIMEZONE}, ` +
           `${PREAMBLE_PLACEHOLDERS.VAULT_TODAY}, ` +
           `${PREAMBLE_PLACEHOLDERS.VAULT_TOOL_INVENTORY}, ` +
-          `${PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS}. ` +
+          `${PREAMBLE_PLACEHOLDERS.AUTHORING_CONVENTIONS}, ` +
+          `${PREAMBLE_PLACEHOLDERS.VAULT_WRITE_RULES}. ` +
           "Placeholders are substituted only when present in the body.",
       )
       .addTextArea((ta) => {
