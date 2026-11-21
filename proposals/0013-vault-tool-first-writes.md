@@ -1,6 +1,6 @@
 # 0013 — Vault tool-first writes
 
-**Status:** In Progress
+**Status:** Shipped — [PR #24](https://github.com/ChrisKrawczyk/obsidian-copilot-agent/pull/24)
 **Created:** 2026-11-20
 **Owner:** unassigned
 **Origin:** observed agent behaviour. When a vault tool was slow, needed
