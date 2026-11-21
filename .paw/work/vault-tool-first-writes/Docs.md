@@ -64,7 +64,7 @@ vault.on(create|modify|delete|rename) ──► VaultChangeDetector ──► Ch
 - **Batch Undo is atomic.**
   - Every item is checked for divergence before any is reverted. Without force, nothing is reverted and the divergent paths are listed.
   - With force:
-    - every item is reverted, except moves whose original path is now taken by a different file; those are skipped and reported;
+    - every item is reverted, except moves whose moved item is gone or whose original path is now taken by a different file; those are skipped and reported;
     - a note deleted since the action is recreated from its snapshot.
   - If a write fails partway through an Undo, the items already reverted are put back to the state seen just before the Undo began, and the entry stays undoable.
 - **Size caps keep persisted data bounded:**
@@ -88,7 +88,7 @@ vault.on(create|modify|delete|rename) ──► VaultChangeDetector ──► Ch
 
 - **`src/domain/vaultToolManifest.ts`**: the three tools are registered as mutating vault tools. This keeps the preamble inventory, safety classification and raw-FS tool gating in lockstep, and `src/main.toolGating.test.ts` checks it.
 - **`src/domain/SafetyPolicy.ts`**: the new tools fall under the `vault` source. A multi-path call is auto-approved through the allowlist only when every path it touches is covered. For moves that means every source and every destination.
-- **`src/sdk/AgentSession.ts`**: `describeApproval` builds the preview, with a 2 s timeout. If the preview fails, the raw arguments are shown instead, and the approval is never blocked.
+- **`src/sdk/AgentSession.ts`**: calls the `describeApproval` hook (wired in `main.ts` to `describeVaultBatchApproval`) to build the preview, with a 2 s timeout. If the preview fails or times out, the default prompt is shown instead, and the approval is never blocked.
 - **`src/ui/undoFlow.ts` and `ToolCallBlock.ts`**: the Undo button works for the new tools. For a batch entry, the divergence confirmation lists the affected paths.
 - **Persistence (`PersistedShape.ts`, `migrate.ts`)**:
   - Batch Undo entries and `ToolCall.vaultChanges` / `vaultChangesOverflow` are saved with the conversation.
@@ -170,7 +170,7 @@ The automated checks are `npm test` (122 files, about 1,840 tests) and `npx tsc 
 - **Note changed between validation and write:** everything already written is rolled back, and the result reports a concurrent change.
 - **Move conflicts:** a destination that already exists, a folder moved into its own subtree, or a destination that is another item's source are all rejected.
 - **Undo after a note was deleted:** the divergence prompt appears. A forced Undo recreates the note from the snapshot.
-- **Undo of a move whose original path is now taken by a different file:** that item is skipped and reported.
+- **Forced Undo of a move whose moved item is gone, or whose original path is now taken by a different file:** that item is skipped and reported.
 - **Overlapping tools:** if two external tools run at the same time, a change is attributed to the most recently started one.
 - **More than 20 changes:** the warning lists 20 and adds "…plus N more change(s) not listed".
 
