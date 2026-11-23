@@ -58,8 +58,8 @@ unnecessary and less tempting.
   table row as the new content. `replace_in_note` now makes one literal,
   count-checked edit inside a note with a diff preview and one Undo
   entry. The preamble steers in-note changes to it. Every tool hint was
-  corrected against its real description and schema, and a test keeps
-  them in sync.
+  corrected against its real description and schema, and a test fails
+  if a hint names a parameter, mode, or tool that doesn't exist.
 - **Out of scope: a full-overwrite guard (dropped).** Refusing large
   shrinks on `edit_file`/`edit_note` replace, with an override flag and
   forced manual approval, was considered and dropped: it adds friction
