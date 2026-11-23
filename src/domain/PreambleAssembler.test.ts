@@ -58,9 +58,16 @@ describe("assemblePreamble", () => {
       expect(c).toContain("one `bulk_edit` call");
     });
 
+    it("steers in-note edits to replace_in_note and reserves full replace for whole rewrites", () => {
+      const c = AUTHORING_CONVENTIONS_BLOCK;
+      expect(c).toContain("for a change inside a note, use `replace_in_note`");
+      expect(c).toMatch(/only when rewriting the whole note on purpose, and always pass the complete new content/);
+      expect(c.indexOf("`replace_in_note`")).toBeLessThan(c.indexOf("`bulk_edit`"));
+    });
+
     it("names the batch tools in both inventories", () => {
       for (const block of [VAULT_TOOL_INVENTORY_BLOCK, VAULT_TOOL_INVENTORY_BLOCK_GATED]) {
-        for (const name of ["update_tasks", "move_note", "bulk_edit"]) expect(block).toContain(`\`${name}\``);
+        for (const name of ["update_tasks", "move_note", "bulk_edit", "replace_in_note"]) expect(block).toContain(`\`${name}\``);
       }
     });
   });

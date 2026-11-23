@@ -19,7 +19,7 @@
 export interface VaultToolEntry {
   /** Tool name as registered with the SDK. */
   name: string;
-  /** One-line usage hint surfaced in the preamble. Keep ≤120 chars. */
+  /** One-line usage hint surfaced in the preamble; must agree with the tool's description and schema (main.toolManifest.test.ts). */
   hint: string;
   /** True for read-only tools — used by Phase 3 to set `skipPermission`. */
   readOnly: boolean;
@@ -138,7 +138,7 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "create_task",
-    hint: "Append a Tasks-plugin-compatible checkbox line (with optional 📅 YYYY-MM-DD due) to the daily note or a configured path.",
+    hint: "Append a task line to the daily note or a configured path: Tasks-plugin emoji syntax when that plugin is on, otherwise GFM `- [ ]` with text dates.",
     readOnly: false,
   },
   {

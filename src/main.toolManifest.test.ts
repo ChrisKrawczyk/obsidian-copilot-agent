@@ -53,7 +53,8 @@ function hintTokens(hint: string): string[] {
   const tokens: string[] = [];
   for (const m of hint.matchAll(/`([^`]+)`/g)) tokens.push(...(m[1].match(IDENT) ?? []));
   for (const m of hint.matchAll(/(?<![A-Za-z0-9])'([A-Za-z_][A-Za-z0-9_-]*)'(?![A-Za-z0-9])/g)) tokens.push(m[1]);
-  return tokens;
+  for (const m of hint.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g)) tokens.push(m[0]);
+  return [...new Set(tokens)];
 }
 
 /** Tokens in `hint` that the tool's schema, its description, or the tool list don't back up. */
@@ -66,7 +67,10 @@ function unbackedHintTokens(entry: Pick<VaultToolEntry, "hint">, tool: Registere
 const tools = registeredTools();
 const byName = new Map(tools.map((t) => [t.name, t]));
 const toolNames = new Set(byName.keys());
-const FULL_OVERWRITE_TOOLS = ["edit_file", "edit_note", "insert_into_active_note"];
+const FULL_OVERWRITE_TOOLS = [
+  "edit_file",
+  ...tools.filter((t) => JSON.stringify(t.parameters ?? {}).match(/"enum":\[[^\]]*"replace"/)).map((t) => t.name),
+];
 
 describe("vault tool manifest matches the registered tools", () => {
   test("every manifest entry is registered and every registered vault tool is in the manifest", () => {
@@ -90,6 +94,7 @@ describe("vault tool manifest matches the registered tools", () => {
   });
 
   test("hints of full-overwrite tools say they overwrite the whole note", () => {
+    expect(FULL_OVERWRITE_TOOLS).toEqual(expect.arrayContaining(["edit_file", "edit_note", "insert_into_active_note"]));
     const missing = FULL_OVERWRITE_TOOLS.flatMap((name) => {
       const hint = ALL_VAULT_TOOL_ENTRIES.find((e) => e.name === name)?.hint ?? "";
       const description = byName.get(name)?.description ?? "";
@@ -117,6 +122,7 @@ describe("vault tool manifest matches the registered tools", () => {
     const edit = byName.get("edit_note")!;
     expect(unbackedHintTokens({ hint: "Modes: `append`, 'cursor'." }, edit, toolNames)).toEqual(["cursor"]);
     expect(unbackedHintTokens({ hint: "Prefer `read_note`." }, edit, toolNames)).toEqual(["read_note"]);
+    expect(unbackedHintTokens({ hint: "Then call read_note." }, edit, toolNames)).toEqual(["read_note"]);
     expect(unbackedHintTokens({ hint: "Obsidian's notes, today's date." }, edit, toolNames)).toEqual([]);
   });
 });
