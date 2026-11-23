@@ -3,9 +3,9 @@
 All notable changes to this project are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.12.0] - 2026-11-23
 
-The agent now has batch tools for bulk task changes, moves, renames, and find/replace, a tool for one targeted edit inside a note, and is told never to change vault files with shell commands.
+The agent now has batch tools for bulk task changes, moves, renames, and find/replace, a tool for one targeted edit inside a note, and is told never to change vault files with shell commands. This release also fixes an Obsidian crash (blank window) when starting a new chat or updating the plugin.
 
 ### Added
 
@@ -15,6 +15,7 @@ The agent now has batch tools for bulk task changes, moves, renames, and find/re
 
 ### Fixed
 
+- **Obsidian could crash (blank window) on the first message of a new chat, or right after updating the plugin.** The Copilot SDK's `AsyncLocalStorage` uses a V8 storage slot that Obsidian's renderer also uses. When a Copilot client started during a click, such as Send in a new chat or BRAT's update button, V8 could abort the renderer with `Fatal error in V8: Isolate::PushStackTraceAndDie null prototype chain root`. The plugin now gives the SDK a version of `AsyncLocalStorage` that doesn't use that slot. This is likely also the cause of the blank window after BRAT updates (#21). (`src/sdk/rendererSafeAsyncHooks.ts`, `scripts/rendererSafeAsyncHooksPlugin.mjs`.)
 - **The preamble described `edit_file` as replacing one block of text; it overwrites the whole file.** A model that trusted the description replaced a whole note with a single table row. The `edit_file` hint and description now say it overwrites the whole file and point to `replace_in_note`. Other hints that didn't match their tools were corrected too: `read_file` (256 KB cut-off), `search_content` (the `simple` mode), `insert_into_active_note` (no cursor mode; `replace` overwrites the note), `edit_note`, `create_task`, `search_vault`, `find_tasks`, and the navigation tools. The preamble no longer mentions a non-existent `read_note` tool. A new test fails if a hint names a parameter, mode, or tool that the registered tool doesn't have, or if an overwriting tool's hint and description don't say so. (`src/domain/vaultToolManifest.ts`, `src/main.toolManifest.test.ts`.)
 
 ### Changed
