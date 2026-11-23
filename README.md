@@ -47,6 +47,8 @@ Three batch tools make the vault-tool path the easy one. Each asks for approval 
 
 Each tool checks every target first. If any target fails, nothing is written. If a write fails partway, the earlier writes are rolled back.
 
+For a change inside one note, the agent uses **`replace_in_note`**. It replaces one exact piece of text (`oldText`) with new text and fails, naming the number of matches it found, unless that text appears exactly `expectedOccurrences` times (default 1). The approval shows a diff with a couple of lines of context, and Undo restores the note. `edit_file` and `edit_note` with mode `replace` overwrite the whole note, so the agent is told to use them only when rewriting a note on purpose and always to pass the complete new content.
+
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
@@ -268,7 +270,7 @@ Platform detection logic is unit-tested for every tuple, but manual end-to-end s
 
 The plugin enforces a single deny-by-default permission gate that every mutating tool call flows through:
 
-- **Custom write tools** (`create_file`, `edit_file`, `delete_file`, `edit_note`, `update_task`, `update_tasks`, `move_note`, `bulk_edit`, …) → SafetyPolicy. A batch call skips the prompt via the path allowlist only when every path it touches is allowlisted. An allowlisted `move_note` can still rewrite links in notes outside the allowlist.
+- **Custom write tools** (`create_file`, `edit_file`, `delete_file`, `edit_note`, `replace_in_note`, `update_task`, `update_tasks`, `move_note`, `bulk_edit`, …) → SafetyPolicy. A batch call skips the prompt via the path allowlist only when every path it touches is allowlisted. An allowlisted `move_note` can still rewrite links in notes outside the allowlist.
 - **SDK built-ins** (`shell`, `write`, `view`, `web_fetch`, `memory`, etc.) → SafetyPolicy.
 - **MCP tool calls** → SafetyPolicy.
 

@@ -52,6 +52,19 @@ unnecessary and less tempting.
   writes treats intended behaviour as suspect. The agent should prefer
   the vault tools, but external writes are neither blocked nor flagged.
 
+- **`replace_in_note` and accurate tool hints (added later).** The
+  preamble described `edit_file` as replacing one block of text, but it
+  overwrites the whole file, and a model wiped a note by passing one
+  table row as the new content. `replace_in_note` now makes one literal,
+  count-checked edit inside a note with a diff preview and one Undo
+  entry. The preamble steers in-note changes to it. Every tool hint was
+  corrected against its real description and schema, and a test keeps
+  them in sync.
+- **Out of scope: a full-overwrite guard (dropped).** Refusing large
+  shrinks on `edit_file`/`edit_note` replace, with an override flag and
+  forced manual approval, was considered and dropped: it adds friction
+  to legitimate large rewrites.
+
 ## Open questions
 
 - None open. Detecting or flagging external writes is out of scope; see
