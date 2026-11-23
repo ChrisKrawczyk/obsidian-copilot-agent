@@ -41,3 +41,4 @@ Short design docs for future work items. One file per proposal.
 | 0010 | Agent-native vault navigation tools                | Shipped (v0.10.0) |
 | 0011 | Dataview inter-plugin query tool                   | Draft  |
 | 0012 | Operation-aware undo for contended vault writes    | Draft  |
+| 0013 | Vault tool-first writes                            | Shipped ([#24](https://github.com/ChrisKrawczyk/obsidian-copilot-agent/pull/24)) |

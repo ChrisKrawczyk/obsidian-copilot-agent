@@ -84,10 +84,10 @@ export function createReadTools(vault: ReadToolsVault): Tool[] {
   return [
     defineTool("read_file", {
       description:
-        "Read the full contents of a single markdown note from the " +
-        "active Obsidian vault. The path is vault-relative (e.g. " +
-        '"inbox/today.md"). Absolute paths and paths containing ".." ' +
-        "are rejected.",
+        "Read the text of a single file in the active Obsidian vault. " +
+        'The path is vault-relative (e.g. "inbox/today.md"). Absolute ' +
+        'paths and paths containing ".." are rejected. Text past ' +
+        "262,144 characters is cut off and `truncated` is set to true.",
       parameters: {
         type: "object",
         required: ["path"],

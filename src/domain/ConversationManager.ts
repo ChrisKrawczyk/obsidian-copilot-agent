@@ -747,6 +747,7 @@ export class ConversationManager {
               after: entry.after,
               recordedAt: entry.recordedAt,
               undone: entry.undone,
+              ...(entry.items ? { items: entry.items, label: entry.label } : {}),
             });
           } else if (op === "mark-undone") {
             store.markUndone(id, entry.id);

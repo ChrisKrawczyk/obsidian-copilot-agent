@@ -187,7 +187,7 @@ export function createReadNoteTools(
         "`path` is given) filtered by status, tag, due-date range, and/or " +
         "description regex. Returns up to 500 results with 1-based line " +
         "numbers, the raw line text, and the parsed task. Read-only — use " +
-        "BEFORE `update_task` and pass back the `path`, `line`, AND " +
+        "BEFORE `update_task` or `update_tasks` and pass back the `path`, `line`, AND " +
         "`expectedRawLine` from each result for safe re-anchoring.",
       parameters: {
         type: "object",

@@ -26,7 +26,36 @@
 import type { TFile, Vault } from "obsidian";
 import type { PersistedUndoEntry } from "../persistence/PersistedShape";
 
-export type UndoKind = "create" | "modify" | "delete";
+export type UndoKind = "create" | "modify" | "delete" | "batch";
+
+/**
+ * One reversible operation inside a `batch` entry. A batch is undone
+ * atomically: every item is checked for divergence before any is reverted.
+ */
+export type UndoBatchItem =
+  | { op: "modify"; path: string; before: string; after: string }
+  | { op: "create"; path: string; after: string }
+  | { op: "delete"; path: string; before: string }
+  | { op: "move"; from: string; to: string };
+
+/** Combined snapshot budget for one batch entry (before + after content). */
+export const MAX_BATCH_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+
+const utf8 = new TextEncoder();
+
+export function batchSnapshotBytes(items: readonly UndoBatchItem[]): number {
+  let total = 0;
+  for (const it of items) {
+    if (it.op === "modify") total += utf8.encode(it.before).length + utf8.encode(it.after).length;
+    else if (it.op === "create") total += utf8.encode(it.after).length;
+    else if (it.op === "delete") total += utf8.encode(it.before).length;
+  }
+  return total;
+}
+
+export function batchItemPath(it: UndoBatchItem): string {
+  return it.op === "move" ? it.to : it.path;
+}
 
 export type UndoScope = "vault" | "extra-vault";
 
@@ -44,6 +73,10 @@ export interface UndoEntry {
   recordedAt: number;
   /** True once `undo` has run successfully — entry is then inert. */
   undone?: boolean;
+  /** Ordered operations of a `batch` entry. */
+  items?: UndoBatchItem[];
+  /** Short human summary of a batch, e.g. "8 tasks in 3 notes". */
+  label?: string;
 }
 
 export interface UndoOutcome {
@@ -67,6 +100,10 @@ export interface UndoOutcome {
    *                    occupied by a different file.
    */
   divergence?: "ok" | "modified" | "missing" | "existed";
+  /** Batch entries: every path whose current state diverged. */
+  divergentPaths?: string[];
+  /** Forced batch undo: move items left in place because reverting would overwrite or the item is gone. */
+  skippedPaths?: string[];
 }
 
 /** Options accepted by `undo()`. */
@@ -91,6 +128,7 @@ export interface UndoJournalVault {
   cachedRead?: (file: unknown) => Promise<string>;
   create?: (path: string, content: string) => Promise<unknown>;
   modify?: (file: unknown, content: string) => Promise<unknown>;
+  process?: (file: unknown, fn: (data: string) => string) => Promise<string>;
   delete?: (file: unknown, system?: boolean) => Promise<void>;
   trash?: (file: unknown, system?: boolean) => Promise<void>;
 }
@@ -133,6 +171,8 @@ export interface UndoJournalOptions {
   loadOptions?: { ttlMs: number };
   /** Wall-clock shim for tests. */
   now?: () => number;
+  /** Link-aware move used to revert `move` batch items. */
+  moveItem?: (from: string, to: string) => Promise<void>;
 }
 
 const DEFAULT_MAX_ENTRIES = 50;
@@ -147,6 +187,7 @@ export class UndoJournal {
   private readonly maxEntries: number;
   private readonly loadTtlMs?: number;
   private readonly now: () => number;
+  private readonly moveItem?: (from: string, to: string) => Promise<void>;
 
   /**
    * Backward-compatible constructor: legacy callers passed a vault
@@ -160,6 +201,7 @@ export class UndoJournal {
       this.maxEntries = arg.maxEntries ?? DEFAULT_MAX_ENTRIES;
       this.loadTtlMs = arg.loadOptions?.ttlMs;
       this.now = arg.now ?? (() => Date.now());
+      this.moveItem = arg.moveItem;
       // Hydrate. We don't fire `persist("add", ...)` for hydrated
       // entries — they're already in the store. We DO fire
       // `persist("evict", ...)` for TTL-expired entries so the store
@@ -178,6 +220,8 @@ export class UndoJournal {
               after: e.after,
               recordedAt: e.recordedAt,
               undone: e.undone,
+              items: e.items,
+              label: e.label,
             };
             this.safePersist("evict", ghost);
             continue;
@@ -255,6 +299,8 @@ export class UndoJournal {
         reason: "Undo for extra-vault writes is not supported in this phase.",
       };
     }
+
+    if (e.kind === "batch") return this.undoBatch(e, options);
 
     try {
       switch (e.kind) {
@@ -408,6 +454,8 @@ export class UndoJournal {
       after: p.after,
       recordedAt: p.recordedAt,
       undone: p.undone,
+      items: p.items,
+      label: p.label,
     };
     this.entries.set(p.id, entry);
     this.insertionOrder.push(p.id);
@@ -419,6 +467,150 @@ export class UndoJournal {
       const n = Number(m[1]);
       if (Number.isFinite(n) && n > this.idCounter) this.idCounter = n;
     }
+  }
+
+  private async undoBatch(e: UndoEntry, options: UndoOptions): Promise<UndoOutcome> {
+    const items = e.items ?? [];
+    if (items.length === 0) return { ok: false, reason: "Batch undo entry has no items." };
+    if (!this.moveItem && items.some((it) => it.op === "move")) {
+      return { ok: false, reason: "Undo failed: Moving files back is not available." };
+    }
+
+    const observed: Observed[] = [];
+    const divergentPaths: string[] = [];
+    let firstDivergence: UndoOutcome["divergence"];
+    const flag = (path: string, kind: NonNullable<UndoOutcome["divergence"]>): void => {
+      divergentPaths.push(path);
+      firstDivergence ??= kind;
+    };
+
+    try {
+      for (const it of items) {
+        if (it.op === "move") {
+          const toObj = this.lookupAny(it.to);
+          const fromObj = this.lookupAny(it.from);
+          const toPresent = toObj !== null;
+          const fromOccupied =
+            fromObj !== null && !(isCaseOnlyRename(it.from, it.to) && fromObj === toObj);
+          observed.push({ present: toPresent, fromOccupied });
+          if (!toPresent) flag(it.to, "missing");
+          else if (fromOccupied) flag(it.from, "existed");
+          continue;
+        }
+        const file = this.lookup(it.path);
+        const content = file ? await this.readVault(file) : undefined;
+        observed.push({ present: file !== null, content });
+        if (it.op === "delete") {
+          if (file) flag(it.path, "existed");
+        } else if (!file) {
+          flag(it.path, "missing");
+        } else if (content !== it.after) {
+          flag(it.path, "modified");
+        }
+      }
+    } catch (err) {
+      return { ok: false, reason: `Undo failed: ${(err as Error).message || String(err)}` };
+    }
+
+    if (divergentPaths.length > 0 && !options.force) {
+      return {
+        ok: false,
+        divergence: firstDivergence,
+        divergentPaths,
+        reason:
+          divergentPaths.length === 1
+            ? `"${divergentPaths[0]}" has changed since this action.`
+            : `${divergentPaths.length} paths have changed since this action.`,
+      };
+    }
+
+    const reverted: number[] = [];
+    const skippedPaths: string[] = [];
+    try {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        const obs = observed[i];
+        if (it.op === "move") {
+          if (!obs.present || obs.fromOccupied) {
+            skippedPaths.push(obs.present ? it.from : it.to);
+            continue;
+          }
+          await this.requireMove()(it.to, it.from);
+        } else {
+          await this.revertItem(it, obs);
+        }
+        reverted.push(i);
+      }
+    } catch (err) {
+      const rollbackErrors = await this.rollbackBatch(items, observed, reverted);
+      const suffix = rollbackErrors > 0 ? ` ${rollbackErrors} item(s) could not be restored.` : "";
+      return {
+        ok: false,
+        reason: `Undo failed: ${(err as Error).message || String(err)}.${suffix}`,
+      };
+    }
+
+    e.undone = true;
+    this.safePersist("mark-undone", e);
+    return skippedPaths.length > 0
+      ? { ok: true, divergence: "ok", skippedPaths }
+      : { ok: true, divergence: "ok" };
+  }
+
+  /**
+   * Revert one item, but only if it is still in the state observed by the
+   * preflight; an edit that lands while Undo runs aborts the batch (and
+   * triggers rollback) instead of being overwritten.
+   */
+  private async revertItem(it: Exclude<UndoBatchItem, { op: "move" }>, obs: Observed): Promise<void> {
+    const file = this.lookup(it.path);
+    if (Boolean(file) !== obs.present) throw new Error(`"${it.path}" changed while undoing`);
+    if (it.op === "create") {
+      if (!file) return;
+      await this.requireContent(it.path, file, obs.content ?? "");
+      await this.deleteVault(file);
+      return;
+    }
+    if (file) await this.writeIfUnchanged(it.path, file, obs.content ?? "", it.before);
+    else await this.createVault(it.path, it.before);
+  }
+
+  private async rollbackBatch(
+    items: readonly UndoBatchItem[],
+    observed: readonly Observed[],
+    reverted: readonly number[],
+  ): Promise<number> {
+    let failures = 0;
+    for (let k = reverted.length - 1; k >= 0; k--) {
+      const i = reverted[k];
+      const it = items[i];
+      const obs = observed[i];
+      try {
+        if (it.op === "move") {
+          await this.requireMove()(it.from, it.to);
+          continue;
+        }
+        const file = this.lookup(it.path);
+        if (it.op === "create") {
+          if (obs.present && obs.content !== undefined) await this.createVault(it.path, obs.content);
+        } else if (obs.present && obs.content !== undefined) {
+          if (file) await this.writeIfUnchanged(it.path, file, it.before, obs.content);
+          else await this.createVault(it.path, obs.content);
+        } else if (file) {
+          await this.requireContent(it.path, file, it.before);
+          await this.deleteVault(file);
+        }
+      } catch (err) {
+        failures++;
+        console.error("[UndoJournal] batch rollback failed", err);
+      }
+    }
+    return failures;
+  }
+
+  private requireMove(): (from: string, to: string) => Promise<void> {
+    if (!this.moveItem) throw new Error("Moving files back is not available");
+    return this.moveItem;
   }
 
   private safePersist(op: UndoJournalPersistOp, entry: UndoEntry): void {
@@ -439,6 +631,13 @@ export class UndoJournal {
     return get.call(this.vault, vaultPath) ?? null;
   }
 
+  private lookupAny(vaultPath: string): unknown | null {
+    const get =
+      this.vault.getAbstractFileByPath ?? this.vault.getFileByPath;
+    if (!get) return null;
+    return get.call(this.vault, vaultPath) ?? null;
+  }
+
   private async readVault(file: unknown): Promise<string> {
     if (this.vault.cachedRead) return this.vault.cachedRead(file);
     if (this.vault.read) return this.vault.read(file);
@@ -455,11 +654,37 @@ export class UndoJournal {
     return this.vault.modify(file, content);
   }
 
+  private async writeIfUnchanged(path: string, file: unknown, expected: string, content: string): Promise<void> {
+    if (this.vault.process) {
+      await this.vault.process(file, (current) => {
+        if (current !== expected) throw new Error(`"${path}" changed while undoing`);
+        return content;
+      });
+      return;
+    }
+    await this.requireContent(path, file, expected);
+    await this.modifyVault(file, content);
+  }
+
+  private async requireContent(path: string, file: unknown, expected: string): Promise<void> {
+    if ((await this.readVault(file)) !== expected) throw new Error(`"${path}" changed while undoing`);
+  }
+
   private async deleteVault(file: unknown): Promise<void> {
     if (this.vault.trash) return this.vault.trash(file, true);
     if (this.vault.delete) return this.vault.delete(file, true);
     throw new Error("Vault has no delete method");
   }
+}
+
+interface Observed {
+  present: boolean;
+  content?: string;
+  fromOccupied?: boolean;
+}
+
+function isCaseOnlyRename(a: string, b: string): boolean {
+  return a !== b && a.toLowerCase() === b.toLowerCase();
 }
 
 function isOptions(

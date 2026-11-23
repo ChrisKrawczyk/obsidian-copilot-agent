@@ -1383,6 +1383,8 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       getMcpToolSourceMetadata?: NonNullable<
         AgentSessionOptions["safety"]
       >["getMcpToolSourceMetadata"];
+      extractVaultPaths?: NonNullable<AgentSessionOptions["safety"]>["extractVaultPaths"];
+      describeApproval?: NonNullable<AgentSessionOptions["safety"]>["describeApproval"];
     } = {},
   ) {
     const state = new SafetyState();
@@ -1401,12 +1403,117 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
           }),
           state,
           getMcpToolSourceMetadata: overrides.getMcpToolSourceMetadata,
+          extractVaultPaths: overrides.extractVaultPaths,
+          describeApproval: overrides.describeApproval,
         },
       },
       async () => handles.sdk,
     );
     return { agent, state };
   }
+
+  async function capturePrompt(
+    h: FakeHandles,
+    agent: CopilotAgentSession,
+    request: Parameters<NonNullable<FakeHandles["permissionHandler"]>>[0],
+  ): Promise<{ summary?: string; detail?: string }> {
+    let resolveSend!: (value: unknown) => void;
+    h.session.sendAndWait = (prompt: string) => {
+      h.sendCalls.push(prompt);
+      return new Promise((resolve) => {
+        resolveSend = resolve;
+      });
+    };
+    const seen: unknown[] = [];
+    const drain = (async () => {
+      for await (const ev of agent.sendMessageStreaming("go")) seen.push(ev);
+    })();
+    await new Promise((r) => setTimeout(r, 5));
+    const permission = h.permissionHandler!(request);
+    for (let i = 0; i < 50 && !agent.hasPendingApprovals(); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const id = (request as { toolCallId: string }).toolCallId;
+    agent.resolveApproval(id, { kind: "reject", reason: "test" });
+    await permission;
+    resolveSend({ data: { content: "done" } });
+    await drain;
+    const prompt = seen.find(
+      (ev) => (ev as { type?: string }).type === "approval_prompt",
+    ) as { toolCall: { approval?: { summary?: string; detail?: string } } } | undefined;
+    return prompt?.toolCall.approval ?? {};
+  }
+
+  describe("batch vault-write approval hooks", () => {
+    const req = {
+      toolCallId: "tc-batch",
+      kind: "custom-tool",
+      toolName: "update_tasks",
+      args: { targets: [{ path: "inbox/a.md" }, { path: "archive/b.md" }] },
+    };
+
+    test("multi-path allowlist auto-applies only when every path is covered", async () => {
+      const h = makeFakeSdk();
+      const { agent } = makeSafetyAgent(h, {
+        defaultMode: "require-approval",
+        vaultAllowlist: ["inbox", "archive"],
+        extractVaultPaths: () => ["inbox/a.md", "archive/b.md"],
+      });
+      await agent.init();
+      expect((await h.permissionHandler!(req)).kind).toBe("approve-once");
+      await agent.dispose();
+
+      const h2 = makeFakeSdk();
+      const { agent: agent2 } = makeSafetyAgent(h2, {
+        defaultMode: "require-approval",
+        vaultAllowlist: ["inbox"],
+        extractVaultPaths: () => ["inbox/a.md", "archive/b.md"],
+      });
+      await agent2.init();
+      expect((await h2.permissionHandler!({ ...req, toolCallId: "tc-batch-2" })).kind).toBe("reject");
+      await agent2.dispose();
+    });
+
+    test("describeApproval supplies the prompt summary and detail for vault writes", async () => {
+      const h = makeFakeSdk();
+      const describeApproval = vi.fn(async () => ({ summary: "update_tasks: 2 tasks in 2 notes", detail: "preview" }));
+      const { agent } = makeSafetyAgent(h, { defaultMode: "require-approval", describeApproval });
+      await agent.init();
+      const approval = await capturePrompt(h, agent, req);
+      expect(approval).toMatchObject({ summary: "update_tasks: 2 tasks in 2 notes", detail: "preview" });
+      await agent.dispose();
+    });
+
+    test("a throwing describeApproval falls back to the default prompt", async () => {
+      const h = makeFakeSdk();
+      const { agent } = makeSafetyAgent(h, {
+        defaultMode: "require-approval",
+        describeApproval: async () => {
+          throw new Error("boom");
+        },
+      });
+      await agent.init();
+      const approval = await capturePrompt(h, agent, req);
+      expect(approval.summary).toBe("update_tasks");
+      expect(approval.detail).toContain('"archive/b.md"');
+      await agent.dispose();
+    });
+
+    test("shell approvals never consult describeApproval", async () => {
+      const h = makeFakeSdk();
+      const describeApproval = vi.fn(async () => ({ summary: "nope", detail: "nope" }));
+      const { agent } = makeSafetyAgent(h, { describeApproval });
+      await agent.init();
+      const approval = await capturePrompt(h, agent, {
+        toolCallId: "tc-shell",
+        kind: "shell",
+        fullCommandText: "Move-Item a.md b.md",
+      });
+      expect(approval).toMatchObject({ summary: "Run shell command", detail: "Move-Item a.md b.md" });
+      expect(describeApproval).not.toHaveBeenCalled();
+      await agent.dispose();
+    });
+  });
 
   test("auto-applies vault writes in default mode and returns approve-once", async () => {
     const h = makeFakeSdk();
@@ -2088,6 +2195,10 @@ describe("CopilotAgentSession - SafetyPolicy path (Phase 6)", () => {
       "create_daily_note",
       "create_task",
       "update_task",
+      "update_tasks",
+      "move_note",
+      "bulk_edit",
+      "replace_in_note",
     ]) {
       const result = await h.permissionHandler!({
         toolCallId: `tc-vw-${toolName}`,

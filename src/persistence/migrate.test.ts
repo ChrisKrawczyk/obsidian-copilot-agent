@@ -357,4 +357,103 @@ describe("migrate — v0.4 modelId round-trip", () => {
     const empty = migrate(v2Blob({ safetyGrants: { vault: false } }));
     expect("safetyGrants" in empty.state.conversations[0]).toBe(false);
   });
+
+  describe("batch undo entries", () => {
+    function withUndo(entry: Record<string, unknown>) {
+      return {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversations: [
+          { id: "c1", name: "x", createdAt: 1, lastActiveAt: 1, messages: [], undoEntries: [entry] },
+        ],
+        activeConversationId: null,
+      };
+    }
+    const batch = {
+      id: "u9",
+      kind: "batch",
+      scope: "vault",
+      path: "a.md",
+      recordedAt: 5,
+      label: "2 items",
+      items: [
+        { op: "modify", path: "a.md", before: "1", after: "2" },
+        { op: "create", path: "b.md", after: "x" },
+        { op: "delete", path: "c.md", before: "y" },
+        { op: "move", from: "d.md", to: "e/d.md" },
+      ],
+    };
+
+    it("round-trips a well-formed batch entry", () => {
+      const r = migrate(withUndo(batch));
+      expect(r.recovered).toBe(false);
+      expect(r.state.conversations[0].undoEntries[0]).toEqual({
+        id: "u9",
+        kind: "batch",
+        scope: "vault",
+        path: "a.md",
+        recordedAt: 5,
+        before: undefined,
+        after: undefined,
+        undone: undefined,
+        label: "2 items",
+        items: batch.items,
+      });
+    });
+
+    it.each([
+      ["missing items", { ...batch, items: undefined }],
+      ["empty items", { ...batch, items: [] }],
+      ["unknown op", { ...batch, items: [{ op: "copy", path: "a" }] }],
+      ["modify without after", { ...batch, items: [{ op: "modify", path: "a", before: "1" }] }],
+      ["move without to", { ...batch, items: [{ op: "move", from: "a" }] }],
+    ])("rejects a malformed batch entry (%s)", (_name, entry) => {
+      expect(migrate(withUndo(entry as Record<string, unknown>)).recovered).toBe(true);
+    });
+
+    it("leaves single-path entries without batch fields", () => {
+      const r = migrate(withUndo({ id: "u1", kind: "modify", scope: "vault", path: "n.md", recordedAt: 4, items: [1] }));
+      expect(r.recovered).toBe(false);
+      expect("items" in r.state.conversations[0].undoEntries[0]).toBe(false);
+    });
+  });
+
+  it("drops the retired tool-call vaultChanges fields from earlier builds", () => {
+    const r = migrate({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          undoEntries: [],
+          messages: [
+            {
+              id: "m1",
+              role: "assistant",
+              content: "",
+              status: "complete",
+              createdAt: 1,
+              toolCalls: [
+                {
+                  id: "t1",
+                  kind: "tool",
+                  source: "builtin",
+                  outcome: "completed",
+                  vaultChanges: [{ type: "modified", path: "a.md" }],
+                  vaultChangesOverflow: 3,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      activeConversationId: null,
+    });
+    expect(r.recovered).toBe(false);
+    const call = r.state.conversations[0].messages[0].toolCalls![0];
+    expect(call).toMatchObject({ id: "t1", outcome: "completed" });
+    expect("vaultChanges" in call).toBe(false);
+    expect("vaultChangesOverflow" in call).toBe(false);
+  });
 });

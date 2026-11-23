@@ -11,7 +11,7 @@
  * these types without pulling in those layers.
  */
 
-import type { UndoKind, UndoScope } from "../domain/UndoJournal";
+import type { UndoBatchItem, UndoKind, UndoScope } from "../domain/UndoJournal";
 
 /**
  * Subset of `Message` from `src/domain/types.ts` that survives a JSON
@@ -58,6 +58,8 @@ export interface PersistedUndoEntry {
   after?: string;
   recordedAt: number;
   undone?: boolean;
+  items?: UndoBatchItem[];
+  label?: string;
 }
 
 /**

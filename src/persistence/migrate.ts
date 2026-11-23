@@ -35,6 +35,7 @@ import {
   type PersistedMessage,
   type PersistedUndoEntry,
 } from "./PersistedShape";
+import type { UndoBatchItem } from "../domain/UndoJournal";
 
 export interface MigrateResult {
   state: PersistedConversationsState;
@@ -314,10 +315,27 @@ function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const e = raw as Record<string, unknown>;
   if (typeof e.id !== "string") return null;
-  if (e.kind !== "create" && e.kind !== "modify" && e.kind !== "delete") return null;
+  if (
+    e.kind !== "create" &&
+    e.kind !== "modify" &&
+    e.kind !== "delete" &&
+    e.kind !== "batch"
+  ) {
+    return null;
+  }
   if (e.scope !== "vault" && e.scope !== "extra-vault") return null;
   if (typeof e.path !== "string") return null;
   if (typeof e.recordedAt !== "number") return null;
+  let items: UndoBatchItem[] | undefined;
+  if (e.kind === "batch") {
+    if (!Array.isArray(e.items) || e.items.length === 0) return null;
+    items = [];
+    for (const raw of e.items) {
+      const item = validateBatchItem(raw);
+      if (!item) return null;
+      items.push(item);
+    }
+  }
   return {
     id: e.id,
     kind: e.kind,
@@ -327,5 +345,27 @@ function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {
     after: typeof e.after === "string" ? e.after : undefined,
     recordedAt: e.recordedAt,
     undone: e.undone === true ? true : undefined,
+    ...(items ? { items } : {}),
+    ...(items && typeof e.label === "string" ? { label: e.label } : {}),
   };
+}
+
+function validateBatchItem(raw: unknown): UndoBatchItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const it = raw as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === "string";
+  switch (it.op) {
+    case "modify":
+      return str(it.path) && str(it.before) && str(it.after)
+        ? { op: "modify", path: it.path, before: it.before, after: it.after }
+        : null;
+    case "create":
+      return str(it.path) && str(it.after) ? { op: "create", path: it.path, after: it.after } : null;
+    case "delete":
+      return str(it.path) && str(it.before) ? { op: "delete", path: it.path, before: it.before } : null;
+    case "move":
+      return str(it.from) && str(it.to) ? { op: "move", from: it.from, to: it.to } : null;
+    default:
+      return null;
+  }
 }

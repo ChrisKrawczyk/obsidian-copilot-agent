@@ -18,11 +18,11 @@ import {
   type TaskPriority,
 } from "./TaskFormat";
 import type { VaultAwarenessSettings } from "../settings/VaultAwarenessSettings";
-import {
-  updateTaskImpl,
-  type UpdateTaskInput,
-  type UpdateTaskPatch,
-} from "./UpdateTask";
+import { parseTaskPatch, updateTaskImpl, type UpdateTaskInput } from "./UpdateTask";
+import { updateTasksImpl, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksTarget } from "./UpdateTasks";
+import { bulkEditImpl, MAX_BULK_EDIT_NOTES, MAX_BULK_EDIT_REPLACEMENTS, type BulkEditInput } from "./BulkEdit";
+import { MAX_MOVE_NOTE_ITEMS, moveNoteImpl, type MoveNoteFileManager, type MoveNoteItem } from "./MoveNote";
+import { MAX_REPLACE_IN_NOTE_OCCURRENCES, parseReplaceInNoteArgs, replaceInNoteImpl } from "./ReplaceInNote";
 
 /**
  * Per-call dependencies for the Phase-4/5 vault-write tools.
@@ -38,6 +38,9 @@ export interface WriteNoteToolsDeps extends WriteToolsDeps {
   now: () => Date;
   /** Reads the latest settings so changes to taskTargetMode etc. apply live. */
   vaultAwareness: () => VaultAwarenessSettings;
+  /** Obsidian's link-aware rename; `move_note` is unavailable without it. */
+  fileManager?: MoveNoteFileManager;
+  configDir?: string;
 }
 
 interface SuccessShape {
@@ -728,13 +731,18 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         "overwrites the whole note — do NOT issue parallel " +
         "`edit_note replace` calls against the same path (only one " +
         "write survives). Serialize them, or use `append`/`prepend` " +
-        "when preserving existing content matters.",
+        "when preserving existing content matters. For a change inside " +
+        "a note use replace_in_note instead of `replace`.",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          mode: { type: "string", enum: ["append", "prepend", "replace"] },
-          content: { type: "string" },
+          path: { type: "string", description: "Vault-relative path of an existing note." },
+          mode: {
+            type: "string",
+            enum: ["append", "prepend", "replace"],
+            description: "append/prepend add content; replace overwrites the whole note with content.",
+          },
+          content: { type: "string", description: "Text to add, or the complete new note for replace." },
         },
         required: ["path", "mode", "content"],
         additionalProperties: false,
@@ -772,10 +780,11 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
     }),
     defineTool("insert_into_active_note", {
       description:
-        "Insert text into the currently focused markdown note. Uses the " +
-        "live editor surface when one is open (Obsidian Ctrl+Z handles " +
-        "undo); otherwise falls back to a disk write recorded in the " +
-        "Undo journal.",
+        "Insert text into the currently focused markdown note with " +
+        "`append` or `prepend`; `replace` overwrites the whole note with " +
+        "content. Uses the live editor surface when one is open (Obsidian " +
+        "Ctrl+Z handles undo); otherwise falls back to a disk write " +
+        "recorded in the Undo journal.",
       parameters: {
         type: "object",
         properties: {
@@ -920,32 +929,7 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
               "Only used when expectedRawLine is absent. Fails loudly on " +
               "ambiguity (multiple matches → ambiguous_match).",
           },
-          patch: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              addTags: { type: "array", items: { type: "string" } },
-              removeTags: { type: "array", items: { type: "string" } },
-              setPriority: {
-                type: ["string", "null"],
-                enum: ["high", "medium", "low", null],
-                description: "high|medium|low to set, null to clear.",
-              },
-              setDueDate: {
-                type: ["string", "null"],
-                description: "Strict YYYY-MM-DD to set, null to clear.",
-              },
-              setScheduledDate: {
-                type: ["string", "null"],
-                description: "Strict YYYY-MM-DD to set, null to clear.",
-              },
-              setStatus: {
-                type: "string",
-                enum: ["todo", "in-progress", "done", "cancelled"],
-              },
-              setDescription: { type: "string" },
-            },
-          },
+          patch: taskPatchSchema(),
         },
         additionalProperties: false,
       },
@@ -953,41 +937,233 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         const a = (args ?? {}) as Record<string, unknown>;
         if (typeof a.path !== "string") throw new Error("`path` is required");
         if (typeof a.line !== "number") throw new Error("`line` is required");
-        const p = (a.patch ?? {}) as Record<string, unknown>;
-        const patch: UpdateTaskPatch = {};
-        if (Array.isArray(p.addTags)) {
-          patch.addTags = p.addTags.filter((t): t is string => typeof t === "string");
-        }
-        if (Array.isArray(p.removeTags)) {
-          patch.removeTags = p.removeTags.filter((t): t is string => typeof t === "string");
-        }
-        if (p.setPriority === null) patch.setPriority = null;
-        else if (p.setPriority === "high" || p.setPriority === "medium" || p.setPriority === "low") {
-          patch.setPriority = p.setPriority;
-        }
-        if (p.setDueDate === null) patch.setDueDate = null;
-        else if (typeof p.setDueDate === "string") patch.setDueDate = p.setDueDate;
-        if (p.setScheduledDate === null) patch.setScheduledDate = null;
-        else if (typeof p.setScheduledDate === "string") patch.setScheduledDate = p.setScheduledDate;
-        if (
-          p.setStatus === "todo" ||
-          p.setStatus === "in-progress" ||
-          p.setStatus === "done" ||
-          p.setStatus === "cancelled"
-        ) {
-          patch.setStatus = p.setStatus;
-        }
-        if (typeof p.setDescription === "string") patch.setDescription = p.setDescription;
-
         const input: UpdateTaskInput = {
           path: a.path,
           line: a.line,
-          patch,
+          patch: parseTaskPatch(a.patch),
         };
         if (typeof a.expectedRawLine === "string") input.expectedRawLine = a.expectedRawLine;
         if (typeof a.descriptionMatch === "string") input.descriptionMatch = a.descriptionMatch;
         return await updateTaskImpl(input, deps);
       },
     }),
+    defineTool("update_tasks", {
+      description:
+        "Apply ONE patch to MANY task lines at once (e.g. mark 20 tasks " +
+        "done, add a tag to every task from a find_tasks result). Use this " +
+        "instead of calling update_task repeatedly. Each target is " +
+        "{path, line, expectedRawLine} straight from find_tasks. Patch " +
+        "fields and status auto-stamping match update_task. Every target " +
+        "is validated first; if any fails (stale line, not a task, " +
+        "duplicate, unsaved editor) nothing is written and every failure " +
+        `is listed. At most ${MAX_UPDATE_TASKS_TARGETS} targets. One ` +
+        "approval and one Undo entry for the whole batch.",
+      parameters: {
+        type: "object",
+        required: ["targets", "patch"],
+        properties: {
+          targets: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_UPDATE_TASKS_TARGETS,
+            items: {
+              type: "object",
+              required: ["path", "line", "expectedRawLine"],
+              additionalProperties: false,
+              properties: {
+                path: { type: "string", description: "Vault-relative path of the note." },
+                line: { type: "number", description: "1-based line number (from find_tasks)." },
+                expectedRawLine: {
+                  type: "string",
+                  description: "EXACT raw line text from find_tasks.",
+                },
+              },
+            },
+          },
+          patch: taskPatchSchema(),
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as Record<string, unknown>;
+        if (!Array.isArray(a.targets)) throw new Error("`targets` must be an array");
+        return await updateTasksImpl(
+          { targets: parseTaskTargets(a.targets), patch: parseTaskPatch(a.patch) },
+          deps,
+        );
+      },
+    }),
+    defineTool("move_note", {
+      description:
+        "Move or rename vault items (notes, attachments or folders) with " +
+        "Obsidian's link-aware rename, so wikilinks and markdown links to " +
+        "them are updated. ALWAYS use this instead of shell commands " +
+        "(Move-Item, mv, git mv) for any move or rename inside the vault. " +
+        "Pass every item in ONE call: moves is a list of {from, to} " +
+        "vault-relative paths (a rename is a move within the same folder). " +
+        "Missing destination folders are created. Nothing is overwritten. " +
+        "Every item is validated first; if any fails nothing moves and " +
+        `every failure is listed. At most ${MAX_MOVE_NOTE_ITEMS} items. One ` +
+        "approval and one Undo entry for the whole call.",
+      parameters: {
+        type: "object",
+        required: ["moves"],
+        properties: {
+          moves: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_MOVE_NOTE_ITEMS,
+            items: {
+              type: "object",
+              required: ["from", "to"],
+              additionalProperties: false,
+              properties: {
+                from: { type: "string", description: "Current vault-relative path." },
+                to: { type: "string", description: "New vault-relative path, including the file name." },
+              },
+            },
+          },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => {
+        const a = (args ?? {}) as Record<string, unknown>;
+        if (!Array.isArray(a.moves)) throw new Error("`moves` must be an array");
+        return await moveNoteImpl(parseMoveItems(a.moves), deps);
+      },
+    }),
+    defineTool("bulk_edit", {
+      description:
+        "Apply ONE find/replace to MANY notes at once (rename a tag or " +
+        "term everywhere, fix a repeated typo). Use this instead of " +
+        "repeated edit_note calls or shell text replacement. paths: the " +
+        "notes to edit (find candidates with search tools first). Literal " +
+        "by default (replace is inserted verbatim); regex:true for a " +
+        "JavaScript regex (global, multiline ^/$, $1/$<name> in replace). " +
+        "ignoreCase:true for case-insensitive. The approval shows per-note " +
+        "counts and sample lines. Notes with no match are left untouched. " +
+        "If any path is invalid or unsaved nothing is written. At most " +
+        `${MAX_BULK_EDIT_NOTES} notes and ${MAX_BULK_EDIT_REPLACEMENTS} ` +
+        "replacements. One approval and one Undo entry for the whole call.",
+      parameters: {
+        type: "object",
+        required: ["paths", "find", "replace"],
+        properties: {
+          paths: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_BULK_EDIT_NOTES,
+            items: { type: "string" },
+            description: "Vault-relative paths of .md or .txt notes.",
+          },
+          find: { type: "string", description: "Text (or regex when regex:true) to find. Must not be empty." },
+          replace: { type: "string", description: "Replacement text. May be empty to delete matches." },
+          regex: { type: "boolean", description: "Treat find as a regular expression. Default false." },
+          ignoreCase: { type: "boolean", description: "Case-insensitive matching. Default false." },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => bulkEditImpl(parseBulkEditArgs(args), deps),
+    }),
+    defineTool("replace_in_note", {
+      description:
+        "Make ONE targeted edit inside ONE existing note: replace the exact " +
+        "text oldText with newText and leave the rest of the note as it is. " +
+        "Use this for changing a line, table row, heading or paragraph " +
+        "instead of rewriting the whole note. Literal, case-sensitive match " +
+        "(no regex); newText is inserted verbatim. Fails without writing if " +
+        "oldText is not found or the number of matches differs from " +
+        "expectedOccurrences (default 1); the error says how many matches " +
+        "were found, so add surrounding text to make oldText unique. Copy " +
+        "oldText exactly from a fresh read, including whitespace and line " +
+        "breaks. Only .md and .txt notes; refuses notes with unsaved editor " +
+        "changes. The approval shows a before/after diff. One approval and " +
+        "one Undo entry. For the same change across many notes use bulk_edit.",
+      parameters: {
+        type: "object",
+        required: ["path", "oldText", "newText"],
+        properties: {
+          path: { type: "string", description: "Vault-relative path of an existing .md or .txt note." },
+          oldText: {
+            type: "string",
+            description: "Exact text to replace. Must not be empty. Include enough context to match only the intended place.",
+          },
+          newText: { type: "string", description: "Replacement text. May be empty to delete oldText." },
+          expectedOccurrences: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_REPLACE_IN_NOTE_OCCURRENCES,
+            description: "How many times oldText must appear; every match is replaced. Default 1.",
+          },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => replaceInNoteImpl(parseReplaceInNoteArgs(args), deps),
+    }),
   ];
+}
+
+export function parseBulkEditArgs(args: unknown): BulkEditInput {
+  const a = (args ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(a.paths)) throw new Error("`paths` must be an array");
+  if (typeof a.find !== "string") throw new Error("`find` is required");
+  if (typeof a.replace !== "string") throw new Error("`replace` is required");
+  return {
+    paths: a.paths.map((p) => (typeof p === "string" ? p : "")),
+    find: a.find,
+    replace: a.replace,
+    regex: a.regex === true,
+    ignoreCase: a.ignoreCase === true,
+  };
+}
+
+export function parseMoveItems(raw: readonly unknown[]): MoveNoteItem[] {
+  return raw.map((m) => {
+    const o = (m ?? {}) as Record<string, unknown>;
+    return {
+      from: typeof o.from === "string" ? o.from : "",
+      to: typeof o.to === "string" ? o.to : "",
+    };
+  });
+}
+
+export function parseTaskTargets(raw: readonly unknown[]): UpdateTasksTarget[] {
+  return raw.map((t) => {
+    const o = (t ?? {}) as Record<string, unknown>;
+    const target: UpdateTasksTarget = {
+      path: typeof o.path === "string" ? o.path : "",
+      line: typeof o.line === "number" ? o.line : Number.NaN,
+    };
+    if (typeof o.expectedRawLine === "string") target.expectedRawLine = o.expectedRawLine;
+    return target;
+  });
+}
+
+function taskPatchSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      addTags: { type: "array", items: { type: "string" } },
+      removeTags: { type: "array", items: { type: "string" } },
+      setPriority: {
+        type: ["string", "null"],
+        enum: ["high", "medium", "low", null],
+        description: "high|medium|low to set, null to clear.",
+      },
+      setDueDate: {
+        type: ["string", "null"],
+        description: "Strict YYYY-MM-DD to set, null to clear.",
+      },
+      setScheduledDate: {
+        type: ["string", "null"],
+        description: "Strict YYYY-MM-DD to set, null to clear.",
+      },
+      setStatus: {
+        type: "string",
+        enum: ["todo", "in-progress", "done", "cancelled"],
+      },
+      setDescription: { type: "string" },
+    },
+  };
 }
