@@ -731,13 +731,18 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         "overwrites the whole note — do NOT issue parallel " +
         "`edit_note replace` calls against the same path (only one " +
         "write survives). Serialize them, or use `append`/`prepend` " +
-        "when preserving existing content matters.",
+        "when preserving existing content matters. For a change inside " +
+        "a note use replace_in_note instead of `replace`.",
       parameters: {
         type: "object",
         properties: {
-          path: { type: "string" },
-          mode: { type: "string", enum: ["append", "prepend", "replace"] },
-          content: { type: "string" },
+          path: { type: "string", description: "Vault-relative path of an existing note." },
+          mode: {
+            type: "string",
+            enum: ["append", "prepend", "replace"],
+            description: "append/prepend add content; replace overwrites the whole note with content.",
+          },
+          content: { type: "string", description: "Text to add, or the complete new note for replace." },
         },
         required: ["path", "mode", "content"],
         additionalProperties: false,
@@ -775,10 +780,11 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
     }),
     defineTool("insert_into_active_note", {
       description:
-        "Insert text into the currently focused markdown note. Uses the " +
-        "live editor surface when one is open (Obsidian Ctrl+Z handles " +
-        "undo); otherwise falls back to a disk write recorded in the " +
-        "Undo journal.",
+        "Insert text into the currently focused markdown note with " +
+        "`append` or `prepend`; `replace` overwrites the whole note with " +
+        "content. Uses the live editor surface when one is open (Obsidian " +
+        "Ctrl+Z handles undo); otherwise falls back to a disk write " +
+        "recorded in the Undo journal.",
       parameters: {
         type: "object",
         properties: {

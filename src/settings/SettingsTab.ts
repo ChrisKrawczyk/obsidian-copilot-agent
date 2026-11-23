@@ -221,7 +221,7 @@ export class CopilotAgentSettingTab extends PluginSettingTab {
           "When ON (default), the six v0.1 raw-FS tools (view, " +
             "read_file, search_content, create_file, edit_file, " +
             "delete_file) are offered to the model as a FALLBACK to " +
-            "the higher-level vault tools (read_note, edit_note, " +
+            "the higher-level vault tools (get_active_note, edit_note, " +
             "etc.); the preamble tells the model to reach for vault " +
             "tools first. Turn OFF for a strictly vault-only agent — " +
             "the raw-FS tools are then dropped from the manifest and " +

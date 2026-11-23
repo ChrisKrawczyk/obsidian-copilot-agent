@@ -385,7 +385,7 @@ describe("assemblePreamble", () => {
     }
     // Non-raw-FS tools must NOT be tagged as fallback.
     expect(VAULT_TOOL_INVENTORY_BLOCK).not.toMatch(
-      /`read_note`[^\n]*_\(fallback\)_/,
+      /`find_tasks`[^\n]*_\(fallback\)_/,
     );
     expect(VAULT_TOOL_INVENTORY_BLOCK).not.toMatch(
       /`vault_tree`[^\n]*_\(fallback\)_/,

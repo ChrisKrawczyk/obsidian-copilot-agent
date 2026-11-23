@@ -105,6 +105,7 @@ export const AUTHORING_CONVENTIONS_BLOCK =
   "- **Tasks:** when adding a TODO, use Tasks-plugin-compatible syntax (`- [ ] Description 📅 YYYY-MM-DD`) ONLY when the Tasks community plugin is enabled in this vault. If it is not, fall back to the GFM form (`- [ ] Description (due: YYYY-MM-DD) (priority: high|medium|low)`) so the markers render as plain text and don't pollute the note with stray emoji. Resolve relative dates (\"tomorrow\", \"next Friday\") against the user's local timezone and today's date provided above, then pass the resolved `YYYY-MM-DD` to the `create_task` tool. Append tasks to today's daily note unless the user specifies otherwise.\n" +
   "- **Editing tasks:** to change tasks (mark done, add a tag, reschedule, etc.), call `find_tasks` first to enumerate candidates, then pass back each result's `path`, `line`, AND `expectedRawLine` for safe re-anchoring. Use `update_task` for a single task; when several tasks get the same change, make ONE `update_tasks` call with all of them instead of one call per task. Status values are `todo`, `in-progress`, `done`, `cancelled`. Setting status to `done` or `cancelled` auto-stamps today's date. Dates must be strict `YYYY-MM-DD`; pass `null` to clear.\n" +
   "- **Moving and renaming:** use `move_note` (one call can move or rename several notes or folders); Obsidian then updates links to them. Shell moves leave those links broken.\n" +
+  "- **Changing a note:** for a change inside a note, use `replace_in_note` (one targeted edit). Use a full replace (`edit_note` with mode `replace`) only when rewriting the whole note on purpose, and always pass the complete new content.\n" +
   "- **Repeated text changes:** for the same find/replace across several notes, make one `bulk_edit` call instead of many `edit_note` calls.";
 
 /**
@@ -189,10 +190,11 @@ function buildToolInventoryBlock(excludeRawFs: boolean): string {
       "`edit_file`, and `delete_file` tools are GENERIC filesystem " +
       "fallbacks. Only use them when no vault-aware tool fits the " +
       "task (for example, reading a non-markdown file or operating " +
-      "outside the indexed note set). Prefer `read_note` over " +
-      "`read_file`, `vault_tree`/`vault_metadata` over `view`, " +
+      "outside the indexed note set). `read_file` is how you read a " +
+      "note's text. Prefer `vault_tree`/`vault_metadata` over `view`, " +
       "`search_by_tag`/`search_by_name` over `search_content`, and " +
-      "`create_note`/`edit_note` over `create_file`/`edit_file`.";
+      "`create_note`/`replace_in_note`/`edit_note` over " +
+      "`create_file`/`edit_file`.";
   const header = headerCommon + fallbackNote;
   const rawFsSet = new Set<string>(V01_RAW_FS_TOOL_NAMES);
   const entries = excludeRawFs

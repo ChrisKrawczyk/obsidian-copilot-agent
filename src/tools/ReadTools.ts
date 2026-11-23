@@ -87,7 +87,8 @@ export function createReadTools(vault: ReadToolsVault): Tool[] {
         "Read the full contents of a single markdown note from the " +
         "active Obsidian vault. The path is vault-relative (e.g. " +
         '"inbox/today.md"). Absolute paths and paths containing ".." ' +
-        "are rejected.",
+        "are rejected. Text past 256 KB is cut off and `truncated` is " +
+        "set to true.",
       parameters: {
         type: "object",
         required: ["path"],

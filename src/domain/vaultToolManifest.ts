@@ -37,22 +37,22 @@ export const V01_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "read_file",
-    hint: "Read the full text of a vault file by vault-relative path.",
+    hint: "Read the text of one note by vault-relative path. Text past 256 KB is cut off (`truncated` is true).",
     readOnly: true,
   },
   {
     name: "search_content",
-    hint: "Full-text search across vault markdown. mode: 'substring' (default, literal), 'regex' (JS pattern), 'fuzzy' (Obsidian scorer). Returns match spans for precise re-reads.",
+    hint: "Text search across vault markdown. mode: 'substring' (default, literal), 'regex', 'simple' (all words, ranked), 'fuzzy' (character subsequence, ranked). Up to 50 matches.",
     readOnly: true,
   },
   {
     name: "create_file",
-    hint: "Create a new vault file at a path that does not already exist.",
+    hint: "Create a new vault file with `content`. Fails if the path already exists.",
     readOnly: false,
   },
   {
     name: "edit_file",
-    hint: "Edit a vault file by replacing one literal block of text with another.",
+    hint: "Overwrites the whole of an existing vault file with `content` (the complete new text). For a change inside a note use replace_in_note.",
     readOnly: false,
   },
   {
@@ -96,7 +96,7 @@ export const READ_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "find_tasks",
-    hint: "List task-list items across the vault (or one note) filtered by status/tag/due range/regex. Read-only.",
+    hint: "List tasks across the vault (or one note) filtered by status, tag, due range or description regex. Results feed update_task / update_tasks.",
     readOnly: true,
   },
 ];
@@ -113,7 +113,7 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "edit_note",
-    hint: "Edit an existing note in append, prepend, or replace mode. Preserves unsaved-editor-conflict guard. IMPORTANT: `replace` overwrites the whole note — do NOT issue parallel `edit_note replace` calls against the same path (only one write survives). Serialize them, or use `append`/`prepend` when preserving existing content matters.",
+    hint: "Add to an existing note with `append` or `prepend`. `replace` overwrites the whole note with `content`; never run parallel `edit_note replace` calls on one note. For a change inside a note use replace_in_note.",
     readOnly: false,
   },
   {
@@ -128,7 +128,7 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "insert_into_active_note",
-    hint: "Insert text into the currently active editor at cursor / append / prepend / replace.",
+    hint: "Add `content` to the note open in the editor with `append` or `prepend`; `replace` overwrites the whole note.",
     readOnly: false,
   },
   {
@@ -193,7 +193,7 @@ export const V03_READ_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "search_vault",
-    hint: "Compound query: AND-combine tag / folder / modifiedSince / text filters in one call. Short-circuits without body reads when structural filters exclude every note. Capped at 100 results; when `totalIsLowerBound` is true the `total` field is an underestimate.",
+    hint: "Compound query: AND-combine tag / folder / modifiedSinceMs / text filters in one call. Skips body reads when structural filters exclude every note. Capped at 100 results.",
     readOnly: true,
   },
 ];
@@ -206,22 +206,22 @@ export const COMPOUND_TOOL_ENTRIES: readonly VaultToolEntry[] = [
 export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   {
     name: "resolve_link",
-    hint: "Resolve a wikilink or markdown link to its target vault path, source-aware (matches Obsidian's own click behavior). Distinguishes unresolved vs. metadata-cache-not-ready. Call directly with the raw link text — no need to pre-scan with search_by_name / vault_tree.",
+    hint: "Resolve a wikilink or markdown link to its target path the way Obsidian's click does (source-aware). Pass the raw link text directly; no need to pre-scan.",
     readOnly: true,
   },
   {
     name: "get_outlinks",
-    hint: "List a note's outgoing links + embeds. Distinguishes wikilink vs. markdown-link kinds; includes resolvedPath when Obsidian can resolve the target. Capped at 200. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    hint: "List a note's outgoing links and embeds (wikilink vs. markdown kind, resolved path when known). Capped at 200. Call directly; a missing note is reported, not thrown.",
     readOnly: true,
   },
   {
     name: "get_note_structure",
-    hint: "Return a note's headings + sections + block IDs with line numbers — NO body prose. Use before read_file to plan a targeted read. Capped at 500 items. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    hint: "Return a note's headings, sections and block IDs with line numbers, without body text. Use before read_file on long notes. Capped at 500 items.",
     readOnly: true,
   },
   {
     name: "related_notes",
-    hint: "Rank vault neighbours of a note by shared tags (weight 3), shared outlinks (weight 2), and shared backlinks (weight 1). Returns up to 20 results with per-signal counts. Call directly with the user-supplied path; the tool returns `not_found` gracefully if the note is missing.",
+    hint: "Rank a note's neighbours by shared tags (weight 3), outlinks (2) and backlinks (1). Up to 20 results with per-signal counts.",
     readOnly: true,
   },
 ];

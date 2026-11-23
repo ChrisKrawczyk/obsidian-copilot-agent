@@ -532,8 +532,10 @@ export function createWriteTools(deps: WriteToolsDeps): Tool<unknown>[] {
     }),
     defineTool("edit_file", {
       description:
-        "Overwrite an existing file in the Obsidian vault with new " +
-        "content. Path is vault-relative; absolute paths are " +
+        "Overwrite the whole of an existing file in the Obsidian vault: " +
+        "`content` becomes the complete new file text. For a change " +
+        "inside a note use replace_in_note instead. Path is " +
+        "vault-relative; absolute paths are " +
         "rejected. Fails if the file does not exist or has unsaved " +
         "changes in an open editor.",
       parameters: {
