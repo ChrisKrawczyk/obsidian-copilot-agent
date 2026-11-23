@@ -52,11 +52,11 @@ For a change inside one note, the agent uses **`replace_in_note`**. It replaces 
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).
-  - **`search_content` modes.** The existing full-text search tool now accepts `mode: "substring" | "regex" | "fuzzy"` and returns match spans for precise re-reads. Omitting `mode` preserves v0.9 behavior.
+  - **`search_content` modes.** The existing full-text search tool now accepts `mode: "substring" | "regex" | "simple" | "fuzzy"` and returns match spans for precise re-reads. Omitting `mode` preserves v0.9 behavior.
   - **`resolve_link`.** Resolves a wikilink or markdown link to its target vault path, source-aware — matches Obsidian's own click behavior.
   - **`get_outlinks`.** Lists a note's outgoing links + embeds with resolved paths and link-form (wikilink vs. markdown) discrimination.
   - **`get_note_structure`.** Returns a note's headings, sections, and block IDs with line numbers — no body prose. Use before `read_file` to plan a targeted read.
-  - **`search_vault`.** Compound query: AND-combines tag / folder / `modifiedSince` / text filters in one call. Short-circuits without body reads when structural filters exclude every note.
+  - **`search_vault`.** Compound query: AND-combines tag / folder / `modifiedSinceMs` / text filters in one call. Short-circuits without body reads when structural filters exclude every note.
   - **`related_notes`.** Ranks vault neighbours by shared tags + shared outlinks + shared backlinks (weighted 3 / 2 / 1).
 - **Full quick reference:** [`docs/agent-vault-tools.md`](docs/agent-vault-tools.md).
 

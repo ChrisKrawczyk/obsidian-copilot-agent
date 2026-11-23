@@ -37,7 +37,7 @@ export const V01_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "read_file",
-    hint: "Read the text of one note by vault-relative path. Text past 256 KB is cut off (`truncated` is true).",
+    hint: "Read the text of one vault file by vault-relative path. Text past 262,144 characters is cut off (`truncated` is true).",
     readOnly: true,
   },
   {
@@ -118,7 +118,7 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "replace_in_note",
-    hint: "One targeted literal edit inside one note (oldText → newText). Fails unless the match count equals expectedOccurrences (default 1). One approval, one Undo entry.",
+    hint: "One targeted literal edit inside one note (`oldText` → `newText`). Fails unless the match count equals `expectedOccurrences` (default 1). One approval, one Undo entry.",
     readOnly: false,
   },
   {
@@ -216,7 +216,7 @@ export const NAVIGATE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
   },
   {
     name: "get_note_structure",
-    hint: "Return a note's headings, sections and block IDs with line numbers, without body text. Use before read_file on long notes. Capped at 500 items.",
+    hint: "Return a note's headings, sections and block IDs with line numbers, without body text. Use it before reading a long note. Capped at 500 items.",
     readOnly: true,
   },
   {

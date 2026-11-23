@@ -232,6 +232,21 @@ describe("describeVaultBatchApproval", () => {
       ["@@ line 6 @@", "  |---|---|", "  | Q2 | 10 |", "- | Q3 | 12 |", "+ | Q3 | 14 |", "  | Q4 | 15 |", "  "].join("\n"),
     );
   });
+  test("an oversized replace_in_note hunk is cut line by line, keeping its start", async () => {
+    const block = Array.from({ length: 60 }, (_, i) => `row ${i} ${"x".repeat(250)}`).join("\n");
+    const d = await describeVaultBatchApproval(
+      "replace_in_note",
+      { path: "t.md", oldText: block, newText: block.replace(/x/g, "y") },
+      deps({ "t.md": `# T\n${block}\nEnd` }),
+    );
+    const lines = d!.detail!.split("\n");
+    expect(lines[0]).toBe("@@ line 2 @@");
+    expect(lines).toContain("  # T");
+    expect(lines.some((l) => l.startsWith("- row 0 x"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("+ row 0 y"))).toBe(true);
+    expect(lines.some((l) => /^[-+] … \d+ more lines$/.test(l))).toBe(true);
+    expect(d!.detail!.length).toBeLessThanOrEqual(4000);
+  });
   test("replace_in_note preview states why the call will fail", async () => {
     const d = await describeVaultBatchApproval(
       "replace_in_note",
@@ -242,7 +257,10 @@ describe("describeVaultBatchApproval", () => {
     expect(d?.detail).toMatch(/^Found 2 matches of oldText in "t.md", expected 1\./);
     const missing = await describeVaultBatchApproval("replace_in_note", { path: "gone.md", oldText: "x", newText: "y" }, deps({}));
     expect(missing?.summary).toBe("replace_in_note: gone.md — will fail (not_found)");
-    expect(await describeVaultBatchApproval("replace_in_note", { path: "t.md" }, deps({}))).toBeUndefined();
+    expect(await describeVaultBatchApproval("replace_in_note", { path: "t.md" }, deps({}))).toEqual({
+      summary: "replace_in_note: t.md — will fail (invalid_args)",
+      detail: "`oldText` is required",
+    });
   });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();

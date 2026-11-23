@@ -1,12 +1,15 @@
 import { compileFind, MAX_BULK_EDIT_REPLACEMENTS, NOTE_EXTENSIONS, replaceAllCounted } from "./BulkEdit";
 import { loadNoteForBatch } from "./BatchWrite";
-import { ProcessAbort, processFileImpl } from "./WriteTools";
+import { editorBufferDiffers, ProcessAbort, processFileImpl } from "./WriteTools";
 import type { WriteNoteToolsDeps } from "./WriteNoteTools";
 import { resolveVaultPath, toVaultRelative, VaultPathError } from "./VaultPath";
 
 export const MAX_REPLACE_IN_NOTE_OCCURRENCES = MAX_BULK_EDIT_REPLACEMENTS;
 export const REPLACE_DIFF_CONTEXT_LINES = 2;
 const MAX_DIFF_LINE_CHARS = 200;
+const DIFF_LEAD_CHARS = 40;
+const MAX_HUNK_SIDE_LINES = 12;
+const MAX_HUNK_SIDE_CHARS = 1500;
 
 export interface ReplaceInNoteInput {
   path: string;
@@ -69,16 +72,17 @@ export function planReplaceInNote(content: string, input: ReplaceInNoteInput, pa
     };
   }
   if (r.count !== input.expectedOccurrences) {
-    const found = r.overLimit ? `more than ${MAX_REPLACE_IN_NOTE_OCCURRENCES}` : String(r.count);
+    const found = r.overLimit ? countOccurrences(content, input.oldText) : r.count;
+    const replaceAll =
+      found <= MAX_REPLACE_IN_NOTE_OCCURRENCES ? ` Pass expectedOccurrences: ${found} only if every match should change.` : "";
     return {
       ok: false,
       reason: "count_mismatch",
-      found: r.count,
+      found,
       error:
         `Found ${found} matches of oldText in "${path}", expected ${input.expectedOccurrences}. Nothing was written. ` +
         (input.expectedOccurrences === 1
-          ? "Include more surrounding text in oldText so it matches exactly once" +
-            (r.overLimit ? "." : `, or pass expectedOccurrences: ${r.count} to replace every match.`)
+          ? `Include more surrounding text in oldText so it matches exactly once.${replaceAll}`
           : "Re-read the note and adjust oldText or expectedOccurrences."),
     };
   }
@@ -95,14 +99,62 @@ function matchOffsets(content: string, needle: string): number[] {
   return out;
 }
 
-function clipLine(line: string): string {
-  const s = line.endsWith("\r") ? line.slice(0, -1) : line;
-  return s.length > MAX_DIFF_LINE_CHARS ? `${s.slice(0, MAX_DIFF_LINE_CHARS - 1)}…` : s;
+function countOccurrences(content: string, needle: string): number {
+  let n = 0;
+  for (let i = content.indexOf(needle); i >= 0; i = content.indexOf(needle, i + needle.length)) n++;
+  return n;
+}
+
+/** Lines with their terminators, so line-ending and end-of-file changes stay visible. */
+function splitLinesKeep(s: string): string[] {
+  return s.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+
+function lineBody(line: string): string {
+  return line.replace(/\r?\n$/, "").replace(/\r$/, "");
+}
+
+/** A window of at most MAX_DIFF_LINE_CHARS around `from`, so a change far along a long line stays visible. */
+function clipAround(text: string, from = 0): string {
+  if (text.length <= MAX_DIFF_LINE_CHARS) return text;
+  const width = MAX_DIFF_LINE_CHARS - 1;
+  const start = from > width - DIFF_LEAD_CHARS ? Math.min(from - DIFF_LEAD_CHARS, text.length - width) : 0;
+  return `${start > 0 ? "…" : ""}${text.slice(start, start + width)}${start + width < text.length ? "…" : ""}`;
+}
+
+function renderChangedSide(sign: "-" | "+", side: string[], other: string[]): string[] {
+  const out: string[] = [];
+  let used = 0;
+  let shown = 0;
+  for (; shown < Math.min(side.length, MAX_HUNK_SIDE_LINES); shown++) {
+    const line = side[shown];
+    const counterpart = other[shown] ?? "";
+    let text = lineBody(line);
+    const otherText = lineBody(counterpart);
+    if (text === otherText && line.endsWith("\r\n") && !counterpart.endsWith("\r\n")) text += "␍";
+    let p = 0;
+    while (p < text.length && p < otherText.length && text[p] === otherText[p]) p++;
+    const rendered = `${sign} ${clipAround(text, p)}`;
+    if (shown > 0 && used + rendered.length > MAX_HUNK_SIDE_CHARS) break;
+    out.push(rendered);
+    used += rendered.length + 1;
+  }
+  if (side.length > shown) out.push(`${sign} … ${side.length - shown} more lines`);
+  const lacksNewline = (l: string[]) => l.length > 0 && !l[l.length - 1].endsWith("\n");
+  if (lacksNewline(side) && !lacksNewline(other) && other.length > 0) out.push("\\ No newline at end of file");
+  return out;
+}
+
+interface LineChange {
+  first: number;
+  last: number;
+  added: string[];
 }
 
 /**
- * One hunk per group of matches sharing lines: the changed lines as
- * removed/added, with up to `context` unchanged lines either side.
+ * Diff hunks for replacing every `oldText` with `newText`: removed and
+ * added lines with up to `context` unchanged lines either side. Changes
+ * whose context would touch are merged into one hunk.
  */
 export function formatReplaceDiffHunks(
   content: string,
@@ -112,12 +164,12 @@ export function formatReplaceDiffHunks(
 ): string[] {
   const offsets = matchOffsets(content, oldText);
   if (offsets.length === 0) return [];
-  const lines = content.split("\n");
+  const lines = splitLinesKeep(content);
   const lineStarts: number[] = [];
   let pos = 0;
   for (const l of lines) {
     lineStarts.push(pos);
-    pos += l.length + 1;
+    pos += l.length;
   }
   const lineOf = (offset: number) => {
     let lo = 0;
@@ -133,7 +185,7 @@ export function formatReplaceDiffHunks(
   const groups: Array<{ first: number; last: number; matches: number[] }> = [];
   for (const off of offsets) {
     const first = lineOf(off);
-    const last = lineOf(off + oldText.length);
+    const last = lineOf(Math.min(off + oldText.length, content.length - 1));
     const g = groups[groups.length - 1];
     if (g && first <= g.last) {
       g.last = Math.max(g.last, last);
@@ -143,7 +195,8 @@ export function formatReplaceDiffHunks(
     }
   }
 
-  return groups.map((g) => {
+  const changes: LineChange[] = [];
+  for (const g of groups) {
     const segStart = lineStarts[g.first];
     const segEnd = lineStarts[g.last] + lines[g.last].length;
     let after = "";
@@ -153,7 +206,7 @@ export function formatReplaceDiffHunks(
       cursor = off + oldText.length;
     }
     after += content.slice(cursor, segEnd);
-    const added = after.split("\n");
+    const added = splitLinesKeep(after);
     let first = g.first;
     let last = g.last;
     while (first <= last && added.length > 0 && lines[first] === added[0]) {
@@ -164,11 +217,30 @@ export function formatReplaceDiffHunks(
       last--;
       added.pop();
     }
-    const out = [`@@ line ${first + 1} @@`];
-    for (let i = Math.max(0, first - context); i < first; i++) out.push(`  ${clipLine(lines[i])}`);
-    for (let i = first; i <= last; i++) out.push(`- ${clipLine(lines[i])}`);
-    for (const l of added) out.push(`+ ${clipLine(l)}`);
-    for (let i = last + 1; i <= Math.min(lines.length - 1, last + context); i++) out.push(`  ${clipLine(lines[i])}`);
+    if (first <= last || added.length > 0) changes.push({ first, last, added });
+  }
+
+  const clusters: LineChange[][] = [];
+  for (const c of changes) {
+    const cluster = clusters[clusters.length - 1];
+    const prev = cluster?.[cluster.length - 1];
+    if (prev && c.first - (prev.last + 1) <= 2 * context) cluster.push(c);
+    else clusters.push([c]);
+  }
+
+  const contextLine = (i: number) => `  ${clipAround(lineBody(lines[i]))}`;
+  return clusters.map((cluster) => {
+    const head = cluster[0];
+    const tail = cluster[cluster.length - 1];
+    const out = [`@@ line ${head.first + 1} @@`];
+    for (let i = Math.max(0, head.first - context); i < head.first; i++) out.push(contextLine(i));
+    cluster.forEach((c, k) => {
+      const removed = lines.slice(c.first, c.last + 1);
+      out.push(...renderChangedSide("-", removed, c.added), ...renderChangedSide("+", c.added, removed));
+      const next = cluster[k + 1];
+      if (next) for (let i = c.last + 1; i < next.first; i++) out.push(contextLine(i));
+    });
+    for (let i = tail.last + 1; i <= Math.min(lines.length - 1, tail.last + context); i++) out.push(contextLine(i));
     return out.join("\n");
   });
 }
@@ -238,11 +310,16 @@ export async function replaceInNoteImpl(input: ReplaceInNoteInput, deps: WriteNo
   if (!analysis.ok) return analysis;
   const path = analysis.path;
 
-  let failure: Extract<ReplaceInNotePlan, { ok: false }> | undefined;
+  const unsavedError = `"${path}" has unsaved changes in an open editor. Save or discard them, then try again.`;
+  let failure: { reason: ReplaceInNoteFailureReason; error: string; found?: number } | undefined;
   let count = 0;
   const r = await processFileImpl(
     path,
     (data) => {
+      if (editorBufferDiffers(path, data, deps.workspace)) {
+        failure = { reason: "unsaved_changes", error: unsavedError };
+        throw new ProcessAbort(unsavedError);
+      }
       const plan = planReplaceInNote(data, input, path);
       if (!plan.ok) {
         failure = plan;
@@ -253,7 +330,14 @@ export async function replaceInNoteImpl(input: ReplaceInNoteInput, deps: WriteNo
     },
     deps,
   );
-  if (failure) return { ok: false, reason: failure.reason, error: failure.error, path, found: failure.found };
-  if (!r.ok) return { ok: false, reason: "write_failed", error: r.error, path };
+  if (failure) {
+    return { ok: false, reason: failure.reason, error: failure.error, path, ...(failure.found !== undefined ? { found: failure.found } : {}) };
+  }
+  if (!r.ok) {
+    const unsaved = /has unsaved changes in an open editor/.test(r.error);
+    return unsaved
+      ? { ok: false, reason: "unsaved_changes", error: unsavedError, path }
+      : { ok: false, reason: "write_failed", error: r.error, path };
+  }
   return { ok: true, path, replacements: count, ...(r.changed ? { undoId: r.undoId } : {}), undoSurface: "journal" };
 }

@@ -60,9 +60,9 @@ export const PREAMBLE_PLACEHOLDERS = {
  * conventions block. The preamble is still constant per vault (no per-file
  * content), and is sent once per session, so the bound is generous and the
  * worst-case stays bounded regardless of vault contents.
- * Raised to 10 KB for the vault-writes hard rule and the three batch tools
- * (`update_tasks`, `move_note`, `bulk_edit`) in the inventory; both are
- * constant text, so the bound still holds for every vault.
+ * Raised to 10 KB for the vault-writes hard rule, the batch tools
+ * (`update_tasks`, `move_note`, `bulk_edit`), `replace_in_note` and its
+ * guidance; all constant text, so the bound still holds for every vault.
  */
 export const MAX_DEFAULT_PREAMBLE_BYTES = 10 * 1024;
 
@@ -106,7 +106,7 @@ export const AUTHORING_CONVENTIONS_BLOCK =
   "- **Editing tasks:** to change tasks (mark done, add a tag, reschedule, etc.), call `find_tasks` first to enumerate candidates, then pass back each result's `path`, `line`, AND `expectedRawLine` for safe re-anchoring. Use `update_task` for a single task; when several tasks get the same change, make ONE `update_tasks` call with all of them instead of one call per task. Status values are `todo`, `in-progress`, `done`, `cancelled`. Setting status to `done` or `cancelled` auto-stamps today's date. Dates must be strict `YYYY-MM-DD`; pass `null` to clear.\n" +
   "- **Moving and renaming:** use `move_note` (one call can move or rename several notes or folders); Obsidian then updates links to them. Shell moves leave those links broken.\n" +
   "- **Changing a note:** for a change inside a note, use `replace_in_note` (one targeted edit). Use a full replace (`edit_note` with mode `replace`) only when rewriting the whole note on purpose, and always pass the complete new content.\n" +
-  "- **Repeated text changes:** for the same find/replace across several notes, make one `bulk_edit` call instead of many `edit_note` calls.";
+  "- **Repeated text changes:** for the same find/replace across several notes, make one `bulk_edit` call instead of one `replace_in_note` call per note.";
 
 /**
  * Marker line that introduces the preamble in the first user message.

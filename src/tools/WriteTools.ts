@@ -162,6 +162,15 @@ export async function hasUnsavedEditorChanges(
   diskContent: string,
   workspace: WorkspaceForWrites | undefined,
 ): Promise<boolean> {
+  return editorBufferDiffers(vaultRel, diskContent, workspace);
+}
+
+/** Synchronous form of hasUnsavedEditorChanges, usable inside a Vault.process callback. */
+export function editorBufferDiffers(
+  vaultRel: string,
+  diskContent: string,
+  workspace: WorkspaceForWrites | undefined,
+): boolean {
   if (!workspace?.getLeavesOfType) return false;
   const leaves = workspace.getLeavesOfType("markdown") ?? [];
   for (const leaf of leaves) {

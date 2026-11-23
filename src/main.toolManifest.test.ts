@@ -5,7 +5,7 @@ import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
-import { ALL_VAULT_TOOL_ENTRIES, type VaultToolEntry } from "./domain/vaultToolManifest";
+import { ALL_VAULT_TOOL_ENTRIES, V01_RAW_FS_TOOL_NAMES, type VaultToolEntry } from "./domain/vaultToolManifest";
 import { assemblePreamble } from "./domain/PreambleAssembler";
 
 interface RegisteredTool {
@@ -54,6 +54,7 @@ function hintTokens(hint: string): string[] {
   for (const m of hint.matchAll(/`([^`]+)`/g)) tokens.push(...(m[1].match(IDENT) ?? []));
   for (const m of hint.matchAll(/(?<![A-Za-z0-9])'([A-Za-z_][A-Za-z0-9_-]*)'(?![A-Za-z0-9])/g)) tokens.push(m[1]);
   for (const m of hint.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g)) tokens.push(m[0]);
+  for (const m of hint.matchAll(/\b[a-z]+[A-Z][A-Za-z0-9]*\b/g)) tokens.push(m[0]);
   return [...new Set(tokens)];
 }
 
@@ -106,16 +107,18 @@ describe("vault tool manifest matches the registered tools", () => {
     expect(missing).toEqual([]);
   });
 
-  test("the preamble only names tools that exist", () => {
+  test.each([false, true])("the preamble only names tools that are offered (excludeRawFs=%s)", (excludeRawFs) => {
     const preamble = assemblePreamble({
       mode: "default",
       vaultRootAbsPath: "/vault",
       timezone: "UTC",
       todayInTimezone: "2026-01-01",
+      excludeRawFs,
     });
-    const named = [...preamble.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map((m) => m[1]);
+    const offered = new Set([...toolNames].filter((n) => !excludeRawFs || !V01_RAW_FS_TOOL_NAMES.includes(n)));
+    const named = [...preamble.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g)].map((m) => m[0]);
     expect(named.length).toBeGreaterThan(0);
-    expect(named.filter((n) => !toolNames.has(n))).toEqual([]);
+    expect([...new Set(named.filter((n) => !offered.has(n)))]).toEqual([]);
   });
 
   test("the checker rejects a hint naming a mode the schema lacks", () => {
@@ -123,6 +126,7 @@ describe("vault tool manifest matches the registered tools", () => {
     expect(unbackedHintTokens({ hint: "Modes: `append`, 'cursor'." }, edit, toolNames)).toEqual(["cursor"]);
     expect(unbackedHintTokens({ hint: "Prefer `read_note`." }, edit, toolNames)).toEqual(["read_note"]);
     expect(unbackedHintTokens({ hint: "Then call read_note." }, edit, toolNames)).toEqual(["read_note"]);
+    expect(unbackedHintTokens({ hint: "Pass modifiedSince." }, edit, toolNames)).toEqual(["modifiedSince"]);
     expect(unbackedHintTokens({ hint: "Obsidian's notes, today's date." }, edit, toolNames)).toEqual([]);
   });
 });

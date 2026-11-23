@@ -115,7 +115,7 @@ export function formatBulkEditPreview(analysis: Extract<BulkEditAnalysis, { ok: 
 }
 
 export function formatReplaceInNotePreview(content: string, input: Pick<ReplaceInNoteInput, "oldText" | "newText">): string {
-  return boundPreview(formatReplaceDiffHunks(content, input.oldText, input.newText));
+  return boundPreview(formatReplaceDiffHunks(content, input.oldText, input.newText).flatMap((hunk) => hunk.split("\n")));
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -201,8 +201,9 @@ export async function describeVaultBatchApproval(
     let input: ReplaceInNoteInput;
     try {
       input = parseReplaceInNoteArgs(args);
-    } catch {
-      return undefined;
+    } catch (e) {
+      const path = typeof asRecord(args).path === "string" ? (asRecord(args).path as string) : "(no path)";
+      return { summary: `replace_in_note: ${path} — will fail (invalid_args)`, detail: (e as Error).message };
     }
     const analysis = await analyzeReplaceInNote(input, deps);
     if (!analysis.ok) {

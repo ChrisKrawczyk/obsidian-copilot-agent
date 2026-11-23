@@ -38,13 +38,15 @@ Full-text search across vault markdown. **New in v0.10:** an explicit
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `query` | string | The pattern to match. Required. |
-| `mode` | `"substring" \| "regex" \| "fuzzy"` | Optional. Defaults to `substring` (the v0.9 behavior — literal, case-insensitive). |
+| `mode` | `"substring" \| "regex" \| "simple" \| "fuzzy"` | Optional. Defaults to `substring` (the v0.9 behavior — literal, case-insensitive). |
 | `limit` | number | Maximum results. Defaults to a reasonable cap. |
 
 - `substring`: byte-for-byte compatible with v0.9. Case-insensitive
   literal match. Use when you know the phrase you're looking for.
 - `regex`: JavaScript regular expression. Invalid patterns are reported
   as `invalid-regex`, not thrown.
+- `simple`: Obsidian's `prepareSimpleSearch`. Every whitespace-separated
+  word must appear; results are ranked.
 - `fuzzy`: Obsidian's own `prepareFuzzySearch` scorer, same ranking as
   the built-in Quick Switcher / global search.
 
@@ -130,13 +132,13 @@ filters in a single call.
 |-----------|------|-------------|
 | `tag` | string | Match notes carrying this tag (`#` optional). |
 | `folder` | string | Vault-relative folder prefix. Matches notes at any depth. |
-| `modifiedSince` | number | Unix milliseconds. Match notes with mtime ≥ this value. |
+| `modifiedSinceMs` | number | Unix milliseconds. Match notes with mtime ≥ this value. |
 | `text` | string | Text pattern. Delegates to `search_content` semantics. |
-| `mode` | `"substring" \| "regex" \| "fuzzy"` | Mode for `text`. Same values as `search_content`. |
+| `mode` | `"substring" \| "simple" \| "fuzzy"` | Mode for `text`. Same meanings as in `search_content`; no `regex`. |
 | `limit` | number | Maximum results. Capped at 100 by the tool. |
 
 **Short-circuit:** when structural filters (`tag`, `folder`,
-`modifiedSince`) exclude every note, `search_vault` returns immediately
+`modifiedSinceMs`) exclude every note, `search_vault` returns immediately
 **without reading any file bodies**. This makes it cheap to ask
 questions like "any notes tagged `#draft` in `Projects/` modified this
 week?" — if the answer is no, the tool never opens a file.
@@ -222,6 +224,8 @@ see the `CHANGELOG` v0.10.2 entry. In short: append/prepend and the
 task tools are now safe under parallel writes to the same note;
 `edit_note` in `replace` mode remains last-writer-wins by design.
 
+For one targeted edit inside a note, `replace_in_note` replaces an exact
+piece of text and fails unless it matches the expected number of times.
 For many changes at once, the batch write tools `update_tasks`,
 `move_note`, and `bulk_edit` each take one approval and create one Undo
 entry. See [Vault changes go through vault tools](../README.md#vault-changes-go-through-vault-tools).

@@ -129,7 +129,15 @@ describe("planReplaceInNote", () => {
     expect(r.reason).toBe("count_mismatch");
     expect(r.found).toBe(2);
     expect(r.error).toMatch(/^Found 2 matches of oldText in "n\.md", expected 1\./);
-    expect(r.error).toContain("expectedOccurrences: 2");
+    expect(r.error).toContain("Pass expectedOccurrences: 2 only if every match should change");
+  });
+  test("reports the true count when it exceeds the limit", () => {
+    const n = MAX_REPLACE_IN_NOTE_OCCURRENCES + 500;
+    const r = planReplaceInNote("a ".repeat(n), input("a", "b"));
+    expect(r).toMatchObject({ ok: false, reason: "count_mismatch", found: n });
+    if (r.ok) return;
+    expect(r.error).toContain(`Found ${n} matches`);
+    expect(r.error).not.toContain("Pass expectedOccurrences");
   });
   test("replaces every match when the count equals expectedOccurrences", () => {
     expect(planReplaceInNote("a b a b a", input("a", "x", { expectedOccurrences: 3 }))).toMatchObject({
@@ -185,16 +193,36 @@ describe("formatReplaceDiffHunks", () => {
     const hunks = formatReplaceDiffHunks(content, "a", "b", 1);
     expect(hunks).toEqual(["@@ line 1 @@\n- a a\n+ b b\n  1", "@@ line 8 @@\n  6\n- a\n+ b"]);
   });
-  test("clips long lines and drops trailing CR", () => {
-    const [hunk] = formatReplaceDiffHunks(`${"z".repeat(300)} OLD\r\nnext`, "OLD", "NEW", 1);
+  test("clips long lines around the change and drops trailing CR", () => {
+    const [hunk] = formatReplaceDiffHunks(`${"z".repeat(300)} OLD ${"w".repeat(300)}\r\nnext`, "OLD", "NEW", 1);
     const lines = hunk.split("\n");
-    expect(lines[1].length).toBeLessThanOrEqual(202);
-    expect(lines[1].endsWith("…")).toBe(true);
+    expect(lines[1]).toMatch(/^- …z+ OLD w+…$/);
+    expect(lines[2]).toMatch(/^\+ …z+ NEW w+…$/);
+    expect(lines[1].length).toBeLessThanOrEqual(203);
     expect(lines[3]).toBe("  next");
+    const [start] = formatReplaceDiffHunks(`OLD ${"w".repeat(300)}`, "OLD", "NEW", 0);
+    expect(start.split("\n")[1]).toMatch(/^- OLD w+…$/);
   });
   test("deleting a whole line shows only the removed line", () => {
     expect(formatReplaceDiffHunks("x\nline\ny", "line\n", "", 1)).toEqual(["@@ line 2 @@\n  x\n- line\n  y"]);
-    expect(formatReplaceDiffHunks("x\nline\n", "line\n", "", 1)).toEqual(["@@ line 2 @@\n  x\n- line\n  "]);
+    expect(formatReplaceDiffHunks("x\nline\n", "line\n", "", 1)).toEqual(["@@ line 2 @@\n  x\n- line"]);
+  });
+  test("makes line-ending-only changes visible", () => {
+    expect(formatReplaceDiffHunks("a\r\nb\r\n", "a\r\n", "a\n", 0)).toEqual(["@@ line 1 @@\n- a␍\n+ a"]);
+    expect(formatReplaceDiffHunks("x\na\n", "a\n", "a", 1)).toEqual([
+      "@@ line 2 @@\n  x\n- a\n+ a\n\\ No newline at end of file",
+    ]);
+  });
+  test("merges matches whose context would overlap, so no replaced line shows as unchanged", () => {
+    expect(formatReplaceDiffHunks("a\n1\na\n2\na", "a", "b", 2)).toEqual([
+      "@@ line 1 @@\n- a\n+ b\n  1\n- a\n+ b\n  2\n- a\n+ b",
+    ]);
+  });
+  test("caps very long changes per side", () => {
+    const block = Array.from({ length: 40 }, (_, i) => `r${i}`).join("\n");
+    const [hunk] = formatReplaceDiffHunks(block, block, block.replace(/r/g, "s"), 0);
+    expect(hunk).toContain("- … 28 more lines");
+    expect(hunk).toContain("+ … 28 more lines");
   });
   test("inserting a whole line shows only the added line", () => {
     expect(formatReplaceDiffHunks("x\ny", "x\n", "x\nnew\n", 1)).toEqual(["@@ line 2 @@\n  x\n+ new\n  y"]);
@@ -235,6 +263,14 @@ describe("replaceInNoteImpl", () => {
     const deps = makeDeps(world);
     expect(await replaceInNoteImpl(input("a", "b"), deps)).toMatchObject({ ok: false, reason: "unsaved_changes" });
     expect(world.files.get("n.md")!.content).toBe("a");
+  });
+  test("refuses when the editor gets unsaved changes just before the atomic write", async () => {
+    const world = makeWorld({ "n.md": "one target" });
+    world.beforeProcess = (p) => world.dirty.set(p, "one target, typed");
+    const deps = makeDeps(world);
+    expect(await replaceInNoteImpl(input("target", "hit"), deps)).toMatchObject({ ok: false, reason: "unsaved_changes" });
+    expect(world.files.get("n.md")!.content).toBe("one target");
+    expect(deps.entries).toHaveLength(0);
   });
   test("refuses missing files, non-notes, escaping paths and bad args", async () => {
     const world = makeWorld({ "img.png": "a" });
