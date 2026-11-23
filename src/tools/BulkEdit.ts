@@ -9,7 +9,7 @@ export const MAX_BULK_EDIT_REPLACEMENTS = 5000;
 export const MAX_BULK_EDIT_SAMPLES = 3;
 const MAX_SAMPLE_CHARS = 160;
 const SAMPLE_LEAD_CHARS = 40;
-const NOTE_EXTENSIONS = [".md", ".txt"];
+export const NOTE_EXTENSIONS = [".md", ".txt"];
 
 export interface BulkEditInput {
   paths: string[];

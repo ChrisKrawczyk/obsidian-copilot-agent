@@ -1,4 +1,4 @@
-import { compileFind, MAX_BULK_EDIT_REPLACEMENTS, replaceAllCounted } from "./BulkEdit";
+import { compileFind, MAX_BULK_EDIT_REPLACEMENTS, NOTE_EXTENSIONS, replaceAllCounted } from "./BulkEdit";
 import { loadNoteForBatch } from "./BatchWrite";
 import { ProcessAbort, processFileImpl } from "./WriteTools";
 import type { WriteNoteToolsDeps } from "./WriteNoteTools";
@@ -7,7 +7,6 @@ import { resolveVaultPath, toVaultRelative, VaultPathError } from "./VaultPath";
 export const MAX_REPLACE_IN_NOTE_OCCURRENCES = MAX_BULK_EDIT_REPLACEMENTS;
 export const REPLACE_DIFF_CONTEXT_LINES = 2;
 const MAX_DIFF_LINE_CHARS = 200;
-const NOTE_EXTENSIONS = [".md", ".txt"];
 
 export interface ReplaceInNoteInput {
   path: string;
@@ -134,7 +133,7 @@ export function formatReplaceDiffHunks(
   const groups: Array<{ first: number; last: number; matches: number[] }> = [];
   for (const off of offsets) {
     const first = lineOf(off);
-    const last = lineOf(off + oldText.length - 1);
+    const last = lineOf(off + oldText.length);
     const g = groups[groups.length - 1];
     if (g && first <= g.last) {
       g.last = Math.max(g.last, last);
@@ -154,11 +153,22 @@ export function formatReplaceDiffHunks(
       cursor = off + oldText.length;
     }
     after += content.slice(cursor, segEnd);
-    const out = [`@@ line ${g.first + 1} @@`];
-    for (let i = Math.max(0, g.first - context); i < g.first; i++) out.push(`  ${clipLine(lines[i])}`);
-    for (let i = g.first; i <= g.last; i++) out.push(`- ${clipLine(lines[i])}`);
-    for (const l of after.split("\n")) out.push(`+ ${clipLine(l)}`);
-    for (let i = g.last + 1; i <= Math.min(lines.length - 1, g.last + context); i++) out.push(`  ${clipLine(lines[i])}`);
+    const added = after.split("\n");
+    let first = g.first;
+    let last = g.last;
+    while (first <= last && added.length > 0 && lines[first] === added[0]) {
+      first++;
+      added.shift();
+    }
+    while (first <= last && added.length > 0 && lines[last] === added[added.length - 1]) {
+      last--;
+      added.pop();
+    }
+    const out = [`@@ line ${first + 1} @@`];
+    for (let i = Math.max(0, first - context); i < first; i++) out.push(`  ${clipLine(lines[i])}`);
+    for (let i = first; i <= last; i++) out.push(`- ${clipLine(lines[i])}`);
+    for (const l of added) out.push(`+ ${clipLine(l)}`);
+    for (let i = last + 1; i <= Math.min(lines.length - 1, last + context); i++) out.push(`  ${clipLine(lines[i])}`);
     return out.join("\n");
   });
 }

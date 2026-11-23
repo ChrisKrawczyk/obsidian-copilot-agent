@@ -192,6 +192,16 @@ describe("formatReplaceDiffHunks", () => {
     expect(lines[1].endsWith("…")).toBe(true);
     expect(lines[3]).toBe("  next");
   });
+  test("deleting a whole line shows only the removed line", () => {
+    expect(formatReplaceDiffHunks("x\nline\ny", "line\n", "", 1)).toEqual(["@@ line 2 @@\n  x\n- line\n  y"]);
+    expect(formatReplaceDiffHunks("x\nline\n", "line\n", "", 1)).toEqual(["@@ line 2 @@\n  x\n- line\n  "]);
+  });
+  test("inserting a whole line shows only the added line", () => {
+    expect(formatReplaceDiffHunks("x\ny", "x\n", "x\nnew\n", 1)).toEqual(["@@ line 2 @@\n  x\n+ new\n  y"]);
+  });
+  test("joining lines shows both removed lines", () => {
+    expect(formatReplaceDiffHunks("a\nb\nc", "a\n", "a ", 1)).toEqual(["@@ line 1 @@\n- a\n- b\n+ a b\n  c"]);
+  });
   test("no matches means no hunks", () => {
     expect(formatReplaceDiffHunks("abc", "x", "y")).toEqual([]);
   });
