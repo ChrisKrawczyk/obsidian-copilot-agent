@@ -1,5 +1,6 @@
 import esbuild from "esbuild";
 import { builtinModules } from "node:module";
+import { rendererSafeAsyncHooksPlugin } from "./scripts/rendererSafeAsyncHooksPlugin.mjs";
 
 const isProduction = process.argv.includes("production");
 
@@ -14,6 +15,7 @@ const ctx = await esbuild.context({
   minify: isProduction,
   treeShaking: true,
   logLevel: "info",
+  plugins: [rendererSafeAsyncHooksPlugin],
   external: [
     "obsidian",
     "electron",
