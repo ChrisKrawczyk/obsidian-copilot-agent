@@ -1,8 +1,6 @@
 // Pure domain types. No Obsidian or SDK imports. Safe to consume from
 // tests, UI, or adapter layers.
 
-import type { VaultChange } from "./VaultChangeDetector";
-
 export type Role = "user" | "assistant" | "system";
 
 /**
@@ -69,13 +67,6 @@ export interface ToolCall {
    * reverted successfully. The Undo button becomes inert.
    */
   undone?: boolean;
-  /**
-   * Vault files that changed outside the vault tools while this
-   * built-in or MCP call ran (or just after). Drives the inline warning.
-   */
-  vaultChanges?: VaultChange[];
-  /** Further changed paths not listed in `vaultChanges`. */
-  vaultChangesOverflow?: number;
 }
 
 export interface Message {

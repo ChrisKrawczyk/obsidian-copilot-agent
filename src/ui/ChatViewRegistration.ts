@@ -34,7 +34,6 @@ interface ChatViewRegistrationDeps {
   readinessGateBus?: ChatViewDeps["readinessGateBus"];
   snapshotPendingMcp?: ChatViewDeps["snapshotPendingMcp"];
   mcpServerName?: ChatViewDeps["mcpServerName"];
-  vaultChangeDetector?: ChatViewDeps["vaultChangeDetector"];
 }
 
 export function registerChatView(

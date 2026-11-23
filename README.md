@@ -47,8 +47,6 @@ Three batch tools make the vault-tool path the easy one. Each asks for approval 
 
 Each tool checks every target first. If any target fails, nothing is written. If a write fails partway, the earlier writes are rolled back.
 
-If vault files change while a shell or MCP tool is running, and a vault tool didn't make the change, the tool call shows a ⚠ warning listing what changed. Your own edits in Obsidian outside those moments aren't reported. Edits from other plugins during that time may be. The warning is only a notice: nothing is blocked, and it's saved with the conversation.
-
 ## What's new in v0.10
 
 - **Agent-native vault navigation.** Six new / upgraded read-only capabilities let the agent search, resolve, inspect, and traverse notes on its own — a lower-effort substitute for the local-embedding path explored (and rejected) in proposal `#0004`. All are auto-approved (no permission prompt).

@@ -32,9 +32,6 @@ import { ObsidianApi } from "./tools/ObsidianApi";
 import { createReadNoteTools } from "./tools/ReadNoteTools";
 import { createWriteNoteTools } from "./tools/WriteNoteTools";
 import { moveVaultItem, type MoveNoteFileManager, type MoveNoteVault } from "./tools/MoveNote";
-import { wrapToolsWithSelfWriteSpan } from "./tools/selfWriteSpan";
-import { VaultChangeDetector } from "./domain/VaultChangeDetector";
-import { ALL_VAULT_TOOL_ENTRIES } from "./domain/vaultToolManifest";
 import { describeVaultBatchApproval, extractBatchVaultPaths, type LinkIndex } from "./tools/approvalPreview";
 import { createSearchTools } from "./tools/SearchTools";
 import { createNavigateTools } from "./tools/NavigateTools";
@@ -66,12 +63,6 @@ import {
   makeRuntimeJournal,
   type ConversationRuntimeFactory,
 } from "./domain/ConversationRuntime";
-
-/** Obsidian autosaves about 2s after typing stops; allow some slack. */
-const USER_EDIT_SAVE_WINDOW_MS = 5000;
-const READ_ONLY_VAULT_TOOL_NAMES = new Set(
-  ALL_VAULT_TOOL_ENTRIES.filter((e) => e.readOnly).map((e) => e.name),
-);
 
 export interface McpLifecycleController {
   enableAllConfigured: () => Promise<void>;
@@ -647,49 +638,6 @@ export default class CopilotAgentPlugin extends Plugin {
     // that has actually been built. Lazily-uninstantiated runtimes
     // start with `currentToken` at construction time, so they don't
     // need broadcasts.
-    const vaultChangeDetector = new VaultChangeDetector({
-      configDir: this.app.vault.configDir,
-    });
-    let lastUserEdit: { path: string; at: number } | null = null;
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (_editor, info) => {
-        const path = info.file?.path;
-        if (path) lastUserEdit = { path, at: Date.now() };
-      }),
-    );
-    const focusedNotePath = (): string[] => {
-      const paths: string[] = [];
-      const active = this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path;
-      if (active) paths.push(active);
-      if (lastUserEdit && Date.now() - lastUserEdit.at < USER_EDIT_SAVE_WINDOW_MS) {
-        paths.push(lastUserEdit.path);
-      }
-      return paths;
-    };
-    this.registerEvent(
-      this.app.vault.on("create", (file) => {
-        vaultChangeDetector.observe({ type: "create", path: file.path }, focusedNotePath());
-      }),
-    );
-    this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        vaultChangeDetector.observe({ type: "modify", path: file.path }, focusedNotePath());
-      }),
-    );
-    this.registerEvent(
-      this.app.vault.on("delete", (file) => {
-        vaultChangeDetector.observe({ type: "delete", path: file.path }, focusedNotePath());
-      }),
-    );
-    this.registerEvent(
-      this.app.vault.on("rename", (file, oldPath) => {
-        vaultChangeDetector.observe(
-          { type: "rename", path: file.path, oldPath },
-          focusedNotePath(),
-        );
-      }),
-    );
-
     // The factory that ConversationManager uses to materialize a
     // runtime on first activation. Captures all shared deps via
     // closure; binds tools to the per-runtime journal.
@@ -758,7 +706,7 @@ export default class CopilotAgentPlugin extends Plugin {
         fileManager: this.app.fileManager as unknown as MoveNoteFileManager,
         configDir: this.app.vault.configDir,
       });
-      const vaultTools = wrapToolsWithSelfWriteSpan(filterRawFsToolsIfGated(
+      const vaultTools = filterRawFsToolsIfGated(
         [
           ...(readTools as unknown as import("./sdk/AgentSession").SdkTool[]),
           ...(writeTools as unknown as import("./sdk/AgentSession").SdkTool[]),
@@ -768,7 +716,7 @@ export default class CopilotAgentPlugin extends Plugin {
           ...(writeNoteTools as unknown as import("./sdk/AgentSession").SdkTool[]),
         ],
         exposeRawFsToolsAtStartup,
-      ), vaultChangeDetector, (name) => READ_ONLY_VAULT_TOOL_NAMES.has(name));
+      );
       const mcpSnapshot = () =>
         buildMcpToolRegistrySnapshot({
           inventory: mcpManager.inventorySnapshot(),
@@ -1184,7 +1132,6 @@ export default class CopilotAgentPlugin extends Plugin {
 
     registerChatView(this, {
       manager: conversationManager,
-      vaultChangeDetector,
       auth: controller,
       // SINGLE-2 / FR-015: Undo suppression must match the runtime's
       // actual tool surface, which was frozen at plugin onload via

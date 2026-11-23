@@ -36,7 +36,6 @@ import {
   type PersistedUndoEntry,
 } from "./PersistedShape";
 import type { UndoBatchItem } from "../domain/UndoJournal";
-import { MAX_LISTED_VAULT_CHANGES } from "../domain/VaultChangeDetector";
 
 export interface MigrateResult {
   state: PersistedConversationsState;
@@ -304,46 +303,12 @@ function validateMessage(raw: unknown): PersistedMessage | null {
           typeof t.resultContent === "string" ? t.resultContent : undefined,
         undoId: typeof t.undoId === "string" ? t.undoId : undefined,
         undone: t.undone === true ? true : undefined,
-        ...validateVaultChanges(t.vaultChanges, t.vaultChangesOverflow),
       });
     }
     out.toolCalls = calls;
   }
 
   return out;
-}
-
-const VAULT_CHANGE_TYPES = new Set(["created", "modified", "deleted", "renamed"]);
-
-function validateVaultChanges(
-  raw: unknown,
-  rawOverflow: unknown,
-): Pick<NonNullable<PersistedMessage["toolCalls"]>[number], "vaultChanges" | "vaultChangesOverflow"> {
-  if (!Array.isArray(raw)) return {};
-  const changes: NonNullable<NonNullable<PersistedMessage["toolCalls"]>[number]["vaultChanges"]> = [];
-  let dropped = 0;
-  for (const c of raw) {
-    if (!c || typeof c !== "object") continue;
-    const r = c as Record<string, unknown>;
-    if (typeof r.type !== "string" || !VAULT_CHANGE_TYPES.has(r.type)) continue;
-    if (typeof r.path !== "string" || r.path.length === 0) continue;
-    if (changes.length >= MAX_LISTED_VAULT_CHANGES) {
-      dropped++;
-      continue;
-    }
-    changes.push({
-      type: r.type as "created" | "modified" | "deleted" | "renamed",
-      path: r.path,
-      ...(r.type === "renamed" && typeof r.oldPath === "string" ? { oldPath: r.oldPath } : {}),
-    });
-  }
-  if (changes.length === 0) return {};
-  const base =
-    typeof rawOverflow === "number" && Number.isFinite(rawOverflow) && rawOverflow > 0
-      ? Math.floor(rawOverflow)
-      : 0;
-  const overflow = base + dropped;
-  return overflow > 0 ? { vaultChanges: changes, vaultChangesOverflow: overflow } : { vaultChanges: changes };
 }
 
 function validateUndoEntry(raw: unknown): PersistedUndoEntry | null {

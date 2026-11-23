@@ -417,73 +417,43 @@ describe("migrate — v0.4 modelId round-trip", () => {
     });
   });
 
-  describe("tool-call vault changes", () => {
-    function withCall(call: Record<string, unknown>) {
-      return {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversations: [
-          {
-            id: "c1",
-            name: "x",
-            createdAt: 1,
-            lastActiveAt: 1,
-            undoEntries: [],
-            messages: [
-              {
-                id: "m1",
-                role: "assistant",
-                content: "",
-                status: "complete",
-                createdAt: 1,
-                toolCalls: [{ id: "t1", kind: "tool", source: "builtin", outcome: "completed", ...call }],
-              },
-            ],
-          },
-        ],
-        activeConversationId: null,
-      };
-    }
-    const callOf = (r: ReturnType<typeof migrate>) => r.state.conversations[0].messages[0].toolCalls![0];
-
-    it("round-trips well-formed changes and overflow", () => {
-      const changes = [
-        { type: "modified", path: "a.md" },
-        { type: "renamed", path: "b/c.md", oldPath: "c.md" },
-      ];
-      const r = migrate(withCall({ vaultChanges: changes, vaultChangesOverflow: 3 }));
-      expect(r.recovered).toBe(false);
-      expect(callOf(r).vaultChanges).toEqual(changes);
-      expect(callOf(r).vaultChangesOverflow).toBe(3);
-    });
-
-    it("drops malformed entries and keeps the call", () => {
-      const r = migrate(
-        withCall({
-          vaultChanges: [
-            { type: "exploded", path: "a.md" },
-            { type: "modified" },
-            null,
-            { type: "deleted", path: "z.md", oldPath: "ignored.md" },
+  it("drops the retired tool-call vaultChanges fields from earlier builds", () => {
+    const r = migrate({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversations: [
+        {
+          id: "c1",
+          name: "x",
+          createdAt: 1,
+          lastActiveAt: 1,
+          undoEntries: [],
+          messages: [
+            {
+              id: "m1",
+              role: "assistant",
+              content: "",
+              status: "complete",
+              createdAt: 1,
+              toolCalls: [
+                {
+                  id: "t1",
+                  kind: "tool",
+                  source: "builtin",
+                  outcome: "completed",
+                  vaultChanges: [{ type: "modified", path: "a.md" }],
+                  vaultChangesOverflow: 3,
+                },
+              ],
+            },
           ],
-          vaultChangesOverflow: -4,
-        }),
-      );
-      expect(r.recovered).toBe(false);
-      expect(callOf(r).vaultChanges).toEqual([{ type: "deleted", path: "z.md" }]);
-      expect(callOf(r).vaultChangesOverflow).toBeUndefined();
+        },
+      ],
+      activeConversationId: null,
     });
-
-    it("omits the fields when nothing valid remains", () => {
-      const r = migrate(withCall({ vaultChanges: "nope", vaultChangesOverflow: 2 }));
-      expect("vaultChanges" in callOf(r)).toBe(false);
-      expect("vaultChangesOverflow" in callOf(r)).toBe(false);
-    });
-
-    it("caps the list and counts the rest as overflow", () => {
-      const many = Array.from({ length: 25 }, (_, i) => ({ type: "created", path: `n${i}.md` }));
-      const r = migrate(withCall({ vaultChanges: many, vaultChangesOverflow: 1 }));
-      expect(callOf(r).vaultChanges).toHaveLength(20);
-      expect(callOf(r).vaultChangesOverflow).toBe(6);
-    });
+    expect(r.recovered).toBe(false);
+    const call = r.state.conversations[0].messages[0].toolCalls![0];
+    expect(call).toMatchObject({ id: "t1", outcome: "completed" });
+    expect("vaultChanges" in call).toBe(false);
+    expect("vaultChangesOverflow" in call).toBe(false);
   });
 });

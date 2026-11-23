@@ -117,12 +117,6 @@ export function hydrateChatState(messages?: PersistedMessage[]): ChatState {
       resultContent: tc.resultContent,
       undoId: tc.undoId,
       undone: tc.undone,
-      ...(tc.vaultChanges
-        ? {
-            vaultChanges: tc.vaultChanges.map((c) => ({ ...c })),
-            ...(tc.vaultChangesOverflow ? { vaultChangesOverflow: tc.vaultChangesOverflow } : {}),
-          }
-        : {}),
     })),
   }));
   return new ChatState(seeded);

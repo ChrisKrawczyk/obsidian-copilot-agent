@@ -45,21 +45,14 @@ unnecessary and less tempting.
   are modify, create, delete, or move. Undo checks every item for
   divergence before reverting any of them, and it persists across
   reloads like existing entries.
-- **Out-of-band change warning.** While a shell or MCP tool runs during
-  an agent turn, vault changes that the plugin's own tools didn't make
-  are listed as a non-blocking warning on that tool call. The window
-  stays open for 2 seconds after the tool finishes, and the warning
-  lists up to 20 changes. Excluded:
-  - the config folder;
-  - edits to the note in the focused editor, or to a note the user
-    typed in during the last 5 seconds;
-  - anything written while a vault tool or Undo runs.
+- **Out-of-band change warning (dropped).** An earlier iteration showed
+  a non-blocking warning when vault files changed while a shell or MCP
+  tool ran. It was removed before merge on purpose: shell and MCP calls
+  may legitimately be expected to change vault files, so flagging those
+  writes treats intended behaviour as suspect. The agent should prefer
+  the vault tools, but external writes are neither blocked nor flagged.
 
 ## Open questions
 
-- Should the out-of-band warning also be fed back to the model so it
-  can self-correct? Out of scope for now: the warning goes to the user
-  only.
-- Writes from other plugins (Linter, Templater, sync) during a shell
-  call are reported too. If that turns out to be noisy, a per-plugin
-  allowlist may be needed.
+- None open. Detecting or flagging external writes is out of scope; see
+  the dropped change warning above.
