@@ -220,6 +220,30 @@ describe("describeVaultBatchApproval", () => {
       await describeVaultBatchApproval("update_tasks", { targets, patch: { setStatus: "done" } }, deps({})),
     ).toBeUndefined();
   });
+  test("previews replace_in_note as a diff with context", async () => {
+    const note = "# T\n\n| Q | Sales |\n|---|---|\n| Q2 | 10 |\n| Q3 | 12 |\n| Q4 | 15 |\n\nEnd";
+    const d = await describeVaultBatchApproval(
+      "replace_in_note",
+      { path: "t.md", oldText: "| Q3 | 12 |", newText: "| Q3 | 14 |" },
+      deps({ "t.md": note }),
+    );
+    expect(d?.summary).toBe("replace_in_note: 1 replacement in t.md");
+    expect(d?.detail).toBe(
+      ["@@ line 6 @@", "  |---|---|", "  | Q2 | 10 |", "- | Q3 | 12 |", "+ | Q3 | 14 |", "  | Q4 | 15 |", "  "].join("\n"),
+    );
+  });
+  test("replace_in_note preview states why the call will fail", async () => {
+    const d = await describeVaultBatchApproval(
+      "replace_in_note",
+      { path: "t.md", oldText: "x", newText: "y" },
+      deps({ "t.md": "x x" }),
+    );
+    expect(d?.summary).toBe("replace_in_note: t.md — will fail (count_mismatch)");
+    expect(d?.detail).toMatch(/^Found 2 matches of oldText in "t.md", expected 1\./);
+    const missing = await describeVaultBatchApproval("replace_in_note", { path: "gone.md", oldText: "x", newText: "y" }, deps({}));
+    expect(missing?.summary).toBe("replace_in_note: gone.md — will fail (not_found)");
+    expect(await describeVaultBatchApproval("replace_in_note", { path: "t.md" }, deps({}))).toBeUndefined();
+  });
   test("returns undefined for tools without a preview", async () => {
     expect(await describeVaultBatchApproval("edit_note", {}, deps({}))).toBeUndefined();
   });

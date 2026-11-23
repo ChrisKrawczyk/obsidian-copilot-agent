@@ -117,6 +117,11 @@ export const WRITE_NOTE_TOOL_ENTRIES: readonly VaultToolEntry[] = [
     readOnly: false,
   },
   {
+    name: "replace_in_note",
+    hint: "One targeted literal edit inside one note (oldText → newText). Fails unless the match count equals expectedOccurrences (default 1). One approval, one Undo entry.",
+    readOnly: false,
+  },
+  {
     name: "open_note",
     hint: "Focus an existing note in the active workspace. Navigation only — no read/write.",
     readOnly: true,

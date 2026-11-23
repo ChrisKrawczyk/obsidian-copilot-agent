@@ -3,6 +3,12 @@ import { analyzeUpdateTasks, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksAnalysis 
 import { parseBulkEditArgs, parseMoveItems, parseTaskTargets, type WriteNoteToolsDeps } from "./WriteNoteTools";
 import { analyzeBulkEdit, MAX_BULK_EDIT_NOTES, MAX_BULK_EDIT_REPLACEMENTS, type BulkEditAnalysis, type BulkEditInput } from "./BulkEdit";
 import { analyzeMoveNote, type MoveNoteAnalysis, type MoveNoteVault } from "./MoveNote";
+import {
+  analyzeReplaceInNote,
+  formatReplaceDiffHunks,
+  parseReplaceInNoteArgs,
+  type ReplaceInNoteInput,
+} from "./ReplaceInNote";
 
 export const MAX_PREVIEW_CHARS = 4000;
 
@@ -108,6 +114,10 @@ export function formatBulkEditPreview(analysis: Extract<BulkEditAnalysis, { ok: 
   return lines.length > 0 ? `${boundPreview(lines, MAX_PREVIEW_CHARS - total.length - 1)}\n${total}` : total;
 }
 
+export function formatReplaceInNotePreview(content: string, input: Pick<ReplaceInNoteInput, "oldText" | "newText">): string {
+  return boundPreview(formatReplaceDiffHunks(content, input.oldText, input.newText));
+}
+
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
@@ -185,6 +195,25 @@ export async function describeVaultBatchApproval(
     return {
       summary: `bulk_edit: ${plural(analysis.totalReplacements, "replacement")} in ${plural(matched, "note")}`,
       detail: formatBulkEditPreview(analysis),
+    };
+  }
+  if (toolName === "replace_in_note") {
+    let input: ReplaceInNoteInput;
+    try {
+      input = parseReplaceInNoteArgs(args);
+    } catch {
+      return undefined;
+    }
+    const analysis = await analyzeReplaceInNote(input, deps);
+    if (!analysis.ok) {
+      return {
+        summary: `replace_in_note: ${analysis.path ?? input.path} — will fail (${analysis.reason})`,
+        detail: analysis.error,
+      };
+    }
+    return {
+      summary: `replace_in_note: ${plural(analysis.count, "replacement")} in ${analysis.path}`,
+      detail: formatReplaceInNotePreview(analysis.content, input),
     };
   }
   return undefined;

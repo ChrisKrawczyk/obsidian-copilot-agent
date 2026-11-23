@@ -606,6 +606,7 @@ export const VAULT_WRITE_TOOL_NAMES = [
   ...WRITE_TOOL_NAMES,
   "create_note",
   "edit_note",
+  "replace_in_note",
   "insert_into_active_note",
   "create_daily_note",
   "create_task",

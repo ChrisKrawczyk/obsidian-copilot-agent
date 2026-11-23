@@ -22,6 +22,7 @@ import { parseTaskPatch, updateTaskImpl, type UpdateTaskInput } from "./UpdateTa
 import { updateTasksImpl, MAX_UPDATE_TASKS_TARGETS, type UpdateTasksTarget } from "./UpdateTasks";
 import { bulkEditImpl, MAX_BULK_EDIT_NOTES, MAX_BULK_EDIT_REPLACEMENTS, type BulkEditInput } from "./BulkEdit";
 import { MAX_MOVE_NOTE_ITEMS, moveNoteImpl, type MoveNoteFileManager, type MoveNoteItem } from "./MoveNote";
+import { MAX_REPLACE_IN_NOTE_OCCURRENCES, parseReplaceInNoteArgs, replaceInNoteImpl } from "./ReplaceInNote";
 
 /**
  * Per-call dependencies for the Phase-4/5 vault-write tools.
@@ -1057,6 +1058,41 @@ export function createWriteNoteTools(deps: WriteNoteToolsDeps): Tool<unknown>[] 
         additionalProperties: false,
       },
       handler: async (args: unknown) => bulkEditImpl(parseBulkEditArgs(args), deps),
+    }),
+    defineTool("replace_in_note", {
+      description:
+        "Make ONE targeted edit inside ONE existing note: replace the exact " +
+        "text oldText with newText and leave the rest of the note as it is. " +
+        "Use this for changing a line, table row, heading or paragraph " +
+        "instead of rewriting the whole note. Literal, case-sensitive match " +
+        "(no regex); newText is inserted verbatim. Fails without writing if " +
+        "oldText is not found or the number of matches differs from " +
+        "expectedOccurrences (default 1); the error says how many matches " +
+        "were found, so add surrounding text to make oldText unique. Copy " +
+        "oldText exactly from a fresh read, including whitespace and line " +
+        "breaks. Only .md and .txt notes; refuses notes with unsaved editor " +
+        "changes. The approval shows a before/after diff. One approval and " +
+        "one Undo entry. For the same change across many notes use bulk_edit.",
+      parameters: {
+        type: "object",
+        required: ["path", "oldText", "newText"],
+        properties: {
+          path: { type: "string", description: "Vault-relative path of an existing .md or .txt note." },
+          oldText: {
+            type: "string",
+            description: "Exact text to replace. Must not be empty. Include enough context to match only the intended place.",
+          },
+          newText: { type: "string", description: "Replacement text. May be empty to delete oldText." },
+          expectedOccurrences: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_REPLACE_IN_NOTE_OCCURRENCES,
+            description: "How many times oldText must appear; every match is replaced. Default 1.",
+          },
+        },
+        additionalProperties: false,
+      },
+      handler: async (args: unknown) => replaceInNoteImpl(parseReplaceInNoteArgs(args), deps),
     }),
   ];
 }
